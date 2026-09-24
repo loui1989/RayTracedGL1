@@ -1583,6 +1583,13 @@ GLOBAL_UNIFORM_STRUCT = [
     # an entry the engine listed but whose light was not uploaded this frame.
     (TYPE_UINT32,       4,      "volumeShaftLights",    CONST[ "VOLUME_SHAFT_LIGHT_MAX" ] // 4),
 
+    # Doom64-RT: albedo filtering (RgDrawFrameTexturesParams::albedoFilterMode).
+    # x = mode (0 hardware sampler, 1 N64 three-point), y = the sampler's
+    # mipLodBias, which the shader must add to its own LOD and cancel from the
+    # explicit LOD it samples at. zw spare. A vec4, so it sits after the scalar
+    # run and cannot disturb it.
+    (TYPE_FLOAT32,      4,      "texFilterParams",      1),
+
     # for std140
     (TYPE_FLOAT32,     44,      "viewProjCubemap",              6),
     (TYPE_FLOAT32,     44,      "skyCubemapRotationTransform",  1),

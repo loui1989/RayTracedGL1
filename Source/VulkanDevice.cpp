@@ -419,6 +419,13 @@ void RTGL1::VulkanDevice::FillUniform( RTGL1::ShGlobalUniform* gu,
         gu->metallicRoughCut  = std::clamp( params.metallicRoughCut, 0.0f, 1.0f );
         gu->metallicRoughBand = std::clamp( params.metallicRoughBand, 0.0f, 1.0f );
         gu->parallaxMaxDepth       = std::max( params.heightMapDepth, 0.0f );
+
+        // The same bias TryChangeMipLodBias hands the sampler below: the
+        // three-point path picks its own mip and must cancel the sampler's.
+        gu->texFilterParams[ 0 ] = params.albedoFilterMode == 1 ? 1.0f : 0.0f;
+        gu->texFilterParams[ 1 ] = renderResolution.GetMipLodBias( params.mipLodBiasOffset );
+        gu->texFilterParams[ 2 ] = 0.0f;
+        gu->texFilterParams[ 3 ] = 0.0f;
     }
 
     // Dev Materials A/B — also force uniforms even if Override did not rewrite draw params.

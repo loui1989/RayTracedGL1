@@ -1137,6 +1137,14 @@ typedef struct RgDrawFrameTexturesParams
     // back for the same reason -- less specular means less for the denoiser to
     // resolve. Default: 1 (inert)
     float           worldPbr;
+    // Doom64-RT: how the ALBEDO of ray-traced surfaces is filtered.
+    // 0 = the hardware sampler (i.e. dynamicSamplerFilter: nearest or bilinear).
+    // 1 = N64-style three-point filtering: the texel quad is split along its
+    //     diagonal and the three nearest texels are blended, the look of the
+    //     original console. Done in the shader at a whole mip level, so pair it
+    //     with RG_SAMPLER_FILTER_NEAREST. Normal/ORM/emissive maps are unaffected.
+    // Default: 0
+    uint32_t        albedoFilterMode;
 } RgDrawFrameTexturesParams;
 
 // Can be linked after RgDrawFrameInfo.

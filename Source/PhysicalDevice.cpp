@@ -125,24 +125,29 @@ auto PhysicalDevice::GetMemoryTypeIndex( uint32_t memoryTypeBits, VkFlags requir
     }
 
 
-    // for each memory type available for this device
-    for( uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++ )
+    // The split above is a PREFERENCE, not a requirement. On a unified-memory
+    // GPU (Intel Arc iGPUs, e.g. the 140V) every memory type is DEVICE_LOCAL,
+    // so "host visible and not device-local" matches nothing and the device
+    // failed to start. Second pass: any type that has the required flags.
+    for( bool strict : { true, false } )
     {
-        // if type is available
-        if( ( memoryTypeBits & 1u ) == 1 )
+        // for each memory type available for this device
+        for( uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++ )
         {
-            VkMemoryPropertyFlags flags = memoryProperties.memoryTypes[ i ].propertyFlags;
-
-            bool                  isSuitable = ( flags & requirementsMask ) == requirementsMask;
-            bool                  isIgnored  = ( flags & flagsToIgnore ) == flagsToIgnore;
-
-            if( isSuitable && !isIgnored )
+            // if type is available
+            if( ( memoryTypeBits >> i ) & 1u )
             {
-                return i;
+                VkMemoryPropertyFlags flags = memoryProperties.memoryTypes[ i ].propertyFlags;
+
+                bool isSuitable = ( flags & requirementsMask ) == requirementsMask;
+                bool isIgnored  = strict && ( flags & flagsToIgnore ) == flagsToIgnore;
+
+                if( isSuitable && !isIgnored )
+                {
+                    return i;
+                }
             }
         }
-
-        memoryTypeBits >>= 1u;
     }
 
     debug::Error( "Can't find memory type for given memory property flags ({})", requirementsMask );

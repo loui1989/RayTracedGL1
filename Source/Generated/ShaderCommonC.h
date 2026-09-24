@@ -469,6 +469,7 @@ struct ShGlobalUniform
     float smokeAlbedoDensity[512];
     float smokeShape[512];
     uint32_t volumeShaftLights[64];
+    float texFilterParams[4];
     float viewProjCubemap[96];
     float skyCubemapRotationTransform[16];
 };

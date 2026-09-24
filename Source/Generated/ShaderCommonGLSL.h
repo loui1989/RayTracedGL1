@@ -464,6 +464,7 @@ struct ShGlobalUniform
     vec4 smokeAlbedoDensity[128];
     vec4 smokeShape[128];
     uvec4 volumeShaftLights[16];
+    vec4 texFilterParams;
     mat4 viewProjCubemap[6];
     mat4 skyCubemapRotationTransform;
 };

@@ -24,6 +24,63 @@
 
 
 
+// Doom64-RT: N64-style three-point albedo filtering (texFilterParams.x == 1).
+// This file is included once per HITINFO_INL_* variant, hence the guard.
+#ifndef HITINFO_THREEPOINT_DEFINED
+#define HITINFO_THREEPOINT_DEFINED
+
+bool albedoThreePoint()
+{
+    return globalUniform.texFilterParams.x > 0.5;
+}
+
+// 'lod' already includes the sampler bias (texFilterParams.y). The quad of four
+// texels around 'uv' is split along its diagonal and the three texels of the
+// half 'uv' falls in are blended barycentrically -- what the N64's RDP did.
+// Sampled at texel centres of one whole mip level; the explicit LOD cancels the
+// sampler's own bias so the hardware lands on exactly that level.
+vec4 getTextureSampleThreePoint( uint textureIndex, const vec2 uv, float lod )
+{
+    const int   levels = textureQueryLevels( globalTextures[ nonuniformEXT( textureIndex ) ] );
+    const int   level  = clamp( int( floor( lod + 0.5 ) ), 0, max( levels - 1, 0 ) );
+    const float hwLod  = float( level ) - globalUniform.texFilterParams.y;
+
+    const vec2 size = vec2( textureSize( globalTextures[ nonuniformEXT( textureIndex ) ], level ) );
+    const vec2 inv  = 1.0 / size;
+    const vec2 p    = uv * size - 0.5;
+    const vec2 f    = fract( p );
+    const vec2 c00  = ( floor( p ) + 0.5 ) * inv;
+
+    if( f.x + f.y <= 1.0 )
+    {
+        const vec4 a = getTextureSampleLod( textureIndex, c00, hwLod );
+        const vec4 b = getTextureSampleLod( textureIndex, c00 + vec2( inv.x, 0 ), hwLod );
+        const vec4 c = getTextureSampleLod( textureIndex, c00 + vec2( 0, inv.y ), hwLod );
+        return a + f.x * ( b - a ) + f.y * ( c - a );
+    }
+    else
+    {
+        const vec4 a = getTextureSampleLod( textureIndex, c00 + inv, hwLod );
+        const vec4 b = getTextureSampleLod( textureIndex, c00 + vec2( 0, inv.y ), hwLod );
+        const vec4 c = getTextureSampleLod( textureIndex, c00 + vec2( inv.x, 0 ), hwLod );
+        return a + ( 1.0 - f.x ) * ( b - a ) + ( 1.0 - f.y ) * ( c - a );
+    }
+}
+
+// Mip level of a textureGrad() footprint, plus the sampler bias.
+float threePointLodGrad( uint textureIndex, const vec2 dx, const vec2 dy )
+{
+    const vec2  size = vec2( getTextureSize( textureIndex ) );
+    const vec2  a    = dx * size;
+    const vec2  b    = dy * size;
+    const float r    = max( dot( a, a ), dot( b, b ) );
+    return 0.5 * log2( max( r, 1e-12 ) ) + globalUniform.texFilterParams.y;
+}
+
+#endif // HITINFO_THREEPOINT_DEFINED
+
+
+
 #if defined( HITINFO_INL_PRIM )
 vec3 processAlbedoGrad(         
     uint geometryInstanceFlags, 
@@ -87,7 +144,22 @@ vec3 processAlbedo(
 
         if( layerColorTextures[ i ] != MATERIAL_NO_TEXTURE )
         {
-            const vec4 src = unpackUintColor( layerColors[ i ] ) *
+            vec4 texel;
+            if( albedoThreePoint() )
+            {
+    #if defined( HITINFO_INL_PRIM )
+                const float tpLod = threePointLodGrad( layerColorTextures[ i ], dPdx[ i ], dPdy[ i ] );
+    #elif defined( HITINFO_INL_RFL )
+                const float tpLod = threePointLodGrad(
+                    layerColorTextures[ i ], vec2( derivSet.u[ i ], 0 ), vec2( 0, derivSet.u[ i ] ) );
+    #elif defined( HITINFO_INL_INDIR )
+                const float tpLod = lod + globalUniform.texFilterParams.y;
+    #endif
+                texel = getTextureSampleThreePoint( layerColorTextures[ i ], texCoords[ i ], tpLod );
+            }
+            else
+            {
+                texel =
     #if defined( HITINFO_INL_PRIM )
                 getTextureSampleGrad( layerColorTextures[ i ], texCoords[ i ], dPdx[ i ], dPdy[ i ] );
     #elif defined( HITINFO_INL_RFL )
@@ -95,6 +167,8 @@ vec3 processAlbedo(
     #elif defined( HITINFO_INL_INDIR )
                 getTextureSampleLod( layerColorTextures[ i ], texCoords[ i ], lod );
     #endif
+            }
+            const vec4 src = unpackUintColor( layerColors[ i ] ) * texel;
 
             uint layerBlendType = 
                 ( geometryInstanceFlags >> ( MATERIAL_BLENDING_TYPE_BIT_COUNT * i ) ) 
