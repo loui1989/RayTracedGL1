@@ -120,6 +120,35 @@ bool isCandidateAlphaTestPassed( int instanceId, int instanceCustomIndex, int ge
     return ( color.r + color.g + color.b ) / 3 * color.a + color.a >= ALPHA_THRESHOLD;
 }
 
+// Dynamic geometry may be built as one merged geometry per bottom-level structure (see
+// VertexCollector::GetMergedGeometry). Such instances have this custom index flag, and the
+// bits from INSTANCE_CUSTOM_INDEX_MERGED_BASE_SHIFT hold the start of a table in the dynamic
+// index buffer that maps a merged triangle to its original geometry and primitive index.
+// Must match VertexCollector::MERGED_CUSTOM_INDEX_*.
+#define INSTANCE_CUSTOM_INDEX_FLAG_MERGED         ( 1 << 4 )
+#define INSTANCE_CUSTOM_INDEX_MERGED_BASE_SHIFT   5
+#define INSTANCE_CUSTOM_INDEX_FLAGS_MASK          0xF
+
+// Returns the custom index with only the flags the rest of the shaders know about.
+int remapMergedPrimitive( int customIndex, inout int geometryIndex, inout int primitiveId )
+{
+    if( ( customIndex & INSTANCE_CUSTOM_INDEX_FLAG_MERGED ) != 0 )
+    {
+        const uint base   = uint( customIndex ) >> INSTANCE_CUSTOM_INDEX_MERGED_BASE_SHIFT;
+        const uint packed = dynamicIndices[ base + uint( primitiveId ) ];
+        unpackGeometryAndPrimitiveIndex( packed, geometryIndex, primitiveId );
+    }
+    return customIndex & INSTANCE_CUSTOM_INDEX_FLAGS_MASK;
+}
+
+// Alpha test of a ray query candidate (the query object itself isn't passed to functions,
+// so that the translated Metal code doesn't need const access to it).
+bool isRayQueryCandidateAlphaTestPassed( int instanceId, int customIndex, int geometryIndex, int primitiveId, vec2 bary )
+{
+    customIndex = remapMergedPrimitive( customIndex, geometryIndex, primitiveId );
+    return isCandidateAlphaTestPassed( instanceId, customIndex, geometryIndex, primitiveId, bary );
+}
+
 // Former closest-hit (RtClsOpaque.rchit) and miss (RtMiss.rmiss) shaders: the nearest
 // accepted triangle, or an empty payload.
 ShPayload traceRayQuery( uint rayFlags, uint cullMask, vec3 origin, float tMin, vec3 direction, float tMax )
@@ -138,11 +167,11 @@ ShPayload traceRayQuery( uint rayFlags, uint cullMask, vec3 origin, float tMin, 
         {
             // only alpha-tested instances are non-opaque (ASManager sets FORCE_NO_OPAQUE
             // on them and FORCE_OPAQUE on all others), so every candidate needs the test
-            if( isCandidateAlphaTestPassed( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
-                                            rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ),
-                                            rayQueryGetIntersectionGeometryIndexEXT( rq, false ),
-                                            rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ),
-                                            rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) )
+            if( isRayQueryCandidateAlphaTestPassed( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
+                                                    rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ),
+                                                    rayQueryGetIntersectionGeometryIndexEXT( rq, false ),
+                                                    rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ),
+                                                    rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) )
             {
                 rayQueryConfirmIntersectionEXT( rq );
             }
@@ -151,11 +180,14 @@ ShPayload traceRayQuery( uint rayFlags, uint cullMask, vec3 origin, float tMin, 
 
     if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
     {
+        int geometryIndex = rayQueryGetIntersectionGeometryIndexEXT( rq, true );
+        int primitiveId   = rayQueryGetIntersectionPrimitiveIndexEXT( rq, true );
+        const int customIndex =
+            remapMergedPrimitive( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ), geometryIndex, primitiveId );
+
         p.baryCoords       = rayQueryGetIntersectionBarycentricsEXT( rq, true );
-        p.instIdAndIndex   = packInstanceIdAndCustomIndex( rayQueryGetIntersectionInstanceIdEXT( rq, true ),
-                                                         rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
-        p.geomAndPrimIndex = packGeometryAndPrimitiveIndex( rayQueryGetIntersectionGeometryIndexEXT( rq, true ),
-                                                            rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+        p.instIdAndIndex   = packInstanceIdAndCustomIndex( rayQueryGetIntersectionInstanceIdEXT( rq, true ), customIndex );
+        p.geomAndPrimIndex = packGeometryAndPrimitiveIndex( geometryIndex, primitiveId );
     }
     return p;
 }
@@ -170,11 +202,11 @@ bool traceRayQueryAnyHit( uint rayFlags, uint cullMask, vec3 origin, float tMin,
     {
         if( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT )
         {
-            if( isCandidateAlphaTestPassed( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
-                                            rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ),
-                                            rayQueryGetIntersectionGeometryIndexEXT( rq, false ),
-                                            rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ),
-                                            rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) )
+            if( isRayQueryCandidateAlphaTestPassed( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
+                                                    rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ),
+                                                    rayQueryGetIntersectionGeometryIndexEXT( rq, false ),
+                                                    rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ),
+                                                    rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) )
             {
                 rayQueryConfirmIntersectionEXT( rq );
             }

@@ -451,6 +451,23 @@ bool ASManager::SetupBLAS(BLASComponent &blas, const std::shared_ptr<VertexColle
     const bool fastTrace = !IsFastBuild(filter);
     const bool update = false;
 
+    // dynamic geometry: one merged geometry instead of one per uploaded geometry
+    blas.SetMergedMapBase(UINT32_MAX);
+    if (const auto *mg = vertCollector->GetMergedGeometry(filter))
+    {
+        const auto mergedSizes = asBuilder->GetBottomBuildSizes(1, &mg->geometry, &mg->primitiveCount, fastTrace);
+        blas.RecreateIfNotValid(mergedSizes, allocator);
+        assert(blas.GetAS() != VK_NULL_HANDLE);
+
+        // the merged data lives in the collector until BuildBottomLevel()
+        asBuilder->AddBLAS(blas.GetAS(), 1,
+                           &mg->geometry, &mg->range,
+                           mergedSizes,
+                           fastTrace, update, false);
+        blas.SetMergedMapBase(mg->mapBase);
+        return true;
+    }
+
     // get AS size and create buffer for AS
     const auto buildSizes = asBuilder->GetBottomBuildSizes(geoms.size(), geoms.data(), primCounts.data(), fastTrace);
 
@@ -764,6 +781,14 @@ bool ASManager::SetupTLASInstanceFromBLAS(const BLASComponent &blas, uint32_t ra
     {
         // for choosing buffers with dynamic data
         instance.instanceCustomIndex = INSTANCE_CUSTOM_INDEX_FLAG_DYNAMIC;
+
+        // merged geometry: the shaders find the original geometry / primitive in a table
+        if (blas.GetMergedMapBase() != UINT32_MAX)
+        {
+            assert(blas.GetMergedMapBase() < VertexCollector::MERGED_MAX_MAP_END);
+            instance.instanceCustomIndex |= VertexCollector::MERGED_CUSTOM_INDEX_FLAG |
+                                            (blas.GetMergedMapBase() << VertexCollector::MERGED_CUSTOM_INDEX_BASE_SHIFT);
+        }
     }
 
 

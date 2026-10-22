@@ -108,6 +108,26 @@ public:
     const std::vector<VkAccelerationStructureBuildRangeInfoKHR> &GetASBuildRangeInfos(VertexCollectorFilterTypeFlags filter) const;
 
 
+    // Dynamic geometry only: all geometries of a filter merged into one acceleration structure
+    // geometry with world-space positions (no per-geometry transforms), which is much cheaper to
+    // build every frame. The shaders map a merged triangle back to (local geometry, primitive)
+    // with the table at 'mapBase' in the index buffer. Returns false if not available for the
+    // filter (then the per-geometry data above is used).
+    struct MergedGeometry
+    {
+        VkAccelerationStructureGeometryKHR       geometry;
+        VkAccelerationStructureBuildRangeInfoKHR range;
+        uint32_t                                 primitiveCount;
+        uint32_t                                 mapBase;
+    };
+    const MergedGeometry* GetMergedGeometry(VertexCollectorFilterTypeFlags filter) const;
+
+    // the table base is stored in the TLAS instance custom index: bit MERGED_CUSTOM_INDEX_FLAG,
+    // and the base in the bits from MERGED_CUSTOM_INDEX_BASE_SHIFT (must match RaygenCommon.h)
+    static constexpr uint32_t MERGED_CUSTOM_INDEX_FLAG       = 1u << 4;
+    static constexpr uint32_t MERGED_CUSTOM_INDEX_BASE_SHIFT = 5;
+    static constexpr uint32_t MERGED_MAX_MAP_END             = 1u << ( 24 - MERGED_CUSTOM_INDEX_BASE_SHIFT );
+
     // Are all geometries for each filter type in "flags" empty?
     bool AreGeometriesEmpty(VertexCollectorFilterTypeFlags flags) const;
     // Are all geometries of this type empty?
@@ -129,6 +149,10 @@ private:
     bool CopyTransformsFromStaging(VkCommandBuffer cmd, bool insertMemBarrier);
 
     void AddMaterialDependency(uint32_t simpleIndex, uint32_t layer, uint32_t materialIndex);
+
+    void AddToMerged(VertexCollectorFilterTypeFlags type, const RgGeometryUploadInfo &info,
+                     uint32_t localGeomIndex, uint32_t primitiveCount, VkGeometryFlagsKHR geomFlags);
+    void FinalizeMerged();
 
     // Parse flags to flag bit pairs and create instances of
     // VertexCollectorFilter. Flag bit pair contains one bit from
@@ -183,6 +207,24 @@ private:
     std::vector<VkBufferCopy> texCoordsToCopy;
 
     rgl::unordered_map<uint32_t, uint32_t> simpleIndexToTransformIndex;
+
+    // merged dynamic geometry (see GetMergedGeometry)
+    struct MergedFilter
+    {
+        std::vector<uint32_t> indices; // into the world-space positions
+        std::vector<uint32_t> primMap; // packed (local geometry index, primitive index)
+        VkGeometryFlagsKHR     geomFlags = 0;
+        MergedGeometry         result    = {};
+        bool                   valid     = false;
+    };
+    bool                    mergeEnabled  = false;
+    bool                    mergeOverflow = false;
+    Buffer                  asInputBuffer; // world-space positions, then merged indices
+    float*                  mappedAsPositions = nullptr;
+    uint32_t*               mappedAsIndices   = nullptr;
+    uint32_t                asPositionCount   = 0;
+    uint32_t                indexCopyCount    = 0; // indices + merge tables to copy from staging
+    rgl::unordered_map<VertexCollectorFilterTypeFlags, MergedFilter> merged;
 };
 
 }

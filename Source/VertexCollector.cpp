@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 
 #include "Generated/ShaderCommonC.h"
@@ -31,6 +32,13 @@ using namespace RTGL1;
 
 constexpr uint32_t INDEX_BUFFER_SIZE     = MAX_INDEXED_PRIMITIVE_COUNT * 3 * sizeof( uint32_t );
 constexpr uint32_t TRANSFORM_BUFFER_SIZE =  MAX_BOTTOM_LEVEL_GEOMETRIES_COUNT * sizeof( VkTransformMatrixKHR );
+
+// merged dynamic geometry: limits per frame
+constexpr uint32_t     MERGE_MAX_VERTICES       = 1u << 19;
+constexpr uint32_t     MERGE_MAX_INDICES        = 3u * ( 1u << 19 );
+constexpr VkDeviceSize MERGE_INDICES_BYTE_OFFSET = VkDeviceSize( MERGE_MAX_VERTICES ) * 3 * sizeof( float );
+constexpr VkDeviceSize MERGE_BUFFER_SIZE =
+    MERGE_INDICES_BYTE_OFFSET + VkDeviceSize( MERGE_MAX_INDICES ) * sizeof( uint32_t );
 
 
 VertexCollector::VertexCollector( VkDevice                                  _device,
@@ -147,6 +155,23 @@ void VertexCollector::InitStagingBuffers( const std::shared_ptr< MemoryAllocator
     mappedVertexData    = static_cast< ShVertex* >( stagingVertBuffer.Map() );
     mappedIndexData     = static_cast< uint32_t* >( stagingIndexBuffer.Map() );
     mappedTransformData = static_cast< VkTransformMatrixKHR* >( stagingTransformsBuffer.Map() );
+
+    // merged dynamic geometry; RTGL1_NO_MERGE=1 turns it off
+    const char* noMerge = getenv( "RTGL1_NO_MERGE" );
+    if( ( filtersFlags & VertexCollectorFilterTypeFlagBits::CF_DYNAMIC ) &&
+        !( noMerge && noMerge[ 0 ] == '1' ) )
+    {
+        asInputBuffer.Init( allocator,
+                            MERGE_BUFFER_SIZE,
+                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "Merged dynamic geometry AS input" );
+        auto* mapped      = static_cast< uint8_t* >( asInputBuffer.Map() );
+        mappedAsPositions = reinterpret_cast< float* >( mapped );
+        mappedAsIndices   = reinterpret_cast< uint32_t* >( mapped + MERGE_INDICES_BYTE_OFFSET );
+        mergeEnabled      = mapped != nullptr;
+    }
 }
 
 VertexCollector::~VertexCollector()
@@ -155,6 +180,10 @@ VertexCollector::~VertexCollector()
     stagingVertBuffer.TryUnmap();
     stagingIndexBuffer.TryUnmap();
     stagingTransformsBuffer.TryUnmap();
+    if( asInputBuffer.IsInitted() )
+    {
+        asInputBuffer.TryUnmap();
+    }
 }
 
 static uint32_t GetMaterialsBlendFlags( const RgGeometryMaterialBlendType blendingTypes[],
@@ -316,6 +345,11 @@ uint32_t VertexCollector::AddGeometry( uint32_t                         frameInd
 
 
     PushPrimitiveCount( geomFlags, primitiveCount );
+
+    if( mergeEnabled && !collectStatic )
+    {
+        AddToMerged( geomFlags, info, localIndex, primitiveCount, geom.flags );
+    }
 
 
     ShGeometryInstance geomInfo = {};
@@ -496,7 +530,144 @@ void VertexCollector::CopyDataToStaging(const RgGeometryUploadInfo &info, uint32
     memcpy( pDst, info.pVertices, info.vertexCount * sizeof( ShVertex ) );
 }
 
-void VertexCollector::EndCollecting() {}
+void VertexCollector::AddToMerged( VertexCollectorFilterTypeFlags type,
+                                   const RgGeometryUploadInfo&    info,
+                                   uint32_t                       localGeomIndex,
+                                   uint32_t                       primitiveCount,
+                                   VkGeometryFlagsKHR             geomFlags )
+{
+    if( mergeOverflow )
+    {
+        return;
+    }
+    if( asPositionCount + info.vertexCount > MERGE_MAX_VERTICES ||
+        localGeomIndex >= MAX_BOTTOM_LEVEL_GEOMETRIES_COUNT ||
+        primitiveCount >= MAX_GEOMETRY_PRIMITIVE_COUNT )
+    {
+        // too much for this frame: all dynamic geometry uses the per-geometry path
+        mergeOverflow = true;
+        return;
+    }
+
+    MergedFilter& m = merged[ type ];
+    if( m.primMap.empty() )
+    {
+        m.geomFlags = geomFlags;
+    }
+    assert( m.geomFlags == geomFlags );
+
+    // world-space positions, as the merged geometry has no transform
+    const auto& t   = info.transform.matrix;
+    float*      dst = mappedAsPositions + size_t( asPositionCount ) * 3;
+    for( uint32_t v = 0; v < info.vertexCount; v++ )
+    {
+        const float* p = info.pVertices[ v ].position;
+        for( int r = 0; r < 3; r++ )
+        {
+            dst[ v * 3 + r ] = t[ r ][ 0 ] * p[ 0 ] + t[ r ][ 1 ] * p[ 1 ] + t[ r ][ 2 ] * p[ 2 ] + t[ r ][ 3 ];
+        }
+    }
+
+    const uint32_t base       = asPositionCount;
+    const bool     useIndices = info.indexCount != 0 && info.pIndices != nullptr;
+    const uint32_t n          = primitiveCount * 3;
+    for( uint32_t i = 0; i < n; i++ )
+    {
+        m.indices.push_back( base + ( useIndices ? info.pIndices[ i ] : i ) );
+    }
+    for( uint32_t p = 0; p < primitiveCount; p++ )
+    {
+        // same packing as packGeometryAndPrimitiveIndex in the shaders
+        m.primMap.push_back( ( p << MAX_BOTTOM_LEVEL_GEOMETRIES_COUNT_POW ) | localGeomIndex );
+    }
+
+    asPositionCount += info.vertexCount;
+}
+
+void VertexCollector::FinalizeMerged()
+{
+    indexCopyCount = curIndexCount;
+
+    for( auto& [ type, m ] : merged )
+    {
+        m.valid = false;
+    }
+    if( !mergeEnabled || mergeOverflow )
+    {
+        return;
+    }
+
+    const VkDeviceAddress inputAddress = asInputBuffer.GetAddress();
+
+    // the tables go into the dynamic index buffer after the indices
+    uint32_t mapCursor   = curIndexCount;
+    uint32_t indexCursor = 0;
+
+    for( auto& [ type, m ] : merged )
+    {
+        const auto primCount = static_cast< uint32_t >( m.primMap.size() );
+        const auto idxCount  = static_cast< uint32_t >( m.indices.size() );
+        if( primCount == 0 )
+        {
+            continue;
+        }
+        if( mapCursor + primCount > MERGED_MAX_MAP_END ||
+            mapCursor + primCount > MAX_INDEXED_PRIMITIVE_COUNT * 3 ||
+            indexCursor + idxCount > MERGE_MAX_INDICES )
+        {
+            // this filter keeps its per-geometry structure
+            continue;
+        }
+
+        memcpy( mappedIndexData + mapCursor, m.primMap.data(), primCount * sizeof( uint32_t ) );
+        memcpy( mappedAsIndices + indexCursor, m.indices.data(), idxCount * sizeof( uint32_t ) );
+
+        MergedGeometry& r = m.result;
+        r                 = {};
+
+        r.geometry.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        r.geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        r.geometry.flags        = m.geomFlags;
+
+        auto& tr                    = r.geometry.geometry.triangles;
+        tr.sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        tr.vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT;
+        tr.vertexData.deviceAddress = inputAddress;
+        tr.vertexStride             = 3 * sizeof( float );
+        tr.maxVertex                = asPositionCount > 0 ? asPositionCount - 1 : 0;
+        tr.indexType                = VK_INDEX_TYPE_UINT32;
+        tr.indexData.deviceAddress =
+            inputAddress + MERGE_INDICES_BYTE_OFFSET + VkDeviceSize( indexCursor ) * sizeof( uint32_t );
+        tr.transformData = {};
+
+        r.range                = {};
+        r.range.primitiveCount = primCount;
+        r.primitiveCount       = primCount;
+        r.mapBase              = mapCursor;
+
+        m.valid = true;
+        mapCursor += primCount;
+        indexCursor += idxCount;
+    }
+
+    indexCopyCount = mapCursor;
+}
+
+const VertexCollector::MergedGeometry* VertexCollector::GetMergedGeometry(
+    VertexCollectorFilterTypeFlags filter ) const
+{
+    auto it = merged.find( filter );
+    if( it == merged.end() || !it->second.valid )
+    {
+        return nullptr;
+    }
+    return &it->second.result;
+}
+
+void VertexCollector::EndCollecting()
+{
+    FinalizeMerged();
+}
 
 void VertexCollector::Reset()
 {
@@ -508,6 +679,16 @@ void VertexCollector::Reset()
     simpleIndexToTransformIndex.clear();
 
     materialDependencies.clear();
+
+    for( auto& [ type, m ] : merged )
+    {
+        m.indices.clear();
+        m.primMap.clear();
+        m.valid = false;
+    }
+    mergeOverflow   = false;
+    asPositionCount = 0;
+    indexCopyCount  = 0;
 
     for( auto& f : filters )
     {
@@ -535,7 +716,9 @@ bool VertexCollector::CopyVertexDataFromStaging( VkCommandBuffer cmd )
 
 bool VertexCollector::CopyIndexDataFromStaging( VkCommandBuffer cmd )
 {
-    if( curIndexCount == 0 )
+    // also the merged geometry tables after the indices
+    const uint32_t count = std::max( curIndexCount, indexCopyCount );
+    if( count == 0 )
     {
         return false;
     }
@@ -543,7 +726,7 @@ bool VertexCollector::CopyIndexDataFromStaging( VkCommandBuffer cmd )
     VkBufferCopy info = {
         .srcOffset = 0,
         .dstOffset = 0,
-        .size      = curIndexCount * sizeof( uint32_t ),
+        .size      = count * sizeof( uint32_t ),
     };
 
     vkCmdCopyBuffer( cmd, stagingIndexBuffer.GetBuffer(), indexBuffer->GetBuffer(), 1, &info );
@@ -687,7 +870,7 @@ bool VertexCollector::CopyFromStaging( VkCommandBuffer cmd )
         indBr.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         indBr.buffer              = indexBuffer->GetBuffer();
         indBr.offset              = 0;
-        indBr.size                = curIndexCount * sizeof( uint32_t );
+        indBr.size                = std::max( curIndexCount, indexCopyCount ) * sizeof( uint32_t );
     }
 
     if( barrierCount > 0 )

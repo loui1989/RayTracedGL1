@@ -83,6 +83,10 @@ public:
     bool IsEmpty() const;
     uint32_t GetGeomCount() const;
 
+    // dynamic BLAS built from merged geometry: base of its triangle table, or UINT32_MAX
+    void SetMergedMapBase(uint32_t base) { mergedMapBase = base; }
+    uint32_t GetMergedMapBase() const { return mergedMapBase; }
+
 protected:
     void CreateAS(VkDeviceSize size) override;
     const char *GetBufferDebugName() const override;
@@ -90,6 +94,7 @@ protected:
 private:
     VertexCollectorFilterTypeFlags filter;
     uint32_t geomCount;
+    uint32_t mergedMapBase = UINT32_MAX;
 };
 
 
