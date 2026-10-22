@@ -61,7 +61,7 @@ T* Obj( H* handle )
     return reinterpret_cast< T* >( handle );
 }
 template< typename H, typename T >
-H Handle( T* obj )
+H ToHandle( T* obj )
 {
     if constexpr( std::is_pointer_v< H > )
     {
@@ -240,7 +240,7 @@ VkDeviceMemory RTGL1::MetalNative::MemoryOf( VkBuffer buffer, VkDeviceSize& offs
         return VK_NULL_HANDLE;
     }
     offset = b->offset;
-    return Handle< VkDeviceMemory >( b->memory );
+    return ToHandle< VkDeviceMemory >( b->memory );
 }
 
 id< MTLTexture > RTGL1::MetalNative::TextureOf( VkImage image )
@@ -819,7 +819,7 @@ VkResult RTGL1::MetalNative::vkCreateMetalSurfaceEXT( VkInstance,
     }
     auto* s  = new NativeSurface;
     s->layer = ( CAMetalLayer* )ci->pLayer;
-    *out     = Handle< VkSurfaceKHR >( s );
+    *out     = ToHandle< VkSurfaceKHR >( s );
     return VK_SUCCESS;
 }
 
@@ -919,7 +919,7 @@ VkResult RTGL1::MetalNative::vkCreateSwapchainKHR( VkDevice,
         sc->images.push_back( img );
     }
     sc->drawables.resize( count );
-    *out = Handle< VkSwapchainKHR >( sc );
+    *out = ToHandle< VkSwapchainKHR >( sc );
     return VK_SUCCESS;
 }
 
@@ -943,7 +943,7 @@ VkResult RTGL1::MetalNative::vkGetSwapchainImagesKHR( VkDevice, VkSwapchainKHR s
     std::vector< VkImage > images;
     for( NativeImage* img : sc->images )
     {
-        images.push_back( Handle< VkImage >( img ) );
+        images.push_back( ToHandle< VkImage >( img ) );
     }
     return FillArray( count, out, images.data(), uint32_t( images.size() ) );
 }
@@ -1061,7 +1061,7 @@ VkResult RTGL1::MetalNative::vkAllocateMemory( VkDevice,
             return VK_ERROR_OUT_OF_DEVICE_MEMORY;
         }
     }
-    *out = Handle< VkDeviceMemory >( m );
+    *out = ToHandle< VkDeviceMemory >( m );
     return VK_SUCCESS;
 }
 
@@ -1178,7 +1178,7 @@ VkResult RTGL1::MetalNative::vkCreateBuffer( VkDevice, const VkBufferCreateInfo*
     auto* b  = new NativeBuffer;
     b->size  = ci->size;
     b->usage = ci->usage;
-    *out     = Handle< VkBuffer >( b );
+    *out     = ToHandle< VkBuffer >( b );
     return VK_SUCCESS;
 }
 
@@ -1279,7 +1279,7 @@ VkResult RTGL1::MetalNative::vkCreateImage( VkDevice, const VkImageCreateInfo* c
             delete img;
             return VK_ERROR_OUT_OF_DEVICE_MEMORY;
         }
-        *out = Handle< VkImage >( img );
+        *out = ToHandle< VkImage >( img );
         return VK_SUCCESS;
     }
 }
@@ -1305,7 +1305,7 @@ VkResult RTGL1::MetalNative::vkCreateImageView( VkDevice,
         auto* v      = new NativeImageView;
         v->image     = img;
         v->format    = ci->format;
-        *out         = Handle< VkImageView >( v );
+        *out         = ToHandle< VkImageView >( v );
         if( img->swapchain )
         {
             return VK_SUCCESS; // resolved to the drawable when used
@@ -1376,7 +1376,7 @@ void RTGL1::MetalNative::vkDestroyImageView( VkDevice, VkImageView view, const V
 #define RG_NATIVE_DUMMY_OBJECT( Type, Create, Destroy, CreateInfo )                              \
     VkResult RTGL1::MetalNative::Create( VkDevice, const CreateInfo*, const VkAllocationCallbacks*, Type* out ) \
     {                                                                                            \
-        *out = Handle< Type >( new Dummy );                                                      \
+        *out = ToHandle< Type >( new Dummy );                                                      \
         return VK_SUCCESS;                                                                       \
     }                                                                                            \
     void RTGL1::MetalNative::Destroy( VkDevice, Type h, const VkAllocationCallbacks* )           \
@@ -1403,7 +1403,7 @@ VkResult RTGL1::MetalNative::vkCreateComputePipelines( VkDevice,
 {
     for( uint32_t i = 0; i < count; i++ )
     {
-        out[ i ] = Handle< VkPipeline >( new Dummy );
+        out[ i ] = ToHandle< VkPipeline >( new Dummy );
     }
     return VK_SUCCESS;
 }
@@ -1417,7 +1417,7 @@ VkResult RTGL1::MetalNative::vkCreateGraphicsPipelines( VkDevice,
 {
     for( uint32_t i = 0; i < count; i++ )
     {
-        out[ i ] = Handle< VkPipeline >( new Dummy );
+        out[ i ] = ToHandle< VkPipeline >( new Dummy );
     }
     return VK_SUCCESS;
 }
@@ -1432,7 +1432,7 @@ VkResult RTGL1::MetalNative::vkCreateDescriptorPool( VkDevice,
                                                      const VkAllocationCallbacks*,
                                                      VkDescriptorPool* out )
 {
-    *out = Handle< VkDescriptorPool >( new NativeDescriptorPool );
+    *out = ToHandle< VkDescriptorPool >( new NativeDescriptorPool );
     return VK_SUCCESS;
 }
 
@@ -1460,7 +1460,7 @@ VkResult RTGL1::MetalNative::vkAllocateDescriptorSets( VkDevice, const VkDescrip
     {
         auto* d = new Dummy;
         p->sets.push_back( d );
-        out[ i ] = Handle< VkDescriptorSet >( d );
+        out[ i ] = ToHandle< VkDescriptorSet >( d );
     }
     return VK_SUCCESS;
 }
@@ -1491,7 +1491,7 @@ VkResult RTGL1::MetalNative::vkCreateFence( VkDevice, const VkFenceCreateInfo* c
     auto* f     = sp.get();
     f->self     = std::move( sp );
     f->signaled = ( ci->flags & VK_FENCE_CREATE_SIGNALED_BIT ) != 0;
-    *out        = Handle< VkFence >( f );
+    *out        = ToHandle< VkFence >( f );
     return VK_SUCCESS;
 }
 
@@ -1584,7 +1584,7 @@ VkResult RTGL1::MetalNative::vkCreateSemaphore( VkDevice, const VkSemaphoreCreat
     {
         s->value = std::max< uint64_t >( s->value, s->event.signaledValue );
     }
-    *out = Handle< VkSemaphore >( s );
+    *out = ToHandle< VkSemaphore >( s );
     return VK_SUCCESS;
 }
 
@@ -1600,7 +1600,7 @@ VkResult RTGL1::MetalNative::vkCreateQueryPool( VkDevice, const VkQueryPoolCreat
 {
     auto* q  = new NativeQueryPool;
     q->count = ci->queryCount;
-    *out     = Handle< VkQueryPool >( q );
+    *out     = ToHandle< VkQueryPool >( q );
     return VK_SUCCESS;
 }
 
@@ -1650,7 +1650,7 @@ VkResult RTGL1::MetalNative::vkCreateDebugUtilsMessengerEXT( VkInstance,
                                                              const VkAllocationCallbacks*,
                                                              VkDebugUtilsMessengerEXT* out )
 {
-    *out = Handle< VkDebugUtilsMessengerEXT >( new Dummy );
+    *out = ToHandle< VkDebugUtilsMessengerEXT >( new Dummy );
     return VK_SUCCESS;
 }
 
@@ -1678,7 +1678,7 @@ VkResult RTGL1::MetalNative::vkCreateAccelerationStructureKHR( VkDevice,
 {
     auto* a    = new NativeAccelerationStructure;
     a->address = G().nextASAddress.fetch_add( 1 << 16 );
-    *out       = Handle< VkAccelerationStructureKHR >( a );
+    *out       = ToHandle< VkAccelerationStructureKHR >( a );
     return VK_SUCCESS;
 }
 
@@ -1767,7 +1767,7 @@ void RTGL1::MetalNative::vkExportMetalObjectsEXT( VkDevice, VkExportMetalObjects
                 t->mtlTexture = nil;
                 if( auto* v = Obj< NativeImageView >( t->imageView ) )
                 {
-                    t->mtlTexture = v->image && v->image->swapchain ? SwapchainTexture( Handle< VkImage >( v->image ) )
+                    t->mtlTexture = v->image && v->image->swapchain ? SwapchainTexture( ToHandle< VkImage >( v->image ) )
                                                                     : v->texture;
                 }
                 else if( auto* img = Obj< NativeImage >( t->image ) )
