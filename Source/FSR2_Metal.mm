@@ -570,6 +570,97 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
             float maxInv;
         } prm = { 1.0f, 0.998f };
 
+        // 1.-3. (the same for every way of submitting)
+        const ResolutionState rsCopy = rs;
+        auto encode = [ = ]( id< MTLCommandBuffer > cb, id< MTLFence > sectionFence ) {
+            const ResolutionState& rs = rsCopy;
+            // 1. convert inputs into formats MetalFX accepts
+            {
+                MTLRenderPassDescriptor* rp            = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[ 0 ].texture     = g.colorTex;
+                rp.colorAttachments[ 0 ].loadAction  = MTLLoadActionDontCare;
+                rp.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[ 1 ].texture     = g.motionTex;
+                rp.colorAttachments[ 1 ].loadAction  = MTLLoadActionDontCare;
+                rp.colorAttachments[ 1 ].storeAction = MTLStoreActionStore;
+                rp.depthAttachment.texture           = g.depthTex;
+                rp.depthAttachment.loadAction        = MTLLoadActionDontCare;
+                rp.depthAttachment.storeAction       = MTLStoreActionStore;
+
+                id< MTLRenderCommandEncoder > enc = [cb renderCommandEncoderWithDescriptor:rp];
+                enc.label                         = @"MetalFX input prep";
+                if( sectionFence )
+                {
+                    // the inputs were written by the section's work
+                    [enc waitForFence:sectionFence beforeStages:MTLRenderStageVertex];
+                }
+                [enc setRenderPipelineState:g.prepPipe];
+                [enc setDepthStencilState:g.depthAlways];
+                [enc setFragmentTexture:finalTex atIndex:0];
+                [enc setFragmentTexture:depthNdc atIndex:1];
+                [enc setFragmentTexture:motion atIndex:2];
+                [enc setFragmentBytes:&prm length:sizeof( prm ) atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [enc endEncoding];
+            }
+
+            // 2. temporal upscale
+            {
+                // same convention as the FSR2 / DLSS paths: negated camera jitter
+                g.scaler.colorTexture       = g.colorTex;
+                g.scaler.depthTexture       = g.depthTex;
+                g.scaler.motionTexture      = g.motionTex;
+                g.scaler.outputTexture      = g.outTex;
+                g.scaler.jitterOffsetX      = -jitterOffset.data[ 0 ];
+                g.scaler.jitterOffsetY      = -jitterOffset.data[ 1 ];
+                g.scaler.motionVectorScaleX = static_cast< float >( rs.renderWidth );
+                g.scaler.motionVectorScaleY = static_cast< float >( rs.renderHeight );
+                g.scaler.depthReversed      = NO;
+                g.scaler.reset              = g.reset;
+                [g.scaler encodeToCommandBuffer:cb];
+                if( g.reset )
+                {
+                    g.fgHasPrev = false; // the previous frame doesn't match any more
+                }
+                g.reset = false;
+            }
+
+            // inputs for frame interpolation later in this frame
+            g.fgAppliedThisFrame = true;
+            g.fgJitter           = jitterOffset;
+            g.fgDt               = timeDelta;
+            g.fgNear             = nearPlane;
+            g.fgFar              = farPlane;
+            g.fgFovY             = fovVerticalRad;
+
+            // 3. copy the result into RTGL1's upscaled framebuffer
+            {
+                id< MTLComputeCommandEncoder > enc = [cb computeCommandEncoder];
+                enc.label                          = @"MetalFX output copy";
+                [enc setComputePipelineState:g.copyPipe];
+                [enc setTexture:g.outTex atIndex:0];
+                [enc setTexture:outputVk atIndex:1];
+                [enc setBytes:&prm length:sizeof( prm ) atIndex:0];
+                [enc dispatchThreads:MTLSizeMake( rs.upscaledWidth, rs.upscaledHeight, 1 )
+                    threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
+                if( sectionFence )
+                {
+                    // the section's next passes read the output through argument buffers
+                    [enc updateFence:sectionFence];
+                }
+                [enc endEncoding];
+            }
+        };
+
+        // Metal only: done when the command buffer is submitted
+        if( RTGL1::MetalNative::IsNativeCmd( cmd ) )
+        {
+            RTGL1::Metal::RecordExternal( cmd, encode );
+            g.lastWaitVulkanMs = 0;
+            g.lastMetalFxGpuMs = 0;
+            return FI::FB_IMAGE_INDEX_UPSCALED_PONG;
+        }
+
         // Asynchronous: the Metal command buffer waits on the GPU for the frame's Vulkan
         // work, and the later Vulkan work waits for MetalFX the same way.
         // Synchronous: MoltenVK commits its submissions from a background thread when ray
@@ -607,82 +698,7 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
             cb.label = @"RTGL1 MetalFX";
         }
 
-        // 1. convert inputs into formats MetalFX accepts
-        {
-            MTLRenderPassDescriptor* rp            = [MTLRenderPassDescriptor renderPassDescriptor];
-            rp.colorAttachments[ 0 ].texture     = g.colorTex;
-            rp.colorAttachments[ 0 ].loadAction  = MTLLoadActionDontCare;
-            rp.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
-            rp.colorAttachments[ 1 ].texture     = g.motionTex;
-            rp.colorAttachments[ 1 ].loadAction  = MTLLoadActionDontCare;
-            rp.colorAttachments[ 1 ].storeAction = MTLStoreActionStore;
-            rp.depthAttachment.texture           = g.depthTex;
-            rp.depthAttachment.loadAction        = MTLLoadActionDontCare;
-            rp.depthAttachment.storeAction       = MTLStoreActionStore;
-
-            id< MTLRenderCommandEncoder > enc = [cb renderCommandEncoderWithDescriptor:rp];
-            enc.label                         = @"MetalFX input prep";
-            if( sectionFence )
-            {
-                // the inputs were written by the section's work
-                [enc waitForFence:sectionFence beforeStages:MTLRenderStageVertex];
-            }
-            [enc setRenderPipelineState:g.prepPipe];
-            [enc setDepthStencilState:g.depthAlways];
-            [enc setFragmentTexture:finalTex atIndex:0];
-            [enc setFragmentTexture:depthNdc atIndex:1];
-            [enc setFragmentTexture:motion atIndex:2];
-            [enc setFragmentBytes:&prm length:sizeof( prm ) atIndex:0];
-            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-            [enc endEncoding];
-        }
-
-        // 2. temporal upscale
-        {
-            // same convention as the FSR2 / DLSS paths: negated camera jitter
-            g.scaler.colorTexture       = g.colorTex;
-            g.scaler.depthTexture       = g.depthTex;
-            g.scaler.motionTexture      = g.motionTex;
-            g.scaler.outputTexture      = g.outTex;
-            g.scaler.jitterOffsetX      = -jitterOffset.data[ 0 ];
-            g.scaler.jitterOffsetY      = -jitterOffset.data[ 1 ];
-            g.scaler.motionVectorScaleX = static_cast< float >( rs.renderWidth );
-            g.scaler.motionVectorScaleY = static_cast< float >( rs.renderHeight );
-            g.scaler.depthReversed      = NO;
-            g.scaler.reset              = g.reset;
-            [g.scaler encodeToCommandBuffer:cb];
-            if( g.reset )
-            {
-                g.fgHasPrev = false; // the previous frame doesn't match any more
-            }
-            g.reset = false;
-        }
-
-        // inputs for frame interpolation later in this frame
-        g.fgAppliedThisFrame = true;
-        g.fgJitter           = jitterOffset;
-        g.fgDt               = timeDelta;
-        g.fgNear             = nearPlane;
-        g.fgFar              = farPlane;
-        g.fgFovY             = fovVerticalRad;
-
-        // 3. copy the result into RTGL1's upscaled framebuffer
-        {
-            id< MTLComputeCommandEncoder > enc = [cb computeCommandEncoder];
-            enc.label                          = @"MetalFX output copy";
-            [enc setComputePipelineState:g.copyPipe];
-            [enc setTexture:g.outTex atIndex:0];
-            [enc setTexture:outputVk atIndex:1];
-            [enc setBytes:&prm length:sizeof( prm ) atIndex:0];
-            [enc dispatchThreads:MTLSizeMake( rs.upscaledWidth, rs.upscaledHeight, 1 )
-                threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
-            if( sectionFence )
-            {
-                // the section's next passes read the output through argument buffers
-                [enc updateFence:sectionFence];
-            }
-            [enc endEncoding];
-        }
+        encode( cb, sectionFence );
 
         if( inSection )
         {

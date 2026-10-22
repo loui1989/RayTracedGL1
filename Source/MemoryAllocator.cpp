@@ -48,6 +48,38 @@ MemoryAllocator::MemoryAllocator(
         // if buffer/image requires a dedicated allocation
         VMA_ALLOCATOR_CREATE_KHR_DEDICATED_ALLOCATION_BIT;
 
+#ifdef __APPLE__
+    // RTGL1_METAL_ONLY=1: VMA calls the native implementation directly (not the loader)
+    VmaVulkanFunctions nativeFunctions = {};
+    if (MetalNative::Enabled())
+    {
+        using namespace MetalNative;
+        nativeFunctions.vkGetPhysicalDeviceProperties           = &MetalNative::vkGetPhysicalDeviceProperties;
+        nativeFunctions.vkGetPhysicalDeviceMemoryProperties     = &MetalNative::vkGetPhysicalDeviceMemoryProperties;
+        nativeFunctions.vkAllocateMemory                        = &MetalNative::vkAllocateMemory;
+        nativeFunctions.vkFreeMemory                            = &MetalNative::vkFreeMemory;
+        nativeFunctions.vkMapMemory                             = &MetalNative::vkMapMemory;
+        nativeFunctions.vkUnmapMemory                           = &MetalNative::vkUnmapMemory;
+        nativeFunctions.vkFlushMappedMemoryRanges               = &MetalNative::vkFlushMappedMemoryRanges;
+        nativeFunctions.vkInvalidateMappedMemoryRanges          = &MetalNative::vkInvalidateMappedMemoryRanges;
+        nativeFunctions.vkBindBufferMemory                      = &MetalNative::vkBindBufferMemory;
+        nativeFunctions.vkBindImageMemory                       = &MetalNative::vkBindImageMemory;
+        nativeFunctions.vkGetBufferMemoryRequirements           = &MetalNative::vkGetBufferMemoryRequirements;
+        nativeFunctions.vkGetImageMemoryRequirements            = &MetalNative::vkGetImageMemoryRequirements;
+        nativeFunctions.vkCreateBuffer                          = &MetalNative::vkCreateBuffer;
+        nativeFunctions.vkDestroyBuffer                         = &MetalNative::vkDestroyBuffer;
+        nativeFunctions.vkCreateImage                           = &MetalNative::vkCreateImage;
+        nativeFunctions.vkDestroyImage                          = &MetalNative::vkDestroyImage;
+        nativeFunctions.vkCmdCopyBuffer                         = &MetalNative::vkCmdCopyBuffer;
+        nativeFunctions.vkGetBufferMemoryRequirements2KHR       = &MetalNative::vkGetBufferMemoryRequirements2;
+        nativeFunctions.vkGetImageMemoryRequirements2KHR        = &MetalNative::vkGetImageMemoryRequirements2;
+        nativeFunctions.vkBindBufferMemory2KHR                  = &MetalNative::vkBindBufferMemory2;
+        nativeFunctions.vkBindImageMemory2KHR                   = &MetalNative::vkBindImageMemory2;
+        nativeFunctions.vkGetPhysicalDeviceMemoryProperties2KHR = &MetalNative::vkGetPhysicalDeviceMemoryProperties2;
+        allocatorInfo.pVulkanFunctions                          = &nativeFunctions;
+    }
+#endif
+
     VkResult r = vmaCreateAllocator(&allocatorInfo, &allocator);
     VK_CHECKERROR(r);
 

@@ -134,6 +134,8 @@ void ASBuilder::BuildBottomLevel(VkCommandBuffer cmd)
         // built natively at the start of the next Metal section
         Metal::QueueBottomLevelBuilds((uint32_t)bottomLBuildInfo.geomInfos.size(),
                                       bottomLBuildInfo.geomInfos.data(), bottomLBuildInfo.rangeInfos.data());
+        // Metal only: built at this point of the command buffer
+        Metal::RecordQueuedBuilds(cmd);
     }
     else
 #endif

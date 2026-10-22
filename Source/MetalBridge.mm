@@ -44,6 +44,8 @@
 
 #include "CommandBufferManager.h"
 #include "MetalShaderGen.h"
+#include "MetalNative.h"
+#include "MetalNativeInternal.h"
 
 using namespace RTGL1;
 
@@ -398,6 +400,10 @@ id< MTLTexture > TextureForImage( VkImage image )
     {
         return nil;
     }
+    if( id< MTLTexture > drawable = MetalNative::SwapchainTexture( image ) )
+    {
+        return drawable; // changes every frame, not cached
+    }
     auto it = s.imageTextures.find( image );
     if( it != s.imageTextures.end() )
     {
@@ -490,6 +496,15 @@ id< MTLBuffer > BufferForMemory( VkDeviceMemory memory )
 // Metal buffer and byte offset of a Vulkan buffer (+ offset)
 bool ResolveBuffer( VkBuffer buffer, VkDeviceSize offset, id< MTLBuffer > __strong& outBuf, NSUInteger& outOffset )
 {
+    if( MetalNative::Enabled() )
+    {
+        // also buffers created through VMA, which bypasses the shims
+        VkDeviceSize         memOffset = 0;
+        const VkDeviceMemory mem       = MetalNative::MemoryOf( buffer, memOffset );
+        outBuf                         = mem ? BufferForMemory( mem ) : nil;
+        outOffset                      = NSUInteger( memOffset + offset );
+        return outBuf != nil;
+    }
     State& s  = S();
     auto   it = s.buffers.find( buffer );
     if( it == s.buffers.end() || it->second.memory == VK_NULL_HANDLE )
@@ -1003,6 +1018,8 @@ bool EncodeAccelerationStructureBuilds()
 
         id< MTLAccelerationStructureCommandEncoder > ae = [s.cb accelerationStructureCommandEncoder];
         ae.label                                        = @"RTGL1 bottom level";
+        // the geometry may have been written by the work before (e.g. vertex preprocessing)
+        [ae waitForFence:s.passFence];
         for( const Item& it : items )
         {
             MtlAS& m = s.as[ it.build->dst ];
@@ -1055,6 +1072,10 @@ bool EncodeAccelerationStructureBuilds()
     if( blasEncoded )
     {
         [ae waitForFence:s.blasFence];
+    }
+    else
+    {
+        [ae waitForFence:s.passFence];
     }
 
     NSUInteger scratchOffset = 0;
@@ -1206,7 +1227,7 @@ VkResult RTGL1::Metal::CreateDescriptorSetLayout( VkDevice                      
                                                   const VkAllocationCallbacks*           alloc,
                                                   VkDescriptorSetLayout*                 out )
 {
-    const VkResult r = vkCreateDescriptorSetLayout( device, ci, alloc, out );
+    const VkResult r = RG_VK( vkCreateDescriptorSetLayout )( device, ci, alloc, out );
     if( r == VK_SUCCESS )
     {
         auto li = std::make_shared< LayoutInfo >();
@@ -1230,7 +1251,7 @@ void RTGL1::Metal::DestroyDescriptorSetLayout( VkDevice device, VkDescriptorSetL
         std::lock_guard g( S().lock );
         S().layouts.erase( l );
     }
-    vkDestroyDescriptorSetLayout( device, l, alloc );
+    RG_VK( vkDestroyDescriptorSetLayout )( device, l, alloc );
 }
 
 VkResult RTGL1::Metal::CreatePipelineLayout( VkDevice                          device,
@@ -1238,7 +1259,7 @@ VkResult RTGL1::Metal::CreatePipelineLayout( VkDevice                          d
                                              const VkAllocationCallbacks*      alloc,
                                              VkPipelineLayout*                 out )
 {
-    const VkResult r = vkCreatePipelineLayout( device, ci, alloc, out );
+    const VkResult r = RG_VK( vkCreatePipelineLayout )( device, ci, alloc, out );
     if( r == VK_SUCCESS )
     {
         std::lock_guard g( S().lock );
@@ -1260,12 +1281,12 @@ void RTGL1::Metal::DestroyPipelineLayout( VkDevice device, VkPipelineLayout l, c
         S().pipelineLayouts.erase( l );
         ForgetGraphicsLibraries( uint64_t( uintptr_t( l ) ) );
     }
-    vkDestroyPipelineLayout( device, l, alloc );
+    RG_VK( vkDestroyPipelineLayout )( device, l, alloc );
 }
 
 VkResult RTGL1::Metal::AllocateDescriptorSets( VkDevice device, const VkDescriptorSetAllocateInfo* ai, VkDescriptorSet* out )
 {
-    const VkResult r = vkAllocateDescriptorSets( device, ai, out );
+    const VkResult r = RG_VK( vkAllocateDescriptorSets )( device, ai, out );
     if( r == VK_SUCCESS )
     {
         std::lock_guard g( S().lock );
@@ -1290,7 +1311,7 @@ VkResult RTGL1::Metal::FreeDescriptorSets( VkDevice device, VkDescriptorPool poo
             S().sets.erase( sets[ i ] );
         }
     }
-    return vkFreeDescriptorSets( device, pool, count, sets );
+    return RG_VK( vkFreeDescriptorSets )( device, pool, count, sets );
 }
 
 static void ForgetPoolSets( VkDescriptorPool pool )
@@ -1305,13 +1326,13 @@ static void ForgetPoolSets( VkDescriptorPool pool )
 void RTGL1::Metal::DestroyDescriptorPool( VkDevice device, VkDescriptorPool pool, const VkAllocationCallbacks* alloc )
 {
     ForgetPoolSets( pool );
-    vkDestroyDescriptorPool( device, pool, alloc );
+    RG_VK( vkDestroyDescriptorPool )( device, pool, alloc );
 }
 
 VkResult RTGL1::Metal::ResetDescriptorPool( VkDevice device, VkDescriptorPool pool, VkDescriptorPoolResetFlags flags )
 {
     ForgetPoolSets( pool );
-    return vkResetDescriptorPool( device, pool, flags );
+    return RG_VK( vkResetDescriptorPool )( device, pool, flags );
 }
 
 void RTGL1::Metal::UpdateDescriptorSets( VkDevice                    device,
@@ -1320,7 +1341,7 @@ void RTGL1::Metal::UpdateDescriptorSets( VkDevice                    device,
                                          uint32_t                    copyCount,
                                          const VkCopyDescriptorSet*  copies )
 {
-    vkUpdateDescriptorSets( device, writeCount, writes, copyCount, copies );
+    RG_VK( vkUpdateDescriptorSets )( device, writeCount, writes, copyCount, copies );
 
     std::lock_guard g( S().lock );
     if( copyCount > 0 )
@@ -1406,7 +1427,7 @@ void RTGL1::Metal::UpdateDescriptorSets( VkDevice                    device,
 
 VkResult RTGL1::Metal::CreateSampler( VkDevice device, const VkSamplerCreateInfo* ci, const VkAllocationCallbacks* alloc, VkSampler* out )
 {
-    const VkResult r = vkCreateSampler( device, ci, alloc, out );
+    const VkResult r = RG_VK( vkCreateSampler )( device, ci, alloc, out );
     if( r == VK_SUCCESS )
     {
         std::lock_guard g( S().lock );
@@ -1424,12 +1445,12 @@ void RTGL1::Metal::DestroySampler( VkDevice device, VkSampler sampler, const VkA
         std::lock_guard g( S().lock );
         S().samplers.erase( sampler );
     }
-    vkDestroySampler( device, sampler, alloc );
+    RG_VK( vkDestroySampler )( device, sampler, alloc );
 }
 
 VkResult RTGL1::Metal::CreateBuffer( VkDevice device, const VkBufferCreateInfo* ci, const VkAllocationCallbacks* alloc, VkBuffer* out )
 {
-    const VkResult r = vkCreateBuffer( device, ci, alloc, out );
+    const VkResult r = RG_VK( vkCreateBuffer )( device, ci, alloc, out );
     if( r == VK_SUCCESS )
     {
         std::lock_guard g( S().lock );
@@ -1456,12 +1477,12 @@ void RTGL1::Metal::DestroyBuffer( VkDevice device, VkBuffer buffer, const VkAllo
             S().buffers.erase( it );
         }
     }
-    vkDestroyBuffer( device, buffer, alloc );
+    RG_VK( vkDestroyBuffer )( device, buffer, alloc );
 }
 
 VkResult RTGL1::Metal::BindBufferMemory( VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset )
 {
-    const VkResult r = vkBindBufferMemory( device, buffer, memory, offset );
+    const VkResult r = RG_VK( vkBindBufferMemory )( device, buffer, memory, offset );
     if( r == VK_SUCCESS )
     {
         std::lock_guard g( S().lock );
@@ -1474,7 +1495,7 @@ VkResult RTGL1::Metal::BindBufferMemory( VkDevice device, VkBuffer buffer, VkDev
 
 VkDeviceAddress RTGL1::Metal::GetBufferDeviceAddress( VkDevice device, const VkBufferDeviceAddressInfo* info )
 {
-    const VkDeviceAddress a = vkGetBufferDeviceAddress( device, info );
+    const VkDeviceAddress a = RG_VK( vkGetBufferDeviceAddress )( device, info );
     if( a != 0 )
     {
         std::lock_guard g( S().lock );
@@ -1484,18 +1505,21 @@ VkDeviceAddress RTGL1::Metal::GetBufferDeviceAddress( VkDevice device, const VkB
     return a;
 }
 
+void RTGL1::Metal::ForgetMemory( VkDeviceMemory memory )
+{
+    std::lock_guard g( S().lock );
+    auto            it = S().memoryBuffers.find( memory );
+    if( it != S().memoryBuffers.end() )
+    {
+        RemoveResident( it->second );
+        S().memoryBuffers.erase( it );
+    }
+}
+
 void RTGL1::Metal::FreeMemory( VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* alloc )
 {
-    {
-        std::lock_guard g( S().lock );
-        auto            it = S().memoryBuffers.find( memory );
-        if( it != S().memoryBuffers.end() )
-        {
-            RemoveResident( it->second );
-            S().memoryBuffers.erase( it );
-        }
-    }
-    vkFreeMemory( device, memory, alloc );
+    ForgetMemory( memory );
+    RG_VK( vkFreeMemory )( device, memory, alloc );
 }
 
 void RTGL1::Metal::DestroyImageView( VkDevice device, VkImageView view, const VkAllocationCallbacks* alloc )
@@ -1513,7 +1537,7 @@ void RTGL1::Metal::DestroyImageView( VkDevice device, VkImageView view, const Vk
             S().viewTextures.erase( it );
         }
     }
-    vkDestroyImageView( device, view, alloc );
+    RG_VK( vkDestroyImageView )( device, view, alloc );
 }
 
 void RTGL1::Metal::ForgetImage( VkImage image )
@@ -1530,7 +1554,7 @@ void RTGL1::Metal::ForgetImage( VkImage image )
 void RTGL1::Metal::DestroyImage( VkDevice device, VkImage image, const VkAllocationCallbacks* alloc )
 {
     ForgetImage( image );
-    vkDestroyImage( device, image, alloc );
+    RG_VK( vkDestroyImage )( device, image, alloc );
 }
 
 VkResult RTGL1::Metal::CreateShaderModule( VkDevice                        device,
@@ -1538,7 +1562,7 @@ VkResult RTGL1::Metal::CreateShaderModule( VkDevice                        devic
                                            const VkAllocationCallbacks*    alloc,
                                            VkShaderModule*                 out )
 {
-    const VkResult r = vkCreateShaderModule( device, ci, alloc, out );
+    const VkResult r = RG_VK( vkCreateShaderModule )( device, ci, alloc, out );
     if( r == VK_SUCCESS )
     {
         std::lock_guard g( S().lock );
@@ -1554,7 +1578,7 @@ void RTGL1::Metal::DestroyShaderModule( VkDevice device, VkShaderModule module, 
         S().modules.erase( module );
         ForgetGraphicsLibraries( uint64_t( uintptr_t( module ) ) );
     }
-    vkDestroyShaderModule( device, module, alloc );
+    RG_VK( vkDestroyShaderModule )( device, module, alloc );
 }
 
 VkResult RTGL1::Metal::CreateComputePipelines( VkDevice                           device,
@@ -1564,7 +1588,7 @@ VkResult RTGL1::Metal::CreateComputePipelines( VkDevice                         
                                                const VkAllocationCallbacks*       alloc,
                                                VkPipeline*                        out )
 {
-    const VkResult r = vkCreateComputePipelines( device, cache, count, cis, alloc, out );
+    const VkResult r = RG_VK( vkCreateComputePipelines )( device, cache, count, cis, alloc, out );
     if( r == VK_SUCCESS )
     {
         std::lock_guard g( S().lock );
@@ -1593,7 +1617,7 @@ void RTGL1::Metal::DestroyPipeline( VkDevice device, VkPipeline pipeline, const 
         S().pipelines.erase( pipeline );
         S().gpipelines.erase( pipeline );
     }
-    vkDestroyPipeline( device, pipeline, alloc );
+    RG_VK( vkDestroyPipeline )( device, pipeline, alloc );
 }
 
 VkResult RTGL1::Metal::CreateRenderPass( VkDevice                      device,
@@ -1601,7 +1625,7 @@ VkResult RTGL1::Metal::CreateRenderPass( VkDevice                      device,
                                          const VkAllocationCallbacks*  alloc,
                                          VkRenderPass*                 out )
 {
-    const VkResult r = vkCreateRenderPass( device, ci, alloc, out );
+    const VkResult r = RG_VK( vkCreateRenderPass )( device, ci, alloc, out );
     if( r != VK_SUCCESS )
     {
         return r;
@@ -1656,7 +1680,7 @@ void RTGL1::Metal::DestroyRenderPass( VkDevice device, VkRenderPass rp, const Vk
         std::lock_guard g( S().lock );
         S().renderPasses.erase( rp );
     }
-    vkDestroyRenderPass( device, rp, alloc );
+    RG_VK( vkDestroyRenderPass )( device, rp, alloc );
 }
 
 VkResult RTGL1::Metal::CreateFramebuffer( VkDevice                       device,
@@ -1664,7 +1688,7 @@ VkResult RTGL1::Metal::CreateFramebuffer( VkDevice                       device,
                                           const VkAllocationCallbacks*   alloc,
                                           VkFramebuffer*                 out )
 {
-    const VkResult r = vkCreateFramebuffer( device, ci, alloc, out );
+    const VkResult r = RG_VK( vkCreateFramebuffer )( device, ci, alloc, out );
     if( r == VK_SUCCESS )
     {
         FramebufferInfo info;
@@ -1686,7 +1710,7 @@ void RTGL1::Metal::DestroyFramebuffer( VkDevice device, VkFramebuffer fb, const 
         std::lock_guard g( S().lock );
         S().framebuffers.erase( fb );
     }
-    vkDestroyFramebuffer( device, fb, alloc );
+    RG_VK( vkDestroyFramebuffer )( device, fb, alloc );
 }
 
 VkResult RTGL1::Metal::CreateGraphicsPipelines( VkDevice                            device,
@@ -1696,7 +1720,7 @@ VkResult RTGL1::Metal::CreateGraphicsPipelines( VkDevice                        
                                                 const VkAllocationCallbacks*        alloc,
                                                 VkPipeline*                         out )
 {
-    const VkResult r = vkCreateGraphicsPipelines( device, cache, count, cis, alloc, out );
+    const VkResult r = RG_VK( vkCreateGraphicsPipelines )( device, cache, count, cis, alloc, out );
     if( r != VK_SUCCESS )
     {
         return r;
@@ -1830,8 +1854,9 @@ void RTGL1::Metal::Disable( const char* reason )
 
 bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager > cmdManager )
 {
+    // RTGL1_METAL_ONLY=1 (no MoltenVK) needs everything in Metal
     const char* e = getenv( "RTGL1_METAL_RT" );
-    if( !( e && e[ 0 ] == '1' ) )
+    if( !( e && e[ 0 ] == '1' ) && !MetalNative::Enabled() )
     {
         return false;
     }
@@ -1844,7 +1869,7 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
         s.device     = device;
         s.cmdManager = std::move( cmdManager );
         s.exportFn   = reinterpret_cast< PFN_vkExportMetalObjectsEXT >(
-            vkGetDeviceProcAddr( device, "vkExportMetalObjectsEXT" ) );
+            RG_VK( vkGetDeviceProcAddr )( device, "vkExportMetalObjectsEXT" ) );
         if( !s.exportFn )
         {
             Log( "vkExportMetalObjectsEXT is not available, native path tracing is off" );
@@ -1871,7 +1896,8 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             return false;
         }
 
-        s.queue       = [s.mtlDevice newCommandQueue];
+        // Metal only: the queue all the work is submitted to
+        s.queue       = MetalNative::Enabled() ? MetalNative::Queue() : [s.mtlDevice newCommandQueue];
         s.queue.label = @"RTGL1 native";
         s.event       = [s.mtlDevice newSharedEvent];
         s.fence       = [s.mtlDevice newFence];
@@ -1893,7 +1919,7 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
         type.semaphoreType                  = VK_SEMAPHORE_TYPE_TIMELINE;
         VkSemaphoreCreateInfo sci           = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         sci.pNext                           = &type;
-        if( vkCreateSemaphore( device, &sci, nullptr, &s.semaphore ) != VK_SUCCESS )
+        if( RG_VK( vkCreateSemaphore )( device, &sci, nullptr, &s.semaphore ) != VK_SUCCESS )
         {
             s.semaphore = VK_NULL_HANDLE;
             Log( "couldn't import the shared event into Vulkan" );
@@ -1920,7 +1946,7 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             const char* p = getenv( "RTGL1_PROFILE" );
             s.profile     = p && p[ 0 ] == '1';
             const char* c = getenv( "RTGL1_METAL_COMPUTE" );
-            s.computeEnv  = !( c && c[ 0 ] == '0' );
+            s.computeEnv  = MetalNative::Enabled() || !( c && c[ 0 ] == '0' );
             const char* f = getenv( "RTGL1_METAL_FASTMATH" );
             s.fastMath    = f && f[ 0 ] == '1';
             const char* ra = getenv( "RTGL1_METAL_RASTER" );
@@ -1954,7 +1980,7 @@ void RTGL1::Metal::Shutdown()
         }
         if( s.semaphore != VK_NULL_HANDLE )
         {
-            vkDestroySemaphore( s.device, s.semaphore, nullptr );
+            RG_VK( vkDestroySemaphore )( s.device, s.semaphore, nullptr );
             s.semaphore = VK_NULL_HANDLE;
         }
         for( auto& [ set, si ] : s.sets )
@@ -3652,7 +3678,12 @@ const char* BLIT_MSL = R"MSL(
 using namespace metal;
 // as in Vulkan: destination pixel centers map linearly from dst0..dst1 to src0..src1
 // (a region is flipped when an end is before its start)
-struct BlitParams { int2 dst0; int2 dst1; float2 src0; float2 src1; float2 srcTexSize; };
+struct BlitParams { int2 dst0; int2 dst1; float2 src0; float2 src1; float2 srcTexSize; uint encodeSrgb; uint pad; };
+static float3 LinearToSrgb( float3 c )
+{
+    c = max( c, 0.0 );
+    return select( 1.055 * pow( c, 1.0 / 2.4 ) - 0.055, c * 12.92, c <= 0.0031308 );
+}
 kernel void rgBlit( texture2d< float, access::sample > src [[texture(0)]],
                     texture2d< float, access::write >  dst [[texture(1)]],
                     sampler                            smp [[sampler(0)]],
@@ -3665,7 +3696,12 @@ kernel void rgBlit( texture2d< float, access::sample > src [[texture(0)]],
     const int2   d  = lo + int2( gid );
     const float2 t  = ( float2( d ) + 0.5 - float2( p.dst0 ) ) / float2( p.dst1 - p.dst0 );
     const float2 uv = ( p.src0 + t * ( p.src1 - p.src0 ) ) / p.srcTexSize;
-    dst.write( src.sample( smp, uv, level( 0 ) ), uint2( d ) );
+    float4 c = src.sample( smp, uv, level( 0 ) );
+    if( p.encodeSrgb != 0 )
+    {
+        c.rgb = LinearToSrgb( c.rgb );
+    }
+    dst.write( c, uint2( d ) );
 }
 )MSL";
 
@@ -3703,6 +3739,32 @@ void CreateHelpers()
     s.blitLinear            = [s.mtlDevice newSamplerStateWithDescriptor:d];
 }
 
+MTLPixelFormat LinearFormatOf( MTLPixelFormat f )
+{
+    switch( f )
+    {
+        case MTLPixelFormatRGBA8Unorm_sRGB: return MTLPixelFormatRGBA8Unorm;
+        case MTLPixelFormatBGRA8Unorm_sRGB: return MTLPixelFormatBGRA8Unorm;
+        case MTLPixelFormatR8Unorm_sRGB: return MTLPixelFormatR8Unorm;
+        case MTLPixelFormatRG8Unorm_sRGB: return MTLPixelFormatRG8Unorm;
+        default: return f;
+    }
+}
+
+// a 2D view of one level / layer of a texture (the texture itself if it's just that)
+id< MTLTexture > LevelView( id< MTLTexture > t, MTLPixelFormat format, uint32_t level, uint32_t layer )
+{
+    if( t.textureType == MTLTextureType2D && t.mipmapLevelCount == 1 && level == 0 && layer == 0 &&
+        format == t.pixelFormat )
+    {
+        return t;
+    }
+    return [t newTextureViewWithPixelFormat:format
+                                textureType:MTLTextureType2D
+                                     levels:NSMakeRange( level, 1 )
+                                     slices:NSMakeRange( layer, 1 )];
+}
+
 void SectionBlitImage( VkImage srcImage, VkImage dstImage, uint32_t count, const VkImageBlit* regions, VkFilter filter )
 {
     @autoreleasepool
@@ -3725,46 +3787,125 @@ void SectionBlitImage( VkImage srcImage, VkImage dstImage, uint32_t count, const
             RasterUnsupported( "vkCmdBlitImage with images without Metal textures" );
             return;
         }
+        // sRGB destinations are written through a linear view, encoding in the shader; the
+        // swapchain's drawables are linear textures for sRGB images
+        const MTLPixelFormat dstWriteFormat = LinearFormatOf( dst.pixelFormat );
+        const bool encodeSrgb = dstWriteFormat != dst.pixelFormat || MetalNative::NeedsSrgbEncode( dstImage );
+
         for( uint32_t i = 0; i < count; i++ )
         {
             const VkImageBlit& r = regions[ i ];
-            if( r.srcSubresource.mipLevel != 0 || r.dstSubresource.mipLevel != 0 ||
-                r.srcSubresource.baseArrayLayer != 0 || r.dstSubresource.baseArrayLayer != 0 ||
-                r.srcOffsets[ 1 ].z - r.srcOffsets[ 0 ].z != 1 || r.dstOffsets[ 1 ].z - r.dstOffsets[ 0 ].z != 1 )
+            if( r.srcOffsets[ 1 ].z - r.srcOffsets[ 0 ].z != 1 || r.dstOffsets[ 1 ].z - r.dstOffsets[ 0 ].z != 1 ||
+                r.srcSubresource.layerCount != r.dstSubresource.layerCount )
             {
-                RasterUnsupported( "vkCmdBlitImage of mip levels / layers / 3D regions" );
+                RasterUnsupported( "vkCmdBlitImage of 3D regions" );
                 return;
             }
-            struct
-            {
-                int32_t dst0[ 2 ];
-                int32_t dst1[ 2 ];
-                float   src0[ 2 ];
-                float   src1[ 2 ];
-                float   srcTexSize[ 2 ];
-            } p = {
-                { r.dstOffsets[ 0 ].x, r.dstOffsets[ 0 ].y },
-                { r.dstOffsets[ 1 ].x, r.dstOffsets[ 1 ].y },
-                { float( r.srcOffsets[ 0 ].x ), float( r.srcOffsets[ 0 ].y ) },
-                { float( r.srcOffsets[ 1 ].x ), float( r.srcOffsets[ 1 ].y ) },
-                { float( src.width ), float( src.height ) },
-            };
-            const uint32_t w = uint32_t( std::abs( p.dst1[ 0 ] - p.dst0[ 0 ] ) );
-            const uint32_t h = uint32_t( std::abs( p.dst1[ 1 ] - p.dst0[ 1 ] ) );
+            const uint32_t w = uint32_t( std::abs( r.dstOffsets[ 1 ].x - r.dstOffsets[ 0 ].x ) );
+            const uint32_t h = uint32_t( std::abs( r.dstOffsets[ 1 ].y - r.dstOffsets[ 0 ].y ) );
             if( w == 0 || h == 0 )
             {
                 continue;
             }
 
-            id< MTLComputeCommandEncoder > e = ComputeEnc();
-            [e setComputePipelineState:s.blitPipeline];
-            [e setTexture:src atIndex:0];
-            [e setTexture:dst atIndex:1];
-            [e setSamplerState:filter == VK_FILTER_NEAREST ? s.blitNearest : s.blitLinear atIndex:0];
-            [e setBytes:&p length:sizeof( p ) atIndex:0];
-            [e dispatchThreadgroups:MTLSizeMake( ( w + 7 ) / 8, ( h + 7 ) / 8, 1 )
-                threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
-            [e memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+            for( uint32_t layer = 0; layer < r.srcSubresource.layerCount; layer++ )
+            {
+                id< MTLTexture > sv = LevelView( src, src.pixelFormat, r.srcSubresource.mipLevel, r.srcSubresource.baseArrayLayer + layer );
+                id< MTLTexture > dv = LevelView( dst, dstWriteFormat, r.dstSubresource.mipLevel, r.dstSubresource.baseArrayLayer + layer );
+                if( !sv || !dv )
+                {
+                    RasterUnsupported( "vkCmdBlitImage: no texture view" );
+                    return;
+                }
+                struct
+                {
+                    int32_t  dst0[ 2 ];
+                    int32_t  dst1[ 2 ];
+                    float    src0[ 2 ];
+                    float    src1[ 2 ];
+                    float    srcTexSize[ 2 ];
+                    uint32_t encodeSrgb;
+                    uint32_t pad;
+                } p = {
+                    { r.dstOffsets[ 0 ].x, r.dstOffsets[ 0 ].y },
+                    { r.dstOffsets[ 1 ].x, r.dstOffsets[ 1 ].y },
+                    { float( r.srcOffsets[ 0 ].x ), float( r.srcOffsets[ 0 ].y ) },
+                    { float( r.srcOffsets[ 1 ].x ), float( r.srcOffsets[ 1 ].y ) },
+                    { float( sv.width ), float( sv.height ) },
+                    encodeSrgb ? 1u : 0u,
+                    0,
+                };
+
+                id< MTLComputeCommandEncoder > e = ComputeEnc();
+                [e setComputePipelineState:s.blitPipeline];
+                [e setTexture:sv atIndex:0];
+                [e setTexture:dv atIndex:1];
+                [e setSamplerState:filter == VK_FILTER_NEAREST ? s.blitNearest : s.blitLinear atIndex:0];
+                [e setBytes:&p length:sizeof( p ) atIndex:0];
+                [e dispatchThreadgroups:MTLSizeMake( ( w + 7 ) / 8, ( h + 7 ) / 8, 1 )
+                    threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
+                [e memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+            }
+        }
+    }
+}
+
+// Metal only (the images' formats are known)
+void SectionCopyBufferToImage( VkBuffer srcBuffer, VkImage dstImage, uint32_t count, const VkBufferImageCopy* regions )
+{
+    @autoreleasepool
+    {
+        std::lock_guard g( S().lock );
+        State&          s = S();
+        if( !s.cb )
+        {
+            return;
+        }
+        if( s.renderEnc || !MetalNative::Enabled() )
+        {
+            RasterUnsupported( "vkCmdCopyBufferToImage" );
+            return;
+        }
+        id< MTLTexture >                    tex = TextureForImage( dstImage );
+        const MetalNative::FormatInfo       fi  = MetalNative::GetFormatInfo( MetalNative::ImageFormat( dstImage ) );
+        if( !tex || fi.bytesPerBlock == 0 )
+        {
+            LogOnce( "vkCmdCopyBufferToImage: unknown image" );
+            return;
+        }
+        for( uint32_t i = 0; i < count; i++ )
+        {
+            const VkBufferImageCopy& r = regions[ i ];
+            id< MTLBuffer >          buf;
+            NSUInteger               off = 0;
+            if( !ResolveBuffer( srcBuffer, r.bufferOffset, buf, off ) )
+            {
+                LogOnce( "vkCmdCopyBufferToImage: unknown buffer" );
+                return;
+            }
+            const uint32_t   w          = r.imageExtent.width;
+            const uint32_t   h          = std::max( 1u, r.imageExtent.height );
+            const uint32_t   d          = std::max( 1u, r.imageExtent.depth );
+            const uint32_t   rowLength  = r.bufferRowLength ? r.bufferRowLength : w;
+            const uint32_t   imageHeight = r.bufferImageHeight ? r.bufferImageHeight : h;
+            const NSUInteger bytesPerRow =
+                NSUInteger( ( rowLength + fi.blockWidth - 1 ) / fi.blockWidth ) * fi.bytesPerBlock;
+            const NSUInteger bytesPerImage =
+                bytesPerRow * ( ( imageHeight + fi.blockHeight - 1 ) / fi.blockHeight );
+            const bool is3D = tex.textureType == MTLTextureType3D;
+
+            for( uint32_t layer = 0; layer < std::max( 1u, r.imageSubresource.layerCount ); layer++ )
+            {
+                [BlitEnc() copyFromBuffer:buf
+                             sourceOffset:off + layer * bytesPerImage * d
+                        sourceBytesPerRow:bytesPerRow
+                      sourceBytesPerImage:is3D ? bytesPerImage : 0
+                               sourceSize:MTLSizeMake( w, h, d )
+                                toTexture:tex
+                         destinationSlice:is3D ? 0 : r.imageSubresource.baseArrayLayer + layer
+                         destinationLevel:r.imageSubresource.mipLevel
+                        destinationOrigin:MTLOriginMake( r.imageOffset.x, r.imageOffset.y, r.imageOffset.z )];
+            }
         }
     }
 }
@@ -4075,6 +4216,94 @@ void RTGL1::Metal::DrainTimings( const std::function< void( const char*, double 
     }
 }
 
+namespace
+{
+
+// Ends the encoders of the section's command buffer and commits it: it signals the event
+// with s.sectionDone, 'extra' can encode more (signals) before the commit. Under the lock.
+void FinishSectionCommandBuffer( const std::function< void( id< MTLCommandBuffer > ) >& extra,
+                                 MetalNative::NativeFence*                                fence )
+{
+    State& s = S();
+    if( s.renderEnc )
+    {
+        LogOnce( "a native Metal command buffer ended inside a render pass" );
+        EndRenderEncoder( false );
+    }
+    EndNonRenderEncoder();
+    CommitResidency();
+    s.waitASFence = false;
+
+    [s.cb encodeSignalEvent:s.event value:s.sectionDone];
+    [s.cb addCompletedHandler:^( id< MTLCommandBuffer > c ) {
+        if( c.status == MTLCommandBufferStatusError && S().loggedErrors.fetch_add( 1 ) < 10 )
+        {
+            Log( "GPU error in native Metal work: %s", c.error ? c.error.localizedDescription.UTF8String : "?" );
+        }
+    }];
+
+    if( s.profile )
+    {
+        s.profCbs.push_back( { s.cb, Intern( "(end of command buffer)" ) } );
+        auto                   list   = std::make_shared< std::vector< ProfiledCb > >( std::move( s.profCbs ) );
+        id< MTLCommandBuffer > waitCb = s.profWaitCb;
+        s.profCbs.clear();
+        s.profWaitCb = nil;
+
+        const auto  stats   = s.asStats;
+        const char* nBuilds = Intern( "BLAS builds" );
+        const char* nRefits = Intern( "BLAS refits" );
+        const char* nInst   = Intern( "TLAS instances" );
+
+        [s.cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
+            std::vector< std::pair< const char*, double > > out;
+            out.emplace_back( nBuilds, double( stats.blasBuilds ) );
+            out.emplace_back( nRefits, double( stats.blasRefits ) );
+            out.emplace_back( nInst, double( stats.tlasInstances ) );
+            double prevEnd = waitCb ? waitCb.GPUEndTime : 0.0;
+            for( const ProfiledCb& p : *list )
+            {
+                if( p.cb.status != MTLCommandBufferStatusCompleted )
+                {
+                    out.clear();
+                    break;
+                }
+                const double start = std::max( double( p.cb.GPUStartTime ), prevEnd );
+                const double ms    = std::max( 0.0, double( p.cb.GPUEndTime ) - start ) * 1000.0;
+                prevEnd            = p.cb.GPUEndTime;
+                out.emplace_back( p.name, ms );
+            }
+            list->clear();
+            std::lock_guard g( S().timingLock );
+            S().timings.insert( S().timings.end(), out.begin(), out.end() );
+        }];
+    }
+    s.asStats = {};
+
+    if( extra )
+    {
+        extra( s.cb );
+    }
+    if( fence )
+    {
+        [s.cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
+            std::lock_guard l( fence->lock );
+            fence->signaled = true;
+            fence->cv.notify_all();
+        }];
+    }
+
+    [s.cb commit];
+    if( MetalNative::Enabled() )
+    {
+        MetalNative::NoteCommitted( s.cb );
+    }
+    s.lastCb = s.cb;
+    s.cb     = nil;
+}
+
+}
+
 void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
 {
     @autoreleasepool
@@ -4083,67 +4312,9 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
         State&          s = S();
         assert( s.cb );
 
-        if( s.renderEnc )
-        {
-            LogOnce( "a native Metal section ended inside a render pass" );
-            EndRenderEncoder( false );
-        }
-        EndNonRenderEncoder();
-        CommitResidency();
-        s.waitASFence = false;
-
         const uint64_t metalDone = ++s.timeline;
         assert( metalDone == s.sectionDone );
-        [s.cb encodeSignalEvent:s.event value:metalDone];
-        [s.cb addCompletedHandler:^( id< MTLCommandBuffer > c ) {
-            if( c.status == MTLCommandBufferStatusError && S().loggedErrors.fetch_add( 1 ) < 10 )
-            {
-                Log( "GPU error in the native Metal section: %s",
-                     c.error ? c.error.localizedDescription.UTF8String : "?" );
-            }
-        }];
-
-        if( s.profile )
-        {
-            s.profCbs.push_back( { s.cb, Intern( "(end of section)" ) } );
-            auto                   list   = std::make_shared< std::vector< ProfiledCb > >( std::move( s.profCbs ) );
-            id< MTLCommandBuffer > waitCb = s.profWaitCb;
-            s.profCbs.clear();
-            s.profWaitCb = nil;
-
-            const auto  stats   = s.asStats;
-            const char* nBuilds = Intern( "BLAS builds" );
-            const char* nRefits = Intern( "BLAS refits" );
-            const char* nInst   = Intern( "TLAS instances" );
-
-            [s.cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
-                std::vector< std::pair< const char*, double > > out;
-                out.emplace_back( nBuilds, double( stats.blasBuilds ) );
-                out.emplace_back( nRefits, double( stats.blasRefits ) );
-                out.emplace_back( nInst, double( stats.tlasInstances ) );
-                double prevEnd = waitCb.GPUEndTime;
-                for( const ProfiledCb& p : *list )
-                {
-                    if( p.cb.status != MTLCommandBufferStatusCompleted )
-                    {
-                        out.clear();
-                        break;
-                    }
-                    const double start = std::max( double( p.cb.GPUStartTime ), prevEnd );
-                    const double ms    = std::max( 0.0, double( p.cb.GPUEndTime ) - start ) * 1000.0;
-                    prevEnd            = p.cb.GPUEndTime;
-                    out.emplace_back( p.name, ms );
-                }
-                list->clear();
-                std::lock_guard g( S().timingLock );
-                S().timings.insert( S().timings.end(), out.begin(), out.end() );
-            }];
-        }
-        s.asStats = {};
-
-        [s.cb commit];
-        s.lastCb = s.cb;
-        s.cb     = nil;
+        FinishSectionCommandBuffer( nullptr, nullptr );
 
         // the following Vulkan work waits for it
         s.cmdManager->AddTimelineWaitForNextSubmit( s.semaphore, metalDone );
@@ -4152,16 +4323,290 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
 }
 
 // ================================================================================================
+// Metal only (RTGL1_METAL_ONLY=1): command buffers record the commands, vkQueueSubmit
+// encodes them into Metal command buffers with the same code as the native sections
+
+using MetalNative::NativeCommandBuffer;
+using MetalNative::NativeCommandPool;
+using MetalNative::NativeFence;
+using MetalNative::NativeSemaphore;
+
+bool RTGL1::MetalNative::IsNativeCmd( VkCommandBuffer cmd )
+{
+    return Enabled() && cmd != VK_NULL_HANDLE && cmd != Metal::SectionCmd();
+}
+
+namespace
+{
+void Record( VkCommandBuffer cmd, std::function< void() > f )
+{
+    reinterpret_cast< NativeCommandBuffer* >( cmd )->commands.push_back( std::move( f ) );
+}
+}
+
+bool RTGL1::Metal::IsNativeMode()
+{
+    return MetalNative::Enabled();
+}
+
+void RTGL1::Metal::RecordQueuedBuilds( VkCommandBuffer cmd )
+{
+    if( !MetalNative::IsNativeCmd( cmd ) )
+    {
+        return; // a native section encodes them at its start
+    }
+    std::lock_guard g( S().lock );
+    State&          s = S();
+    if( s.pendingBlas.empty() && s.pendingTlas.empty() )
+    {
+        return;
+    }
+    std::vector< BlasBuild > blas;
+    std::vector< TlasBuild > tlas;
+    blas.swap( s.pendingBlas );
+    tlas.swap( s.pendingTlas );
+    Record( cmd, [ blas, tlas ]() {
+        State& s = S();
+        if( s.renderEnc )
+        {
+            LogOnce( "acceleration structure builds inside a render pass" );
+            return;
+        }
+        EndNonRenderEncoder();
+        s.pendingBlas = blas;
+        s.pendingTlas = tlas;
+        // the encoders after these wait for them
+        if( EncodeAccelerationStructureBuilds() )
+        {
+            s.waitASFence = true;
+        }
+    } );
+}
+
+void RTGL1::Metal::RecordMark( VkCommandBuffer cmd, const char* name )
+{
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [ name ]() {
+            if( S().profile && S().cb )
+            {
+                SplitForProfiling( Intern( name ) );
+            }
+        } );
+    }
+}
+
+void RTGL1::Metal::RecordExternal( VkCommandBuffer                                                   cmd,
+                                   std::function< void( id< MTLCommandBuffer >, id< MTLFence > ) > encode )
+{
+    if( !MetalNative::IsNativeCmd( cmd ) )
+    {
+        return;
+    }
+    Record( cmd, [ encode ]() {
+        State& s = S();
+        if( s.renderEnc )
+        {
+            LogOnce( "external Metal work inside a render pass" );
+            return;
+        }
+        EndNonRenderEncoder();
+        CommitResidency();
+        encode( s.cb, s.passFence );
+    } );
+}
+
+VkResult RTGL1::MetalNative::vkCreateCommandPool( VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*, VkCommandPool* out )
+{
+    *out = reinterpret_cast< VkCommandPool >( new NativeCommandPool );
+    return VK_SUCCESS;
+}
+
+void RTGL1::MetalNative::vkDestroyCommandPool( VkDevice, VkCommandPool pool, const VkAllocationCallbacks* )
+{
+    auto* p = reinterpret_cast< NativeCommandPool* >( pool );
+    if( !p )
+    {
+        return;
+    }
+    for( NativeCommandBuffer* c : p->buffers )
+    {
+        delete c;
+    }
+    delete p;
+}
+
+VkResult RTGL1::MetalNative::vkResetCommandPool( VkDevice, VkCommandPool pool, VkCommandPoolResetFlags )
+{
+    for( NativeCommandBuffer* c : reinterpret_cast< NativeCommandPool* >( pool )->buffers )
+    {
+        c->commands.clear();
+    }
+    return VK_SUCCESS;
+}
+
+VkResult RTGL1::MetalNative::vkAllocateCommandBuffers( VkDevice, const VkCommandBufferAllocateInfo* ai, VkCommandBuffer* out )
+{
+    auto* p = reinterpret_cast< NativeCommandPool* >( ai->commandPool );
+    for( uint32_t i = 0; i < ai->commandBufferCount; i++ )
+    {
+        auto* c = new NativeCommandBuffer;
+        c->pool = p;
+        p->buffers.push_back( c );
+        out[ i ] = reinterpret_cast< VkCommandBuffer >( c );
+    }
+    return VK_SUCCESS;
+}
+
+void RTGL1::MetalNative::vkFreeCommandBuffers( VkDevice, VkCommandPool pool, uint32_t count, const VkCommandBuffer* cmds )
+{
+    auto* p = reinterpret_cast< NativeCommandPool* >( pool );
+    for( uint32_t i = 0; i < count; i++ )
+    {
+        auto* c = reinterpret_cast< NativeCommandBuffer* >( cmds[ i ] );
+        p->buffers.erase( std::remove( p->buffers.begin(), p->buffers.end(), c ), p->buffers.end() );
+        delete c;
+    }
+}
+
+VkResult RTGL1::MetalNative::vkBeginCommandBuffer( VkCommandBuffer cmd, const VkCommandBufferBeginInfo* )
+{
+    reinterpret_cast< NativeCommandBuffer* >( cmd )->commands.clear();
+    return VK_SUCCESS;
+}
+
+VkResult RTGL1::MetalNative::vkEndCommandBuffer( VkCommandBuffer )
+{
+    return VK_SUCCESS;
+}
+
+VkResult RTGL1::MetalNative::vkQueueSubmit( VkQueue, uint32_t count, const VkSubmitInfo* submits, VkFence fence )
+{
+    @autoreleasepool
+    {
+        std::lock_guard g( S().lock );
+        State&          s = S();
+        auto*           f = reinterpret_cast< NativeFence* >( fence );
+
+        if( count == 0 )
+        {
+            if( f )
+            {
+                // signaled when the work submitted before is done
+                id< MTLCommandBuffer > cb = [s.queue commandBuffer];
+                [cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
+                    std::lock_guard l( f->lock );
+                    f->signaled = true;
+                    f->cv.notify_all();
+                }];
+                [cb commit];
+                MetalNative::NoteCommitted( cb );
+            }
+            return VK_SUCCESS;
+        }
+
+        for( uint32_t i = 0; i < count; i++ )
+        {
+            const VkSubmitInfo&                  si = submits[ i ];
+            const VkTimelineSemaphoreSubmitInfo* tl = nullptr;
+            for( auto* n = static_cast< const VkBaseInStructure* >( si.pNext ); n; n = n->pNext )
+            {
+                if( n->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO )
+                {
+                    tl = reinterpret_cast< const VkTimelineSemaphoreSubmitInfo* >( n );
+                }
+            }
+
+            s.cb          = [s.queue commandBuffer];
+            s.cb.label    = @"RTGL1";
+            s.sectionDone = ++s.timeline;
+            s.profWaitCb  = nil;
+            s.waitASFence = false;
+
+            for( uint32_t w = 0; w < si.waitSemaphoreCount; w++ )
+            {
+                auto* sem = reinterpret_cast< NativeSemaphore* >( si.pWaitSemaphores[ w ] );
+                if( !sem )
+                {
+                    continue;
+                }
+                const uint64_t value = sem->timeline ? ( tl && w < tl->waitSemaphoreValueCount ? tl->pWaitSemaphoreValues[ w ] : 0 )
+                                                     : sem->value;
+                [s.cb encodeWaitForEvent:sem->event value:value];
+            }
+
+            for( uint32_t c = 0; c < si.commandBufferCount; c++ )
+            {
+                // the state of a command buffer starts empty
+                s.bound   = {};
+                G().bound = {};
+                G().rp    = {};
+                for( const auto& command : reinterpret_cast< NativeCommandBuffer* >( si.pCommandBuffers[ c ] )->commands )
+                {
+                    command();
+                }
+                if( s.renderEnc )
+                {
+                    LogOnce( "a command buffer ended inside a render pass" );
+                    EndRenderEncoder( false );
+                }
+            }
+
+            std::vector< std::pair< NativeSemaphore*, uint64_t > > signals;
+            for( uint32_t k = 0; k < si.signalSemaphoreCount; k++ )
+            {
+                auto* sem = reinterpret_cast< NativeSemaphore* >( si.pSignalSemaphores[ k ] );
+                if( !sem )
+                {
+                    continue;
+                }
+                uint64_t value;
+                if( sem->timeline )
+                {
+                    value      = tl && k < tl->signalSemaphoreValueCount ? tl->pSignalSemaphoreValues[ k ] : sem->value + 1;
+                    sem->value = std::max( sem->value, value );
+                }
+                else
+                {
+                    value = ++sem->value;
+                }
+                signals.emplace_back( sem, value );
+            }
+
+            FinishSectionCommandBuffer(
+                [ signals ]( id< MTLCommandBuffer > cb ) {
+                    for( const auto& [ sem, value ] : signals )
+                    {
+                        [cb encodeSignalEvent:sem->event value:value];
+                    }
+                },
+                i + 1 == count ? f : nullptr );
+        }
+        return VK_SUCCESS;
+    }
+}
+
+// The vkCmd* functions of the native implementation: the shims below record them
+// (they're reached through vkGetDeviceProcAddr / RG_VK)
+
+void RTGL1::MetalNative::vkCmdPipelineBarrier2KHR( VkCommandBuffer, const VkDependencyInfo* ) {}
+
+// ================================================================================================
 // command recording shims
 
 void RgMtl_vkCmdBindPipeline( VkCommandBuffer cmd, VkPipelineBindPoint bp, VkPipeline pipeline )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [ = ] { SectionBindPipeline( bp, pipeline ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionBindPipeline( bp, pipeline );
         return;
     }
-    vkCmdBindPipeline( cmd, bp, pipeline );
+    RG_VK( vkCmdBindPipeline )( cmd, bp, pipeline );
 }
 
 void RgMtl_vkCmdBindDescriptorSets( VkCommandBuffer        cmd,
@@ -4173,6 +4618,17 @@ void RgMtl_vkCmdBindDescriptorSets( VkCommandBuffer        cmd,
                                     uint32_t               dynamicOffsetCount,
                                     const uint32_t*        dynamicOffsets )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        if( dynamicOffsetCount > 0 )
+        {
+            LogOnce( "descriptor set binds with dynamic offsets aren't supported" );
+            return;
+        }
+        std::vector< VkDescriptorSet > v( sets, sets + count );
+        Record( cmd, [ = ] { SectionBindSets( bp, firstSet, uint32_t( v.size() ), v.data() ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         if( dynamicOffsetCount > 0 )
@@ -4183,7 +4639,7 @@ void RgMtl_vkCmdBindDescriptorSets( VkCommandBuffer        cmd,
         SectionBindSets( bp, firstSet, count, sets );
         return;
     }
-    vkCmdBindDescriptorSets( cmd, bp, layout, firstSet, count, sets, dynamicOffsetCount, dynamicOffsets );
+    RG_VK( vkCmdBindDescriptorSets )( cmd, bp, layout, firstSet, count, sets, dynamicOffsetCount, dynamicOffsets );
 }
 
 void RgMtl_vkCmdPushConstants( VkCommandBuffer    cmd,
@@ -4193,22 +4649,33 @@ void RgMtl_vkCmdPushConstants( VkCommandBuffer    cmd,
                                uint32_t           size,
                                const void*        data )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        std::vector< uint8_t > v( static_cast< const uint8_t* >( data ), static_cast< const uint8_t* >( data ) + size );
+        Record( cmd, [ = ] { SectionPushConstants( stages, offset, size, v.data() ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionPushConstants( stages, offset, size, data );
         return;
     }
-    vkCmdPushConstants( cmd, layout, stages, offset, size, data );
+    RG_VK( vkCmdPushConstants )( cmd, layout, stages, offset, size, data );
 }
 
 void RgMtl_vkCmdDispatch( VkCommandBuffer cmd, uint32_t x, uint32_t y, uint32_t z )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [ = ] { SectionDispatch( x, y, z ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionDispatch( x, y, z );
         return;
     }
-    vkCmdDispatch( cmd, x, y, z );
+    RG_VK( vkCmdDispatch )( cmd, x, y, z );
 }
 
 void RgMtl_vkCmdPipelineBarrier( VkCommandBuffer              cmd,
@@ -4222,16 +4689,16 @@ void RgMtl_vkCmdPipelineBarrier( VkCommandBuffer              cmd,
                                  uint32_t                     imgCount,
                                  const VkImageMemoryBarrier*  img )
 {
-    if( Metal::IsSectionCmd( cmd ) )
+    if( Metal::IsSectionCmd( cmd ) || MetalNative::IsNativeCmd( cmd ) )
     {
         return; // the work of a section runs in order
     }
-    vkCmdPipelineBarrier( cmd, src, dst, flags, memCount, mem, bufCount, buf, imgCount, img );
+    RG_VK( vkCmdPipelineBarrier )( cmd, src, dst, flags, memCount, mem, bufCount, buf, imgCount, img );
 }
 
 void RgMtl_svkCmdPipelineBarrier2KHR( VkCommandBuffer cmd, const VkDependencyInfo* info )
 {
-    if( Metal::IsSectionCmd( cmd ) )
+    if( Metal::IsSectionCmd( cmd ) || MetalNative::IsNativeCmd( cmd ) )
     {
         return; // the work of a section runs in order
     }
@@ -4240,12 +4707,18 @@ void RgMtl_svkCmdPipelineBarrier2KHR( VkCommandBuffer cmd, const VkDependencyInf
 
 void RgMtl_vkCmdCopyBuffer( VkCommandBuffer cmd, VkBuffer src, VkBuffer dst, uint32_t count, const VkBufferCopy* regions )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        std::vector< VkBufferCopy > v( regions, regions + count );
+        Record( cmd, [ = ] { SectionCopyBuffer( src, dst, uint32_t( v.size() ), v.data() ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionCopyBuffer( src, dst, count, regions );
         return;
     }
-    vkCmdCopyBuffer( cmd, src, dst, count, regions );
+    RG_VK( vkCmdCopyBuffer )( cmd, src, dst, count, regions );
 }
 
 void RgMtl_vkCmdCopyBufferToImage( VkCommandBuffer          cmd,
@@ -4255,12 +4728,18 @@ void RgMtl_vkCmdCopyBufferToImage( VkCommandBuffer          cmd,
                                    uint32_t                 count,
                                    const VkBufferImageCopy* regions )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        std::vector< VkBufferImageCopy > v( regions, regions + count );
+        Record( cmd, [ = ] { SectionCopyBufferToImage( src, dst, uint32_t( v.size() ), v.data() ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         RasterUnsupported( "vkCmdCopyBufferToImage" );
         return;
     }
-    vkCmdCopyBufferToImage( cmd, src, dst, layout, count, regions );
+    RG_VK( vkCmdCopyBufferToImage )( cmd, src, dst, layout, count, regions );
 }
 
 void RgMtl_vkCmdBlitImage( VkCommandBuffer    cmd,
@@ -4272,50 +4751,72 @@ void RgMtl_vkCmdBlitImage( VkCommandBuffer    cmd,
                            const VkImageBlit* regions,
                            VkFilter           filter )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        std::vector< VkImageBlit > v( regions, regions + count );
+        Record( cmd, [ = ] { SectionBlitImage( src, dst, uint32_t( v.size() ), v.data(), filter ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionBlitImage( src, dst, count, regions, filter );
         return;
     }
-    vkCmdBlitImage( cmd, src, srcLayout, dst, dstLayout, count, regions, filter );
+    RG_VK( vkCmdBlitImage )( cmd, src, srcLayout, dst, dstLayout, count, regions, filter );
 }
 
 void RgMtl_vkCmdWriteTimestamp( VkCommandBuffer cmd, VkPipelineStageFlagBits stage, VkQueryPool pool, uint32_t query )
 {
-    if( Metal::IsSectionCmd( cmd ) )
+    if( Metal::IsSectionCmd( cmd ) || MetalNative::IsNativeCmd( cmd ) )
     {
         return; // profiling in a section uses Metal::Mark
     }
-    vkCmdWriteTimestamp( cmd, stage, pool, query );
+    RG_VK( vkCmdWriteTimestamp )( cmd, stage, pool, query );
 }
 
 void RgMtl_vkCmdResetQueryPool( VkCommandBuffer cmd, VkQueryPool pool, uint32_t first, uint32_t count )
 {
-    if( Metal::IsSectionCmd( cmd ) )
+    if( Metal::IsSectionCmd( cmd ) || MetalNative::IsNativeCmd( cmd ) )
     {
         return;
     }
-    vkCmdResetQueryPool( cmd, pool, first, count );
+    RG_VK( vkCmdResetQueryPool )( cmd, pool, first, count );
 }
 
 void RgMtl_vkCmdBeginRenderPass( VkCommandBuffer cmd, const VkRenderPassBeginInfo* info, VkSubpassContents contents )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        std::vector< VkClearValue > clears( info->pClearValues, info->pClearValues + info->clearValueCount );
+        VkRenderPassBeginInfo       bi = *info;
+        bi.pNext                       = nullptr;
+        Record( cmd, [ = ]() mutable {
+            bi.pClearValues = clears.data();
+            SectionBeginRenderPass( &bi );
+        } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionBeginRenderPass( info );
         return;
     }
-    vkCmdBeginRenderPass( cmd, info, contents );
+    RG_VK( vkCmdBeginRenderPass )( cmd, info, contents );
 }
 
 void RgMtl_vkCmdEndRenderPass( VkCommandBuffer cmd )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [] { SectionEndRenderPass(); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionEndRenderPass();
         return;
     }
-    vkCmdEndRenderPass( cmd );
+    RG_VK( vkCmdEndRenderPass )( cmd );
 }
 
 void RgMtl_vkCmdBindVertexBuffers( VkCommandBuffer     cmd,
@@ -4324,26 +4825,51 @@ void RgMtl_vkCmdBindVertexBuffers( VkCommandBuffer     cmd,
                                    const VkBuffer*     buffers,
                                    const VkDeviceSize* offsets )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        std::vector< VkBuffer >     b( buffers, buffers + count );
+        std::vector< VkDeviceSize > o( count, 0 );
+        if( offsets )
+        {
+            o.assign( offsets, offsets + count );
+        }
+        Record( cmd, [ = ] { SectionBindVertexBuffers( first, uint32_t( b.size() ), b.data(), o.data() ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionBindVertexBuffers( first, count, buffers, offsets );
         return;
     }
-    vkCmdBindVertexBuffers( cmd, first, count, buffers, offsets );
+    RG_VK( vkCmdBindVertexBuffers )( cmd, first, count, buffers, offsets );
 }
 
 void RgMtl_vkCmdBindIndexBuffer( VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset, VkIndexType type )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [ = ] { SectionBindIndexBuffer( buffer, offset, type ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionBindIndexBuffer( buffer, offset, type );
         return;
     }
-    vkCmdBindIndexBuffer( cmd, buffer, offset, type );
+    RG_VK( vkCmdBindIndexBuffer )( cmd, buffer, offset, type );
 }
 
 void RgMtl_vkCmdSetViewport( VkCommandBuffer cmd, uint32_t first, uint32_t count, const VkViewport* viewports )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        if( first == 0 && count > 0 )
+        {
+            const VkViewport v = viewports[ 0 ];
+            Record( cmd, [ = ] { SectionSetViewport( v ); } );
+        }
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         if( first == 0 && count > 0 )
@@ -4352,11 +4878,20 @@ void RgMtl_vkCmdSetViewport( VkCommandBuffer cmd, uint32_t first, uint32_t count
         }
         return;
     }
-    vkCmdSetViewport( cmd, first, count, viewports );
+    RG_VK( vkCmdSetViewport )( cmd, first, count, viewports );
 }
 
 void RgMtl_vkCmdSetScissor( VkCommandBuffer cmd, uint32_t first, uint32_t count, const VkRect2D* scissors )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        if( first == 0 && count > 0 )
+        {
+            const VkRect2D r = scissors[ 0 ];
+            Record( cmd, [ = ] { SectionSetScissor( r ); } );
+        }
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         if( first == 0 && count > 0 )
@@ -4365,17 +4900,22 @@ void RgMtl_vkCmdSetScissor( VkCommandBuffer cmd, uint32_t first, uint32_t count,
         }
         return;
     }
-    vkCmdSetScissor( cmd, first, count, scissors );
+    RG_VK( vkCmdSetScissor )( cmd, first, count, scissors );
 }
 
 void RgMtl_vkCmdDraw( VkCommandBuffer cmd, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [ = ] { SectionDraw( vertexCount, instanceCount, firstVertex, firstInstance ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionDraw( vertexCount, instanceCount, firstVertex, firstInstance );
         return;
     }
-    vkCmdDraw( cmd, vertexCount, instanceCount, firstVertex, firstInstance );
+    RG_VK( vkCmdDraw )( cmd, vertexCount, instanceCount, firstVertex, firstInstance );
 }
 
 void RgMtl_vkCmdDrawIndexed( VkCommandBuffer cmd,
@@ -4385,12 +4925,17 @@ void RgMtl_vkCmdDrawIndexed( VkCommandBuffer cmd,
                              int32_t         vertexOffset,
                              uint32_t        firstInstance )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [ = ] { SectionDrawIndexed( indexCount, instanceCount, firstIndex, vertexOffset, firstInstance ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionDrawIndexed( indexCount, instanceCount, firstIndex, vertexOffset, firstInstance );
         return;
     }
-    vkCmdDrawIndexed( cmd, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance );
+    RG_VK( vkCmdDrawIndexed )( cmd, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance );
 }
 
 void RgMtl_vkCmdDrawIndexedIndirectCount( VkCommandBuffer cmd,
@@ -4401,12 +4946,17 @@ void RgMtl_vkCmdDrawIndexedIndirectCount( VkCommandBuffer cmd,
                                           uint32_t        maxDrawCount,
                                           uint32_t        stride )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Record( cmd, [ = ] { SectionDrawIndexedIndirectCount( buffer, offset, countBuffer, countOffset, maxDrawCount, stride ); } );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         SectionDrawIndexedIndirectCount( buffer, offset, countBuffer, countOffset, maxDrawCount, stride );
         return;
     }
-    vkCmdDrawIndexedIndirectCount( cmd, buffer, offset, countBuffer, countOffset, maxDrawCount, stride );
+    RG_VK( vkCmdDrawIndexedIndirectCount )( cmd, buffer, offset, countBuffer, countOffset, maxDrawCount, stride );
 }
 
 void RgMtl_vkCmdClearAttachments( VkCommandBuffer          cmd,
@@ -4415,10 +4965,71 @@ void RgMtl_vkCmdClearAttachments( VkCommandBuffer          cmd,
                                   uint32_t                 rectCount,
                                   const VkClearRect*       rects )
 {
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        LogOnce( "vkCmdClearAttachments isn't supported" );
+        return;
+    }
     if( Metal::IsSectionCmd( cmd ) )
     {
         RasterUnsupported( "vkCmdClearAttachments" );
         return;
     }
-    vkCmdClearAttachments( cmd, attachmentCount, attachments, rectCount, rects );
+    RG_VK( vkCmdClearAttachments )( cmd, attachmentCount, attachments, rectCount, rects );
 }
+
+// ---- the native implementation's vkCmd* functions (for vkGetDeviceProcAddr / RG_VK): the shims
+
+#define RG_NATIVE_CMD( name, params, args )                                    \
+    void RTGL1::MetalNative::name params                                       \
+    {                                                                          \
+        if( IsNativeCmd( cmd ) )                                               \
+        {                                                                      \
+            RgMtl_##name args;                                                 \
+        }                                                                      \
+        else                                                                   \
+        {                                                                      \
+            LogOnce( #name " on a command buffer that isn't a native one" );   \
+        }                                                                      \
+    }
+
+RG_NATIVE_CMD( vkCmdBindPipeline, ( VkCommandBuffer cmd, VkPipelineBindPoint bp, VkPipeline p ), ( cmd, bp, p ) )
+RG_NATIVE_CMD( vkCmdBindDescriptorSets,
+               ( VkCommandBuffer cmd, VkPipelineBindPoint bp, VkPipelineLayout l, uint32_t f, uint32_t n, const VkDescriptorSet* s, uint32_t dn, const uint32_t* d ),
+               ( cmd, bp, l, f, n, s, dn, d ) )
+RG_NATIVE_CMD( vkCmdPushConstants,
+               ( VkCommandBuffer cmd, VkPipelineLayout l, VkShaderStageFlags st, uint32_t o, uint32_t sz, const void* d ),
+               ( cmd, l, st, o, sz, d ) )
+RG_NATIVE_CMD( vkCmdDispatch, ( VkCommandBuffer cmd, uint32_t x, uint32_t y, uint32_t z ), ( cmd, x, y, z ) )
+RG_NATIVE_CMD( vkCmdPipelineBarrier,
+               ( VkCommandBuffer cmd, VkPipelineStageFlags a, VkPipelineStageFlags b, VkDependencyFlags f, uint32_t mc, const VkMemoryBarrier* m, uint32_t bc, const VkBufferMemoryBarrier* bb, uint32_t ic, const VkImageMemoryBarrier* ib ),
+               ( cmd, a, b, f, mc, m, bc, bb, ic, ib ) )
+RG_NATIVE_CMD( vkCmdCopyBuffer, ( VkCommandBuffer cmd, VkBuffer a, VkBuffer b, uint32_t n, const VkBufferCopy* r ), ( cmd, a, b, n, r ) )
+RG_NATIVE_CMD( vkCmdCopyBufferToImage,
+               ( VkCommandBuffer cmd, VkBuffer a, VkImage b, VkImageLayout l, uint32_t n, const VkBufferImageCopy* r ),
+               ( cmd, a, b, l, n, r ) )
+RG_NATIVE_CMD( vkCmdBlitImage,
+               ( VkCommandBuffer cmd, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n, const VkImageBlit* r, VkFilter f ),
+               ( cmd, a, la, b, lb, n, r, f ) )
+RG_NATIVE_CMD( vkCmdWriteTimestamp, ( VkCommandBuffer cmd, VkPipelineStageFlagBits st, VkQueryPool p, uint32_t q ), ( cmd, st, p, q ) )
+RG_NATIVE_CMD( vkCmdResetQueryPool, ( VkCommandBuffer cmd, VkQueryPool p, uint32_t f, uint32_t n ), ( cmd, p, f, n ) )
+RG_NATIVE_CMD( vkCmdBeginRenderPass, ( VkCommandBuffer cmd, const VkRenderPassBeginInfo* i, VkSubpassContents c ), ( cmd, i, c ) )
+RG_NATIVE_CMD( vkCmdEndRenderPass, ( VkCommandBuffer cmd ), ( cmd ) )
+RG_NATIVE_CMD( vkCmdBindVertexBuffers,
+               ( VkCommandBuffer cmd, uint32_t f, uint32_t n, const VkBuffer* b, const VkDeviceSize* o ),
+               ( cmd, f, n, b, o ) )
+RG_NATIVE_CMD( vkCmdBindIndexBuffer, ( VkCommandBuffer cmd, VkBuffer b, VkDeviceSize o, VkIndexType t ), ( cmd, b, o, t ) )
+RG_NATIVE_CMD( vkCmdSetViewport, ( VkCommandBuffer cmd, uint32_t f, uint32_t n, const VkViewport* v ), ( cmd, f, n, v ) )
+RG_NATIVE_CMD( vkCmdSetScissor, ( VkCommandBuffer cmd, uint32_t f, uint32_t n, const VkRect2D* r ), ( cmd, f, n, r ) )
+RG_NATIVE_CMD( vkCmdDraw, ( VkCommandBuffer cmd, uint32_t a, uint32_t b, uint32_t c, uint32_t d ), ( cmd, a, b, c, d ) )
+RG_NATIVE_CMD( vkCmdDrawIndexed,
+               ( VkCommandBuffer cmd, uint32_t a, uint32_t b, uint32_t c, int32_t d, uint32_t e ),
+               ( cmd, a, b, c, d, e ) )
+RG_NATIVE_CMD( vkCmdDrawIndexedIndirectCount,
+               ( VkCommandBuffer cmd, VkBuffer a, VkDeviceSize b, VkBuffer c, VkDeviceSize d, uint32_t e, uint32_t f ),
+               ( cmd, a, b, c, d, e, f ) )
+RG_NATIVE_CMD( vkCmdClearAttachments,
+               ( VkCommandBuffer cmd, uint32_t n, const VkClearAttachment* a, uint32_t rn, const VkClearRect* r ),
+               ( cmd, n, a, rn, r ) )
+
+#undef RG_NATIVE_CMD

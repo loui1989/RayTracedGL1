@@ -66,8 +66,9 @@ VkDeviceAddress GetBufferDeviceAddress( VkDevice, const VkBufferDeviceAddressInf
 void     FreeMemory( VkDevice, VkDeviceMemory, const VkAllocationCallbacks* );
 void     DestroyImageView( VkDevice, VkImageView, const VkAllocationCallbacks* );
 void     DestroyImage( VkDevice, VkImage, const VkAllocationCallbacks* );
-// call before destroying an image another way (e.g. vmaDestroyImage)
+// call before destroying an image / freeing memory another way (e.g. through VMA)
 void     ForgetImage( VkImage );
+void     ForgetMemory( VkDeviceMemory );
 VkResult CreateShaderModule( VkDevice, const VkShaderModuleCreateInfo*, const VkAllocationCallbacks*, VkShaderModule* );
 void     DestroyShaderModule( VkDevice, VkShaderModule, const VkAllocationCallbacks* );
 VkResult CreateComputePipelines( VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* );
@@ -143,6 +144,15 @@ bool IsComputeReady();
 // RTGL1_METAL_RASTER isn't 0, and nothing failed so far.
 bool IsRasterReady();
 
+// RTGL1_METAL_ONLY=1: everything is native, MoltenVK isn't used (MetalNative.h); the
+// sections aren't needed then, every command buffer is encoded into Metal when submitted
+bool IsNativeMode();
+// Metal only: the acceleration structure builds queued so far are done at this point of
+// the command buffer (does nothing for other command buffers)
+void RecordQueuedBuilds( VkCommandBuffer cmd );
+// Metal only: a profiling mark (see Mark) at this point of the command buffer
+void RecordMark( VkCommandBuffer cmd, const char* name );
+
 // RTGL1_PROFILE=1: GPU time of the work in the section since the previous mark.
 // 'name' must be a string literal. Results arrive a frame or two later, see DrainTimings.
 void Mark( const char* name );
@@ -154,6 +164,12 @@ void DrainTimings( const std::function< void( const char* name, double ms ) >& f
 #import <Metal/Metal.h>
 namespace RTGL1::Metal
 {
+// Metal only (RTGL1_METAL_ONLY=1): records Metal work encoded by the caller into a native
+// command buffer, done when it's submitted; 'encode' gets the command buffer and the fence
+// its first encoder must wait for (like ExternalEncoding)
+void RecordExternal( VkCommandBuffer                                                   cmd,
+                     std::function< void( id< MTLCommandBuffer >, id< MTLFence > ) > encode );
+
 // For code that encodes its own Metal work into the current section (MetalFX): ends the
 // section's current encoder and gives its command buffer; the first encoder of that work
 // must wait for 'fence' (the section's work reaches its resources untracked). Must not be

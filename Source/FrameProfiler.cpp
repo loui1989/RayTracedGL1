@@ -159,6 +159,12 @@ void FrameProfiler::Gpu( VkCommandBuffer cmd, const char* name )
         Metal::Mark( name );
         return;
     }
+    // Metal only: no GPU timestamps; the same Metal measurement
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        Metal::RecordMark( cmd, name );
+        return;
+    }
 #endif
     auto& m = marks[ curFrameIndex ];
     if( m.count >= MAX_MARKS )

@@ -233,8 +233,10 @@ if (APPLE)
     # Native Metal path (MetalBridge.mm): Vulkan call shims + path tracing in Metal with
     # RTGL1_METAL_RT=1. Shaders are translated with SPIRV-Cross: pass its source directory
     # in RG_SPIRV_CROSS_DIR (without it the native path reports itself unavailable).
-    target_sources(RayTracedGL1 PRIVATE "Source/MetalBridge.mm" "Source/MetalShaderGen.cpp")
-    set_source_files_properties("Source/MetalBridge.mm" PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    target_sources(RayTracedGL1 PRIVATE "Source/MetalBridge.mm" "Source/MetalShaderGen.cpp" "Source/MetalNative.mm")
+    set_source_files_properties("Source/MetalBridge.mm" "Source/MetalNative.mm" PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    # RTGL1_METAL_ONLY=1: Vulkan on Metal without MoltenVK (MetalNative.mm), presenting to the CAMetalLayer
+    target_link_libraries(RayTracedGL1 PRIVATE "-framework QuartzCore" "-framework CoreGraphics")
     set(RG_SPIRV_CROSS_DIR "" CACHE PATH "SPIRV-Cross source directory (macOS native Metal path)")
     if (RG_SPIRV_CROSS_DIR)
         set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)

@@ -1016,6 +1016,8 @@ void ASManager::BuildTLAS(VkCommandBuffer cmd, uint32_t frameIndex, const TLASPr
     {
         // built natively at the start of the path tracing's Metal section
         Metal::QueueTopLevelBuild(pCurrentTLAS->GetAS(), r.instances, r.instanceCount, true);
+        // Metal only: built at this point of the command buffer
+        Metal::RecordQueuedBuilds(cmd);
     }
     else
 #endif

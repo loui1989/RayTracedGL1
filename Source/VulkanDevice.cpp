@@ -696,7 +696,8 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     // passes, if they could be prepared for Metal (metalCompute). With metalRaster, the
     // section also covers the rasterization and copies around them: from here to the
     // upscaling, the frame is recorded straight into Metal.
-    const bool metalPT      = Metal::IsEnabled() && rtPipeline->IsMetalReady();
+    // (with RTGL1_METAL_ONLY=1 every command buffer is Metal, no sections are needed)
+    const bool metalPT      = Metal::IsEnabled() && !Metal::IsNativeMode() && rtPipeline->IsMetalReady();
     const bool metalCompute = metalPT && Metal::IsComputeReady();
     const bool metalRaster  = metalCompute && Metal::IsRasterReady();
     if (metalRaster)
@@ -883,7 +884,8 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 
 #ifdef __APPLE__
     // MetalFX is encoded into the section too, which continues with the post effects
-    const bool metalFxInSection = metalRaster && renderResolution.IsAmdFsr2Enabled();
+    // (Metal only: recorded into the frame's command buffer like everything else)
+    const bool metalFxInSection = (metalRaster || Metal::IsNativeMode()) && renderResolution.IsAmdFsr2Enabled();
 #endif
 
 
