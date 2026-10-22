@@ -556,7 +556,7 @@ bool testSurfaceForReuse(
 Reservoir selectLight_Direct(const ivec2 pix, uint seed, const Surface surf, const vec2 pointRnd)
 {
     #define TEMPORAL_SAMPLES 1
-    #define TEMPORAL_RADIUS 2
+    #define TEMPORAL_RADIUS globalUniform.restirTemporalRadius // was 2
     #define SPATIAL_SAMPLES 8
     #define SPATIAL_RADIUS 30
 

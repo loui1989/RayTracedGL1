@@ -596,9 +596,19 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_FLOAT32,      4,      "volumeDirToSource",                1),
 
     (TYPE_FLOAT32,      1,      "volumeSourceAsymmetry",            1),
-    (TYPE_FLOAT32,      1,      "_pad1",                            1),
-    (TYPE_FLOAT32,      1,      "_pad2",                            1),
-    (TYPE_FLOAT32,      1,      "_pad3",                            1),
+    (TYPE_FLOAT32,      1,      "restirGiTemporalRadius",           1),
+    (TYPE_UINT32,       1,      "restirGiMaxHistory",               1),
+    (TYPE_FLOAT32,      1,      "restirGiFireflyClamp",             1),
+
+    (TYPE_FLOAT32,      1,      "restirGiSpatialRadius",            1),
+    (TYPE_UINT32,       1,      "restirGiSpatialSamples",           1),
+    (TYPE_UINT32,       1,      "denoiserIndirectDense",            1),
+    (TYPE_FLOAT32,      1,      "denoiserIndirectDeflicker",        1),
+
+    (TYPE_UINT32,       1,      "blueNoiseSeeding",                 1),
+    (TYPE_UINT32,       1,      "antilagSquared",                   1),
+    (TYPE_FLOAT32,      1,      "restirTemporalRadius",             1),
+    (TYPE_FLOAT32,      1,      "_pad0",                            1),
 
     #(TYPE_FLOAT32,      1,      "_pad0",                            1),
     #(TYPE_FLOAT32,      1,      "_pad1",                            1),

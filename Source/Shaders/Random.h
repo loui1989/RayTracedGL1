@@ -253,14 +253,14 @@ uint wellonsLowBias32(uint x)
 // Random in [0..1] with 1/65535 precision
 float rnd16(uint seed, uint salt)
 {
-    uint rnd = wellonsLowBias32(seed + salt);
+    uint rnd = wellonsLowBias32(wellonsLowBias32(seed) + salt);
     return 
         float((rnd & 0x0000FFFF)      ) / float(UINT16_MAX);
 }
 
 vec2 rnd16_2(uint seed, uint salt)
 {
-    uint rnd = wellonsLowBias32(seed + salt);
+    uint rnd = wellonsLowBias32(wellonsLowBias32(seed) + salt);
     return vec2(
         float((rnd & 0x0000FFFF)      ) / float(UINT16_MAX),
         float((rnd & 0xFFFF0000) >> 16) / float(UINT16_MAX));
@@ -268,7 +268,7 @@ vec2 rnd16_2(uint seed, uint salt)
 
 vec4 rnd8_4(uint seed, uint salt)
 {
-    uint rnd = wellonsLowBias32(seed + salt);
+    uint rnd = wellonsLowBias32(wellonsLowBias32(seed) + salt);
     return vec4(
         float((rnd & 0x000000FF)      ) / float(UINT8_MAX),
         float((rnd & 0x0000FF00) >> 8 ) / float(UINT8_MAX),
@@ -298,5 +298,32 @@ uint getRandomSeed(const ivec2 pix, uint frameIndex)
 
     return packRandomSeed(texIndex, offset);
 }
+
+// Like Quake II RTX: the blue noise texture is tiled over the screen, with a different
+// layer each frame and a shift every BLUE_NOISE_TEXTURE_COUNT frames, so the noise keeps
+// its blue-noise distribution across neighbouring pixels (the error left after filtering
+// is fine-grained instead of blotchy). The unused upper bits get a hash of the tile, so
+// the white noise (rnd16 etc.) doesn't repeat every tile.
+uint getRandomSeed_Blue(const ivec2 pix, uint frameIndex)
+{
+    const uint period = frameIndex / BLUE_NOISE_TEXTURE_COUNT;
+    const uvec2 offset = (uvec2(pix) + uvec2(period * 1u, period * 16u)) & uvec2(BLUE_NOISE_TEXTURE_SIZE - 1);
+    const uint texIndex = frameIndex % BLUE_NOISE_TEXTURE_COUNT;
+
+    const uvec2 tile = uvec2(pix) / uvec2(BLUE_NOISE_TEXTURE_SIZE);
+    const uint  extra = murmurHash33(uvec3(tile, period)).x;
+
+    // packRandomSeed uses BLUE_NOISE_TEXTURE_SIZE_POW * 3 bits; the texture index read back
+    // from the seed then includes the extra bits, as multiples of BLUE_NOISE_TEXTURE_COUNT
+    return packRandomSeed(texIndex, offset) | (extra << (BLUE_NOISE_TEXTURE_SIZE_POW * 3));
+}
+
+#if BLUE_NOISE_TEXTURE_COUNT != BLUE_NOISE_TEXTURE_SIZE
+    #error getRandomSeed_Blue expects as many blue noise layers as the texture size
+#endif
+
+// ray tracing passes: the seeding is chosen at runtime (needs globalUniform)
+#define getRandomSeedRT(pix, frameIndex) \
+    (globalUniform.blueNoiseSeeding != 0 ? getRandomSeed_Blue((pix), (frameIndex)) : getRandomSeed((pix), (frameIndex)))
 
 #endif // RANDOM_H_

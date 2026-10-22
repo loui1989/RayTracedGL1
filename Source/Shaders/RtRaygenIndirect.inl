@@ -23,16 +23,16 @@
 layout (constant_id = 0) const uint maxAlbedoLayerCount = 0;
 #define MATERIAL_MAX_ALBEDO_LAYERS maxAlbedoLayerCount
 
-// Indirect illumination resampling settings (the defaults are the original values,
-// RayTracingPipeline sets them):
-// how many frames of history a reservoir keeps at most (temporal reuse)
-layout (constant_id = 1) const uint restirGiMaxHistory = 20;
-// > 0: an initial sample whose resampling weight is above this multiple of the average
-// in its subgroup is scaled down to it; removes the lone very bright samples that the
-// spatial and temporal reuse would spread into blotches
-layout (constant_id = 2) const float restirGiFireflyClamp = 0.0;
-// radius of the spatial reuse, in pixels
-layout (constant_id = 3) const float restirGiSpatialRadius = 8.0;
+// Indirect illumination resampling settings are in globalUniform (set per frame):
+// restirGiMaxHistory     -- how many frames of history a reservoir keeps at most
+//                           (temporal reuse); 0 turns the temporal reuse off
+// restirGiTemporalRadius -- max random offset (px) of the reused previous reservoir
+// restirGiFireflyClamp   -- > 0: an initial sample whose resampling weight is above this
+//                           multiple of the average in its subgroup is scaled down to it
+// restirGiSpatialSamples -- neighbours' samples reused per pixel (0 - off); above
+//                           SPATIAL_SAMPLES_INDIR_NO_VISIBILITY, each reused sample is also
+//                           checked for visibility (no light leaks, but costs a ray each)
+// restirGiSpatialRadius  -- radius of the spatial reuse, in pixels
 
 #define FORCE_EVALBRDF_GGX_LOOSE
 
@@ -216,13 +216,16 @@ float getDiffuseWeight( float roughness )
 
 
 
-#define TEMPORAL_SAMPLES_INDIR    1
-#define TEMPORAL_RADIUS_INDIR_MAX 2.0
+#define TEMPORAL_SAMPLES_INDIR    ( globalUniform.restirGiMaxHistory > 0 ? 1 : 0 )
+#define TEMPORAL_RADIUS_INDIR_MAX globalUniform.restirGiTemporalRadius
 
-#define SPATIAL_SAMPLES_INDIR 4
-#define SPATIAL_RADIUS_INDIR  restirGiSpatialRadius
-
-#define DEBUG_TRACE_BIAS_CORRECT_RAY 0
+// restirGiSpatialSamples: 1..4 - without visibility checks, 5..8 - (n - 4) with
+#define SPATIAL_SAMPLES_INDIR_NO_VISIBILITY 4
+#define SPATIAL_SAMPLES_INDIR ( globalUniform.restirGiSpatialSamples > SPATIAL_SAMPLES_INDIR_NO_VISIBILITY \
+                                    ? globalUniform.restirGiSpatialSamples - SPATIAL_SAMPLES_INDIR_NO_VISIBILITY \
+                                    : globalUniform.restirGiSpatialSamples )
+#define SPATIAL_VISIBILITY_INDIR ( globalUniform.restirGiSpatialSamples > SPATIAL_SAMPLES_INDIR_NO_VISIBILITY )
+#define SPATIAL_RADIUS_INDIR  globalUniform.restirGiSpatialRadius
 
 
 
@@ -231,7 +234,7 @@ void main()
 {
     RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
     const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    const uint seed = getRandomSeed(pix, globalUniform.frameId);
+    const uint seed = getRandomSeedRT(pix, globalUniform.frameId);
     uint salt = RANDOM_SALT_RESAMPLE_INDIRECT_BASE;
 
     Surface surf = fetchGbufferSurface(pix);
@@ -246,6 +249,7 @@ void main()
     float          oneOverSourcePdf;
     SampleIndirect initial = processIndirect( seed, surf, oneOverSourcePdf );
 
+    const float restirGiFireflyClamp = globalUniform.restirGiFireflyClamp;
     if( restirGiFireflyClamp > 0.0 )
     {
         // resampling weight of the sample: targetPdf / sourcePdf
@@ -289,7 +293,7 @@ void main()
 {
     RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
     const ivec2 pix  = ivec2( gl_GlobalInvocationID.xy );
-    const uint  seed = getRandomSeed( pix, globalUniform.frameId );
+    const uint  seed = getRandomSeedRT( pix, globalUniform.frameId );
     uint        salt = RANDOM_SALT_RESAMPLE_INDIRECT_BASE;
 
     Surface surf = fetchGbufferSurface( pix );
@@ -341,7 +345,7 @@ void main()
 
         ReservoirIndirect temporal = restirIndirect_LoadReservoir_Prev( pp );
         // renormalize to prevent precision problems
-        normalizeReservoirIndirect( temporal, restirGiMaxHistory );
+        normalizeReservoirIndirect( temporal, globalUniform.restirGiMaxHistory );
 
         float rnd = rnd16( seed, salt++ );
         updateCombinedReservoirIndirect( combined, temporal, rnd );
@@ -350,7 +354,7 @@ void main()
 
 
     {
-        const int spatialCount = int( SPATIAL_SAMPLES_INDIR * getDiffuseWeight( surf.roughness ) );
+        const int spatialCount = int( float( SPATIAL_SAMPLES_INDIR ) * getDiffuseWeight( surf.roughness ) );
         uint nobiasM = combined.M; 
 
         for( int pixIndex = 0; pixIndex < spatialCount; pixIndex++ )
@@ -401,10 +405,9 @@ void main()
 
             float targetPdf_curSurf = 0.0;
 
-#if DEBUG_TRACE_BIAS_CORRECT_RAY
-            if( !traceShadowRay(
+            if( !SPATIAL_VISIBILITY_INDIR ||
+                !traceShadowRay(
                     surf.instCustomIndex, surf.position, reservoir_q.selected.position, false ) )
-#endif
             {
                 targetPdf_curSurf =
                     targetPdfForIndirectSample( reservoir_q.selected ) * oneOverJacobian;

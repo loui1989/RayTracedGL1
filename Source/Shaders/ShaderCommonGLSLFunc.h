@@ -407,6 +407,26 @@ SH texelFetchSH(sampler2D samplerIndirR, sampler2D samplerIndirG, sampler2D samp
     return sh;
 }
 
+// luminance of the SH's constant (L00) term
+float getSHLuminance(const SH sh)
+{
+    return getLuminance(vec3(sh.r.x, sh.g.x, sh.b.x));
+}
+
+// Deflicker (as Quake II RTX's low-frequency filter): an indirect illumination sample
+// brighter than 'limit' is scaled down to it, so lone bright samples don't spread into blotches
+SH deflickerSH(const SH sh, float limit)
+{
+    const float l = getSHLuminance(sh);
+    if (limit > 0.0 && l > limit)
+    {
+        SH r = sh;
+        multiplySH(r, limit / l);
+        return r;
+    }
+    return sh;
+}
+
 SH texelFetchUnfilteredIndirectSH(ivec2 pix)
 {
     return texelFetchSH(

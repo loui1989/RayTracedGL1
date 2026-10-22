@@ -1164,6 +1164,40 @@ typedef enum RgDrawFrameRayCullFlagBits
 } RgDrawFrameRayCullFlagBits;
 typedef RgFlags RgDrawFrameRayCullFlags;
 
+// Temporal stability of the lighting: sample reuse (ReSTIR) and denoiser settings.
+// Zero-initialized fields are NOT defaults, fill all of them (or pass null to use the defaults).
+typedef struct RgDrawFrameDenoisingParams
+{
+    // Indirect (bounced) light: how many frames a reused light sample can live at most.
+    // Higher - smoother, but blotches persist longer. 0 - no temporal reuse. Default: 8
+    uint32_t    indirectHistory;
+    // Indirect light: how many neighbouring pixels' samples each pixel reuses (spatial reuse).
+    // 0 - none (most stable, noisier), 1..4 - that many, 5..8 - (n - 4) checked for
+    // visibility (no light leaking through walls, but each costs a ray). Default: 4
+    uint32_t    indirectSpatialReuse;
+    // Indirect light: radius of the spatial reuse in pixels. Default: 8
+    float       indirectSpatialRadius;
+    // Indirect light: a new sample brighter than this multiple of the local average is
+    // dimmed to it (0 - off). Default: 16
+    float       indirectFireflyClamp;
+    // Max random offset (in pixels) when reusing the previous frame's light samples
+    // (direct and indirect). The original 2 makes bright samples drift between pixels,
+    // which shows as crawling blotches on a still image. Default: 0
+    float       temporalReuseJitter;
+    // Denoiser: average all 8 neighbours in each pass of the indirect light filter
+    // (instead of 4). Default: true
+    RgBool32    indirectDenseFilter;
+    // Denoiser: indirect light brighter than this multiple of its neighbours' average is
+    // dimmed to it before filtering (0 - off). Default: 2
+    float       indirectDeflicker;
+    // Random numbers keep their blue noise distribution across pixels (as Quake II RTX),
+    // so the noise left after filtering is fine-grained instead of blotchy. Default: true
+    RgBool32    blueNoise;
+    // Anti-lag: square the measured change of lighting, so noise barely shortens the
+    // denoiser's history, but real changes still do. Default: true
+    RgBool32    antilagSquared;
+} RgDrawFrameDenoisingParams;
+
 typedef struct RgDrawFrameInfo
 {
     // View matrix is column major.
@@ -1202,6 +1236,8 @@ typedef struct RgDrawFrameInfo
     const RgDrawFrameLightmapParams             *pLightmapParams;
     const RgDrawFrameDebugParams                *pDebugParams;
     RgDrawFramePostEffectsParams                postEffectParams;
+    // Set to null, to use default values.
+    const RgDrawFrameDenoisingParams            *pDenoisingParams;
 
 } RgDrawFrameInfo;
 

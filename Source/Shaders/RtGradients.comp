@@ -104,7 +104,7 @@ void main()
     }
 
     // (f) get shading sample from current frame
-    const uint oldSeed = getRandomSeed(prevShadingPix, globalUniform.frameId - 1);
+    const uint oldSeed = getRandomSeedRT(prevShadingPix, globalUniform.frameId - 1);
 
     Surface prevSurf = fetchGbufferSurface_NoAlbedoViewDir_Prev(prevShadingPix);
 
@@ -154,6 +154,13 @@ void main()
         gradDIS[2] = getAntilagAlpha(gradSample, normFactor);
     }
 
+
+    if (globalUniform.antilagSquared != 0)
+    {
+        // as Quake II RTX: small differences (noise) barely shorten the history,
+        // large ones (real changes of lighting) still do
+        gradDIS *= gradDIS;
+    }
 
     gradDIS[0] *= globalUniform.gradientMultDiffuse;
     gradDIS[1] *= globalUniform.gradientMultIndirect;

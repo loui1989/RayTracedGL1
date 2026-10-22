@@ -67,6 +67,14 @@ float getPrefilteredLuminanceVariance(const ivec2 pix)
     return texelFetch(framebufAtrousFilteredVariance_Sampler, pix, 0).r;
 }
 
+// pattern of the 4 taps of an a-trous iteration: "X" for even, "+" for odd
+ivec2 atrousTap(uint iteration, int i)
+{
+    return iteration % 2 == 0 ?
+        ivec2(              (i % 2) * 2 - 1,               (i / 2) * 2 - 1) :
+        ivec2(((i % 2) * 2 - 1) *      (i / 2), ((i % 2) * 2 - 1) * (1 - (i / 2)));
+}
+
 
 void atrous(sampler2D samplerDiff, 
             // TODO: more generic handling of different formats for samplers
@@ -88,6 +96,9 @@ void atrous(sampler2D samplerDiff,
     outSpec       = decodeE5B9G9R9(texelFetch(samplerSpec, pix, 0).r);
 
     outIndirSH    = texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix);
+
+    // the deflicker is done in iteration 0 (CmSVGFAtrous_Iter0.comp)
+    const float indirLimit = 0.0;
 
 
     const float depth = texelFetch(framebufDepthWorld_Sampler, pix, 0).r;
@@ -171,7 +182,7 @@ void atrous(sampler2D samplerDiff,
             const float l_q         = getLuminance(diffColor_q);
             const float n_n         = max(0.0, dot(normal, normal_q));
 
-            const SH indirSH_q      = texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix_q);
+            const SH indirSH_q      = deflickerSH(texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix_q), indirLimit);
 
 
             const float w_z = abs(depth - depth_q) / max(gradDepth * (abs(xx) + abs(yy)), 0.01);
@@ -207,6 +218,37 @@ void atrous(sampler2D samplerDiff,
             weightSumIndir += wDiffIndir;
         }
 #ifdef ATROUS_BOX3
+    }
+#else
+    // denser filter for the indirect illumination: also the taps of the other pattern,
+    // so each iteration averages all 8 neighbours
+    if (globalUniform.denoiserIndirectDense != 0)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            const ivec2 t = atrousTap(atrousIteration + 1, i);
+            const int xx = t.x;
+            const int yy = t.y;
+
+            const ivec2 pix_q = pix + ivec2(xx * STEP_SIZE, yy * STEP_SIZE);
+
+            const vec3  normal_q = texelFetchNormal(pix_q);
+            const float depth_q  = texelFetch(framebufDepthWorld_Sampler, pix_q, 0).r;
+            const float n_n      = max(0.0, dot(normal, normal_q));
+
+            const float w_z = abs(depth - depth_q) / max(gradDepth * (abs(xx) + abs(yy)), 0.01);
+            const float w_n = pow(n_n, 128.0);
+
+            const float waveletW = waveletKernel[abs(yy)][abs(xx)];
+            const float isInside = float(testPixInRenderArea(pix_q, chRenderArea));
+
+            const float wDiffIndir = exp(-w_z * w_z) * w_n * waveletW * isInside;
+
+            accumulateSH(outIndirSH,
+                         deflickerSH(texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix_q), indirLimit),
+                         wDiffIndir);
+            weightSumIndir += wDiffIndir;
+        }
     }
 #endif
 

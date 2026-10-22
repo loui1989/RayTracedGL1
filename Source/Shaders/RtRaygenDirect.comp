@@ -37,7 +37,7 @@ void main()
 {
     RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
     const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    const uint seed = getRandomSeed(pix, globalUniform.frameId);
+    const uint seed = getRandomSeedRT(pix, globalUniform.frameId);
 
     const Surface surf = fetchGbufferSurface(pix);
 

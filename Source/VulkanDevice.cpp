@@ -628,6 +628,90 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
     }
 
     gu->antiFireflyEnabled = !!drawInfo.forceAntiFirefly;
+
+    // lighting stability: sample reuse and denoiser settings
+    {
+        RgDrawFrameDenoisingParams dn = {};
+        if( drawInfo.pDenoisingParams != nullptr )
+        {
+            dn = *drawInfo.pDenoisingParams;
+        }
+        else
+        {
+            dn.indirectHistory       = 8;
+            dn.indirectSpatialReuse  = 4;
+            dn.indirectSpatialRadius = 8.0f;
+            dn.indirectFireflyClamp  = 16.0f;
+            dn.temporalReuseJitter   = 0.0f;
+            dn.indirectDenseFilter   = true;
+            dn.indirectDeflicker     = 2.0f;
+            dn.blueNoise             = true;
+            dn.antilagSquared        = true;
+        }
+
+        // environment overrides, e.g. to compare settings without the game's menu
+        auto envFloat = []( const char* name, float& v ) {
+            if( const char* e = getenv( name ) )
+            {
+                char*       end = nullptr;
+                const float f   = strtof( e, &end );
+                if( end != e )
+                {
+                    v = f;
+                }
+            }
+        };
+        float history = float( dn.indirectHistory );
+        float spatial = float( dn.indirectSpatialReuse );
+        float dense   = dn.indirectDenseFilter ? 1.f : 0.f;
+        float blue    = dn.blueNoise ? 1.f : 0.f;
+        float sq      = dn.antilagSquared ? 1.f : 0.f;
+        envFloat( "RTGL1_GI_HISTORY", history );
+        envFloat( "RTGL1_GI_SPATIAL", spatial );
+        envFloat( "RTGL1_GI_SPATIAL_RADIUS", dn.indirectSpatialRadius );
+        envFloat( "RTGL1_GI_FIREFLY_CLAMP", dn.indirectFireflyClamp );
+        envFloat( "RTGL1_REUSE_JITTER", dn.temporalReuseJitter );
+        envFloat( "RTGL1_DENOISE_DENSE", dense );
+        envFloat( "RTGL1_DENOISE_DEFLICKER", dn.indirectDeflicker );
+        envFloat( "RTGL1_BLUE_NOISE", blue );
+        envFloat( "RTGL1_ANTILAG_SQUARED", sq );
+
+        gu->restirGiMaxHistory        = uint32_t( std::clamp( history, 0.0f, 64.0f ) );
+        gu->restirGiSpatialSamples    = uint32_t( std::clamp( spatial, 0.0f, 8.0f ) );
+        gu->restirGiSpatialRadius     = std::clamp( dn.indirectSpatialRadius, 1.0f, 32.0f );
+        gu->restirGiFireflyClamp      = std::clamp( dn.indirectFireflyClamp, 0.0f, 1000.0f );
+        gu->restirGiTemporalRadius    = std::clamp( dn.temporalReuseJitter, 0.0f, 8.0f );
+        gu->restirTemporalRadius      = gu->restirGiTemporalRadius;
+        gu->denoiserIndirectDense     = dense != 0.f ? 1 : 0;
+        gu->denoiserIndirectDeflicker = std::clamp( dn.indirectDeflicker, 0.0f, 100.0f );
+        gu->blueNoiseSeeding          = blue != 0.f ? 1 : 0;
+        gu->antilagSquared            = sq != 0.f ? 1 : 0;
+
+        // log when the settings change
+        static float lastLogged[ 9 ] = { -1 };
+        const float  now[ 9 ]        = {
+            float( gu->restirGiMaxHistory ),   float( gu->restirGiSpatialSamples ), gu->restirGiSpatialRadius,
+            gu->restirGiFireflyClamp,          gu->restirGiTemporalRadius,          float( gu->denoiserIndirectDense ),
+            gu->denoiserIndirectDeflicker,     float( gu->blueNoiseSeeding ),       float( gu->antilagSquared ),
+        };
+        if( memcmp( lastLogged, now, sizeof( now ) ) != 0 )
+        {
+            memcpy( lastLogged, now, sizeof( now ) );
+            fprintf( stderr,
+                     "[RTGL1] lighting stability: GI history %u, spatial reuse %u (radius %.1f px), "
+                     "firefly clamp %.1f, reuse jitter %.1f px, dense filter %u, deflicker %.1f, "
+                     "blue noise %u, squared anti-lag %u\n",
+                     gu->restirGiMaxHistory,
+                     gu->restirGiSpatialSamples,
+                     double( gu->restirGiSpatialRadius ),
+                     double( gu->restirGiFireflyClamp ),
+                     double( gu->restirGiTemporalRadius ),
+                     gu->denoiserIndirectDense,
+                     double( gu->denoiserIndirectDeflicker ),
+                     gu->blueNoiseSeeding,
+                     gu->antilagSquared );
+        }
+    }
 }
 
 void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)

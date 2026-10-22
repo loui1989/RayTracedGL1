@@ -221,6 +221,25 @@ void atrous0(
     outSpec     = decodeE5B9G9R9(center.encSpecularColor);
     outIndirSH  = texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix);
 
+    // deflicker: limit each indirect sample to a multiple of the mean of the center's neighbours
+    float indirLimit = 0.0;
+    if (globalUniform.denoiserIndirectDeflicker > 0.0)
+    {
+        float sum = 0.0;
+        for (int yy = -1; yy <= 1; yy++)
+        {
+            for (int xx = -1; xx <= 1; xx++)
+            {
+                if (xx != 0 || yy != 0)
+                {
+                    sum += getSHLuminance(texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix + ivec2(xx, yy)));
+                }
+            }
+        }
+        indirLimit = globalUniform.denoiserIndirectDeflicker * sum / 8.0;
+        outIndirSH = deflickerSH(outIndirSH, indirLimit);
+    }
+
     const float l = getLuminance(outDiff);
     const float wLumMultiplier = 1.0 / (SIGMA_LUMINANCE * prefilterLuminanceVariance() + 0.00001);
    
@@ -284,7 +303,7 @@ void atrous0(
             outDiff += other.directDiffuseColor * wDiff;
             outSpec += decodeE5B9G9R9(other.encSpecularColor) * wSpec;
             // SH are fetched here, because storing it in shared memory causes short scoreboard stalls
-            accumulateSH(outIndirSH, texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix_q), wDiffIndir);
+            accumulateSH(outIndirSH, deflickerSH(texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix_q), indirLimit), wDiffIndir);
 
             outVariance += GET_DIR_DIFF_VARIANCE(offset.x, offset.y) * wDiff * wDiff;
 
