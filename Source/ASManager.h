@@ -29,6 +29,8 @@
 #include "VertexCollector.h"
 #include "ASComponent.h"
 
+#include <functional>
+
 namespace RTGL1
 {
 
@@ -68,7 +70,17 @@ public:
 
     void BeginDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex);
     uint32_t AddDynamicGeometry(uint32_t frameIndex, const RgGeometryUploadInfo &info);
-    void SubmitDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex);
+    void SubmitDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex,
+                               const std::function< void( VkCommandBuffer, const char* ) >& profileMark = nullptr);
+
+    // for profiling: dynamic bottom-level structures built in the last frame
+    struct DynamicBuildStats
+    {
+        uint32_t blasCount;
+        uint32_t geometryCount;
+        uint32_t primitiveCount;
+    };
+    DynamicBuildStats GetLastDynamicBuildStats() const { return lastDynamicStats; }
 
 
     // Update transform for static movable geometry
@@ -147,6 +159,8 @@ private:
     // building
     std::shared_ptr<ScratchBuffer> scratchBuffer;
     std::shared_ptr<ASBuilder> asBuilder;
+
+    DynamicBuildStats lastDynamicStats = {};
 
     std::shared_ptr<CommandBufferManager> cmdManager;
     std::shared_ptr<TextureManager> textureMgr;

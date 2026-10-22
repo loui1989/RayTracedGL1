@@ -221,7 +221,7 @@ void FrameProfiler::Report( double seconds )
     s += buf;
     if( !valueAcc.empty() )
     {
-        s += "\n[Profile]   other ms:";
+        s += "\n[Profile]   other:";
         for( const Acc& a : valueAcc )
         {
             snprintf( buf, sizeof( buf ), " %s %.2f |", a.name, cpuFrames ? a.sum / cpuFrames : 0.0 );

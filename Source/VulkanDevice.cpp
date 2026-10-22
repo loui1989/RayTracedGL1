@@ -674,6 +674,13 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
                           profiler ? std::function< void( VkCommandBuffer, const char* ) >(
                                          [ this ]( VkCommandBuffer c, const char* n ) { profiler->Gpu( c, n ); } )
                                    : nullptr);
+    if (profiler)
+    {
+        const auto st = scene->GetASManager()->GetLastDynamicBuildStats();
+        profiler->Value("dynamic BLAS count", st.blasCount);
+        profiler->Value("dynamic BLAS geometries", st.geometryCount);
+        profiler->Value("dynamic BLAS triangles", st.primitiveCount);
+    }
 
 
     framebuffers->PrepareForSize(renderResolution.GetResolutionState());

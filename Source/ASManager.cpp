@@ -629,7 +629,8 @@ void ASManager::BeginDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex)
     collectorDynamic[frameIndex]->BeginCollecting(false);
 }
 
-void ASManager::SubmitDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex)
+void ASManager::SubmitDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex,
+                                      const std::function< void( VkCommandBuffer, const char* ) >& profileMark)
 {
     typedef VertexCollectorFilterTypeFlagBits FT;
 
@@ -639,10 +640,15 @@ void ASManager::SubmitDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex)
 
     colDyn->EndCollecting();
     colDyn->CopyFromStaging(cmd);
+    if (profileMark)
+    {
+        profileMark(cmd, "AS: dynamic geometry copy");
+    }
 
     assert(asBuilder->IsEmpty());
 
     bool toBuild = false;
+    lastDynamicStats = {};
 
     // recreate dynamic blas
     for (auto &dynamicBlas : allDynamicBlas[frameIndex])
@@ -650,7 +656,19 @@ void ASManager::SubmitDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex)
         // must be dynamic
         assert(dynamicBlas->GetFilter() & FT::CF_DYNAMIC);
 
-        toBuild |= SetupBLAS(*dynamicBlas, colDyn);
+        const bool built = SetupBLAS(*dynamicBlas, colDyn);
+        toBuild |= built;
+
+        if (built)
+        {
+            const auto& counts = colDyn->GetPrimitiveCounts(dynamicBlas->GetFilter());
+            lastDynamicStats.blasCount++;
+            lastDynamicStats.geometryCount += (uint32_t)counts.size();
+            for (uint32_t c : counts)
+            {
+                lastDynamicStats.primitiveCount += c;
+            }
+        }
     }
     
     if (!toBuild)

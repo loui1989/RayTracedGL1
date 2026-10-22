@@ -95,8 +95,8 @@ void Scene::SubmitForFrame(VkCommandBuffer cmd, uint32_t frameIndex, const std::
     mark("AS: static tex coords + movable BLAS");
 
     // always submit dynamic geomtetry on the frame ending
-    asManager->SubmitDynamicGeometry(cmd, frameIndex);
-    mark("AS: dynamic geometry copy + BLAS build");
+    asManager->SubmitDynamicGeometry(cmd, frameIndex, profileMark);
+    mark("AS: dynamic BLAS build");
 
 
     // copy geom and tri infos to device-local
