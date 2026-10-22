@@ -70,7 +70,12 @@ void main()
         center += radius * rnd;
     }
 
-#if 1
+// Skipping the cells behind the opaque static surface at the cell's center was only an
+// optimization, but it made the fog inconsistent: where the center is on dynamic geometry
+// (the weapon) nothing was skipped, while pixels seen through water or glass read the fog
+// past the surface (along the reflected / refracted path), so they got a band of extra,
+// whitish fog around the weapon over water. Off.
+#if 0
     {
         ivec2 pix;
         float depth;
