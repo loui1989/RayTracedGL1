@@ -1,3 +1,5 @@
+> **macOS port:** the `macos` branch of this fork adds Apple Silicon support (MoltenVK ray tracing + Apple MetalFX) on top of the `quake` branch, for Quake RT on Mac. Download and install instructions: [loui1989/vkquake-rt](https://github.com/loui1989/vkquake-rt). Proposed upstream in [sultim-t/RayTracedGL1#47](https://github.com/sultim-t/RayTracedGL1/pull/47).
+
 # RTGL1
 
 RTGL1 is a library that aims to simplify the process of porting 3D applications to *real-time path tracing*, via hardware accelerated ray tracing, denoising algorithms (A-SVGF) and sampling algorithms (ReSTIR, ReSTIR GI) to improve the image quality by reusing spatio-temporal data.
