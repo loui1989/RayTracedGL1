@@ -4,9 +4,13 @@
 // motion vectors, camera jitter). On macOS the FSR2 slot is filled by
 // MTLFXTemporalScaler instead. VulkanDevice submits the Vulkan command buffer
 // right before calling Apply(); this file then encodes its own Metal command
-// buffer and the Vulkan frame continues in a fresh command buffer. MoltenVK may
-// commit submissions from a background thread, so Apply() waits for the queue
-// to go idle before, and for MetalFX to finish after.
+// buffer and the Vulkan frame continues in a fresh command buffer.
+//
+// By default the MetalFX work runs on its own Metal queue and is ordered with the
+// Vulkan work by a shared event (imported into Vulkan as a timeline semaphore), so
+// the CPU never waits for the GPU here. With RTGL1_METALFX_SYNC=1 the older path is
+// used: MoltenVK may commit submissions from a background thread, so Apply() waits
+// for the queue to go idle before, and for MetalFX to finish after.
 
 #include "FSR2.h"
 
@@ -40,6 +44,18 @@ struct MfxState
 
     double lastWaitVulkanMs = 0; // profiling
     double lastMetalFxGpuMs = 0;
+
+    // asynchronous path
+    bool                   asyncTried       = false;
+    bool                   asyncOk          = false;
+    id< MTLCommandQueue >  asyncQueue       = nil;
+    id< MTLSharedEvent >   asyncEvent       = nil;
+    VkSemaphore            asyncSem         = VK_NULL_HANDLE;
+    uint64_t               asyncCounter     = 0;
+    bool                   asyncPending     = false; // PrepareAsync() was called, Apply() not yet
+    uint64_t               asyncWaitValue   = 0;     // Vulkan work before Apply() is done
+    uint64_t               asyncSignalValue = 0;     // MetalFX is done
+    id< MTLCommandBuffer > lastAsyncCb      = nil;
 
     id< MTLDevice >               device    = nil;
     id< MTLCommandQueue >         queue     = nil;
@@ -262,8 +278,74 @@ id< MTLTexture > TextureOf( VkImage image )
     return t.mtlTexture;
 }
 
+void WaitAsync()
+{
+    if( g.lastAsyncCb )
+    {
+        [g.lastAsyncCb waitUntilCompleted];
+        g.lastAsyncCb = nil;
+    }
+}
+
+// keeps the Vulkan / Metal ordering intact if Apply() can't run MetalFX
+void SignalAsyncOnly()
+{
+    id< MTLCommandBuffer > cb = [g.asyncQueue commandBuffer];
+    [cb encodeWaitForEvent:g.asyncEvent value:g.asyncWaitValue];
+    [cb encodeSignalEvent:g.asyncEvent value:g.asyncSignalValue];
+    [cb commit];
+    g.lastAsyncCb = cb;
+}
+
+bool InitAsync()
+{
+    if( g.asyncTried )
+    {
+        return g.asyncOk;
+    }
+    g.asyncTried = true;
+
+    const char* e = getenv( "RTGL1_METALFX_SYNC" );
+    if( e && e[ 0 ] == '1' )
+    {
+        Log( "MetalFX: synchronous (RTGL1_METALFX_SYNC=1)" );
+        return false;
+    }
+
+    g.asyncQueue = [g.device newCommandQueue];
+    g.asyncEvent = [g.device newSharedEvent];
+    if( !g.asyncQueue || !g.asyncEvent )
+    {
+        Log( "MetalFX: couldn't create a Metal queue / shared event, using the synchronous path" );
+        return false;
+    }
+    g.asyncQueue.label        = @"RTGL1 MetalFX";
+    g.asyncEvent.signaledValue = 0;
+    g.asyncCounter            = 0;
+
+    VkImportMetalSharedEventInfoEXT imp = { VK_STRUCTURE_TYPE_IMPORT_METAL_SHARED_EVENT_INFO_EXT };
+    imp.mtlSharedEvent                  = g.asyncEvent;
+    VkSemaphoreTypeCreateInfo type      = { VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+    type.pNext                          = &imp;
+    type.semaphoreType                  = VK_SEMAPHORE_TYPE_TIMELINE;
+    type.initialValue                   = 0;
+    VkSemaphoreCreateInfo info          = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    info.pNext                          = &type;
+    if( vkCreateSemaphore( g.vkDevice, &info, nullptr, &g.asyncSem ) != VK_SUCCESS )
+    {
+        g.asyncSem = VK_NULL_HANDLE;
+        Log( "MetalFX: couldn't import the shared event into Vulkan, using the synchronous path" );
+        return false;
+    }
+
+    Log( "MetalFX: asynchronous (no CPU waits)" );
+    g.asyncOk = true;
+    return true;
+}
+
 void ReleaseScaler()
 {
+    WaitAsync();
     g.scaler   = nil;
     g.colorTex = nil;
     g.depthTex = nil;
@@ -399,6 +481,16 @@ RTGL1::FSR2::~FSR2()
     @autoreleasepool
     {
         ReleaseScaler();
+        if( g.asyncSem != VK_NULL_HANDLE )
+        {
+            vkDestroySemaphore( g.vkDevice, g.asyncSem, nullptr );
+            g.asyncSem = VK_NULL_HANDLE;
+        }
+        g.asyncQueue   = nil;
+        g.asyncEvent   = nil;
+        g.asyncTried   = false;
+        g.asyncOk      = false;
+        g.asyncPending = false;
         g.prepPipe    = nil;
         g.copyPipe    = nil;
         g.fgCopyPipe  = nil;
@@ -433,6 +525,21 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
 
     @autoreleasepool
     {
+        // asynchronous: Vulkan waits for the event, so it must be signalled on every path
+        const bool async = g.asyncPending;
+        g.asyncPending   = false;
+        struct AsyncGuard
+        {
+            bool active;
+            ~AsyncGuard()
+            {
+                if( active )
+                {
+                    SignalAsyncOnly();
+                }
+            }
+        } asyncGuard = { async };
+
         if( !InitDevice( device, queue ) )
         {
             return FI::FB_IMAGE_INDEX_FINAL;
@@ -463,18 +570,28 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
             float maxInv;
         } prm = { 1.0f, 0.998f };
 
-        // MoltenVK commits its submissions from a background thread when ray tracing
-        // is enabled, so MetalFX could otherwise run before the frame it upscales.
-        // Wait for all Vulkan work first, and for MetalFX to finish afterwards.
+        // Asynchronous: the Metal command buffer waits on the GPU for the frame's Vulkan
+        // work, and the later Vulkan work waits for MetalFX the same way.
+        // Synchronous: MoltenVK commits its submissions from a background thread when ray
+        // tracing is enabled, so MetalFX could otherwise run before the frame it upscales;
+        // wait for all Vulkan work first, and for MetalFX to finish afterwards.
+        id< MTLCommandBuffer > cb;
+        if( async )
+        {
+            // the GPU waits for the frame's Vulkan work, the CPU doesn't
+            cb = [g.asyncQueue commandBuffer];
+            [cb encodeWaitForEvent:g.asyncEvent value:g.asyncWaitValue];
+            g.lastWaitVulkanMs = 0;
+        }
+        else
         {
             const auto t0 = std::chrono::steady_clock::now();
             vkQueueWaitIdle( queue );
             g.lastWaitVulkanMs =
                 std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
+            cb = [g.queue commandBuffer];
         }
-
-        id< MTLCommandBuffer > cb = [g.queue commandBuffer];
-        cb.label                  = @"RTGL1 MetalFX";
+        cb.label = @"RTGL1 MetalFX";
 
         // 1. convert inputs into formats MetalFX accepts
         {
@@ -543,9 +660,22 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
             [enc endEncoding];
         }
 
-        [cb commit];
-        [cb waitUntilCompleted];
-        g.lastMetalFxGpuMs = ( cb.GPUEndTime - cb.GPUStartTime ) * 1000.0;
+        if( async )
+        {
+            [cb encodeSignalEvent:g.asyncEvent value:g.asyncSignalValue];
+            [cb addCompletedHandler:^( id< MTLCommandBuffer > c ) {
+                g.lastMetalFxGpuMs = ( c.GPUEndTime - c.GPUStartTime ) * 1000.0;
+            }];
+            [cb commit];
+            g.lastAsyncCb     = cb;
+            asyncGuard.active = false;
+        }
+        else
+        {
+            [cb commit];
+            [cb waitUntilCompleted];
+            g.lastMetalFxGpuMs = ( cb.GPUEndTime - cb.GPUStartTime ) * 1000.0;
+        }
     }
 
     return FI::FB_IMAGE_INDEX_UPSCALED_PONG;
@@ -562,6 +692,25 @@ void EncodeCopy( id< MTLCommandBuffer > cb, id< MTLTexture > src, id< MTLTexture
     [enc dispatchThreads:MTLSizeMake( w, h, 1 ) threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
     [enc endEncoding];
 }
+}
+
+bool RTGL1::FSR2::PrepareAsync( VkSemaphore& sem, uint64_t& vulkanDoneValue, uint64_t& metalFxDoneValue )
+{
+    @autoreleasepool
+    {
+        if( !InitDevice( device, queue ) || !InitAsync() )
+        {
+            return false;
+        }
+        g.asyncWaitValue   = ++g.asyncCounter;
+        g.asyncSignalValue = ++g.asyncCounter;
+        g.asyncPending     = true;
+
+        sem              = g.asyncSem;
+        vulkanDoneValue  = g.asyncWaitValue;
+        metalFxDoneValue = g.asyncSignalValue;
+        return true;
+    }
 }
 
 void RTGL1::FSR2::GetLastTimings( double& waitVulkanMs, double& metalFxGpuMs )

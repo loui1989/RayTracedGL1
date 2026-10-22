@@ -63,8 +63,16 @@ void Scene::PrepareForFrame(VkCommandBuffer cmd, uint32_t frameIndex)
 }
 
 void Scene::SubmitForFrame(VkCommandBuffer cmd, uint32_t frameIndex, const std::shared_ptr<GlobalUniform> &uniform, 
-                           uint32_t uniformData_rayCullMaskWorld, bool allowGeometryWithSkyFlag, bool disableRTGeometry)
+                           uint32_t uniformData_rayCullMaskWorld, bool allowGeometryWithSkyFlag, bool disableRTGeometry,
+                           const std::function< void( VkCommandBuffer, const char* ) >& profileMark)
 {
+    auto mark = [ & ]( const char* name ) {
+        if( profileMark )
+        {
+            profileMark( cmd, name );
+        }
+    };
+
     uint32_t preprocMode = submittedStaticInCurrentFrame ? VERT_PREPROC_MODE_ALL : 
                            toResubmitMovable             ? VERT_PREPROC_MODE_DYNAMIC_AND_MOVABLE : 
                                                            VERT_PREPROC_MODE_ONLY_DYNAMIC;
@@ -72,6 +80,7 @@ void Scene::SubmitForFrame(VkCommandBuffer cmd, uint32_t frameIndex, const std::
 
 
     lightManager->CopyFromStaging(cmd, frameIndex);
+    mark("AS: light copy");
 
 
     // copy to device-local, if there were any tex coords change for static geometry
@@ -83,9 +92,11 @@ void Scene::SubmitForFrame(VkCommandBuffer cmd, uint32_t frameIndex, const std::
         asManager->ResubmitStaticMovable(cmd);
         toResubmitMovable = false;
     }
+    mark("AS: static tex coords + movable BLAS");
 
     // always submit dynamic geomtetry on the frame ending
     asManager->SubmitDynamicGeometry(cmd, frameIndex);
+    mark("AS: dynamic geometry copy + BLAS build");
 
 
     // copy geom and tri infos to device-local
@@ -98,12 +109,15 @@ void Scene::SubmitForFrame(VkCommandBuffer cmd, uint32_t frameIndex, const std::
 
     // upload uniform data
     uniform->Upload(cmd, frameIndex);
+    mark("AS: geometry infos + uniform");
     
     
     vertPreproc->Preprocess(cmd, frameIndex, preprocMode, uniform, asManager, push);
+    mark("AS: vertex preprocess");
     
 
     asManager->BuildTLAS(cmd, frameIndex, prepare);
+    mark("AS: TLAS build");
 }
 
 bool Scene::Upload(uint32_t frameIndex, const RgGeometryUploadInfo &uploadInfo)

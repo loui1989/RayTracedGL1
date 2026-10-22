@@ -192,6 +192,41 @@ void CommandBufferManager::Submit(VkCommandBuffer cmd, VkSemaphore waitSemaphore
     VK_CHECKERROR(r);
 }
 
+void CommandBufferManager::SubmitTimeline(VkCommandBuffer cmd, VkSemaphore timeline, uint64_t waitValue, uint64_t signalValue)
+{
+    VkResult r = vkEndCommandBuffer(cmd);
+    VK_CHECKERROR(r);
+
+    const VkPipelineStageFlags waitStages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    VkTimelineSemaphoreSubmitInfo timelineInfo = {};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.waitSemaphoreValueCount = waitValue ? 1 : 0;
+    timelineInfo.pWaitSemaphoreValues = &waitValue;
+    timelineInfo.signalSemaphoreValueCount = signalValue ? 1 : 0;
+    timelineInfo.pSignalSemaphoreValues = &signalValue;
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = &timelineInfo;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    submitInfo.waitSemaphoreCount = waitValue ? 1 : 0;
+    submitInfo.pWaitSemaphores = &timeline;
+    submitInfo.pWaitDstStageMask = &waitStages;
+    submitInfo.signalSemaphoreCount = signalValue ? 1 : 0;
+    submitInfo.pSignalSemaphores = &timeline;
+
+    auto &qs = cmdQueues[currentFrameIndex];
+    assert(qs.find(cmd) != qs.end());
+
+    VkQueue q = qs[cmd];
+    qs.erase(cmd);
+
+    r = vkQueueSubmit(q, 1, &submitInfo, VK_NULL_HANDLE);
+    VK_CHECKERROR(r);
+}
+
 
 void CommandBufferManager::WaitGraphicsIdle()
 {

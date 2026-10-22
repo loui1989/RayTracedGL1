@@ -21,6 +21,8 @@
 #pragma once
 
 #include "ASManager.h"
+
+#include <functional>
 #include "LightManager.h"
 #include "VertexPreprocessing.h"
 
@@ -48,7 +50,8 @@ public:
 
     void PrepareForFrame(VkCommandBuffer cmd, uint32_t frameIndex);
     void SubmitForFrame(VkCommandBuffer cmd, uint32_t frameIndex, const std::shared_ptr<GlobalUniform> &uniform,
-                        uint32_t uniformData_rayCullMaskWorld, bool allowGeometryWithSkyFlag, bool disableRTGeometry);
+                        uint32_t uniformData_rayCullMaskWorld, bool allowGeometryWithSkyFlag, bool disableRTGeometry,
+                        const std::function< void( VkCommandBuffer, const char* ) >& profileMark = nullptr);
 
     bool Upload(uint32_t frameIndex, const RgGeometryUploadInfo &uploadInfo);
     bool UpdateTransform(const RgUpdateTransformInfo &updateInfo);

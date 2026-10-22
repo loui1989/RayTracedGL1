@@ -51,6 +51,9 @@ public:
 
     void Submit(VkCommandBuffer cmd, VkFence fence = VK_NULL_HANDLE);
     void Submit(VkCommandBuffer cmd, VkSemaphore waitSemaphore, VkPipelineStageFlags waitStages, VkSemaphore signalSemaphore, VkFence fence);
+    // timeline semaphore 'timeline': wait for 'waitValue' (if non-zero) before the commands,
+    // signal 'signalValue' (if non-zero) after them
+    void SubmitTimeline(VkCommandBuffer cmd, VkSemaphore timeline, uint64_t waitValue, uint64_t signalValue);
 
 
     void WaitGraphicsIdle();

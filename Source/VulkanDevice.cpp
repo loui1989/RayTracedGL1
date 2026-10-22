@@ -670,8 +670,10 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     scene->SubmitForFrame(cmd, frameIndex, uniform, 
                           uniform->GetData()->rayCullMaskWorld, 
                           allowGeometryWithSkyFlag,
-                          drawInfo.disableRayTracedGeometry);
-    PROFILE_GPU(cmd, "vertex preprocess + AS build");
+                          drawInfo.disableRayTracedGeometry,
+                          profiler ? std::function< void( VkCommandBuffer, const char* ) >(
+                                         [ this ]( VkCommandBuffer c, const char* n ) { profiler->Gpu( c, n ); } )
+                                   : nullptr);
 
 
     framebuffers->PrepareForSize(renderResolution.GetResolutionState());
@@ -814,10 +816,22 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         else if (renderResolution.IsAmdFsr2Enabled())
         {
 #ifdef __APPLE__
-            // MetalFX encodes its own Metal command buffer on the same queue
+            // MetalFX encodes its own Metal command buffer; by default ordered with
+            // the Vulkan work by a timeline semaphore, without CPU waits
             PROFILE_GPU(cmd, "bloom prepare");
             PROFILE_CPU("record path tracing commands");
-            cmdManager->Submit(cmd);
+            VkSemaphore mfxSem = VK_NULL_HANDLE;
+            uint64_t    vulkanDoneValue = 0, metalFxDoneValue = 0;
+            if (amdFsr2->PrepareAsync(mfxSem, vulkanDoneValue, metalFxDoneValue))
+            {
+                cmdManager->SubmitTimeline(cmd, mfxSem, 0, vulkanDoneValue);
+                metalFxWaitSemaphore = mfxSem;
+                metalFxWaitValue     = metalFxDoneValue;
+            }
+            else
+            {
+                cmdManager->Submit(cmd);
+            }
             cmd = VK_NULL_HANDLE;
             PROFILE_CPU("submit (MoltenVK)");
 #endif
@@ -903,7 +917,16 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frameGenTimestamps, frameIndex * 2 + 1);
         frameGenTimestampsWritten[frameIndex] = true;
     }
-    cmdManager->Submit(cmd);
+    if (metalFxWaitSemaphore != VK_NULL_HANDLE)
+    {
+        // the post effects read MetalFX's output
+        cmdManager->SubmitTimeline(cmd, metalFxWaitSemaphore, metalFxWaitValue, 0);
+        metalFxWaitSemaphore = VK_NULL_HANDLE;
+    }
+    else
+    {
+        cmdManager->Submit(cmd);
+    }
 
     // MetalFX frame generation (experimental): show a frame generated between the
     // previous and this one first, with the HUD drawn on top, then this frame

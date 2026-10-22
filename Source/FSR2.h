@@ -74,6 +74,12 @@ namespace RTGL1
         // timings of the last Apply(), for profiling: CPU wait for the Vulkan queue
         // to be idle, and the MetalFX command buffer's GPU time
         static void GetLastTimings(double &waitVulkanMs, double &metalFxGpuMs);
+
+        // Asynchronous MetalFX, without CPU waits (default; RTGL1_METALFX_SYNC=1 turns it off).
+        // If it returns true, the Vulkan work before Apply() must be submitted with 'sem'
+        // (a timeline semaphore) signalled to 'vulkanDoneValue', and the Vulkan work after
+        // Apply() must wait for 'sem' to reach 'metalFxDoneValue'. Call right before Apply().
+        bool PrepareAsync(VkSemaphore &sem, uint64_t &vulkanDoneValue, uint64_t &metalFxDoneValue);
 #endif
 
     private:

@@ -163,6 +163,9 @@ private:
     std::chrono::steady_clock::time_point frameWorkStart;
     // RTGL1_PROFILE=1
     std::unique_ptr< FrameProfiler > profiler;
+    // macOS: asynchronous MetalFX, the post effects' submission waits for it
+    VkSemaphore metalFxWaitSemaphore = VK_NULL_HANDLE;
+    uint64_t    metalFxWaitValue     = 0;
 
     bool                waitForOutOfFrameFence;
     VkFence             outOfFrameFences[MAX_FRAMES_IN_FLIGHT] = {};
