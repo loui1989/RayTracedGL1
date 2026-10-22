@@ -157,6 +157,75 @@ struct MtlAS
     uint32_t                refitsSinceBuild = 0;
 };
 
+// ---- graphics shadow state
+
+struct RenderPassInfo
+{
+    struct Attachment
+    {
+        VkFormat            format = VK_FORMAT_UNDEFINED;
+        VkAttachmentLoadOp  load   = VK_ATTACHMENT_LOAD_OP_LOAD;
+        VkAttachmentStoreOp store  = VK_ATTACHMENT_STORE_OP_STORE;
+    };
+    std::vector< Attachment > attachments;
+    std::vector< uint32_t >   colorRefs; // attachment index or VK_ATTACHMENT_UNUSED
+    uint32_t                  depthRef = VK_ATTACHMENT_UNUSED;
+    uint32_t                  viewMask = 0;
+    bool                      supported = true;
+};
+
+struct FramebufferInfo
+{
+    VkRenderPass               renderPass = VK_NULL_HANDLE;
+    std::vector< VkImageView > views;
+    uint32_t                   width = 0, height = 0, layers = 1;
+};
+
+struct ShaderStageInfo
+{
+    VkShaderModule                          module = VK_NULL_HANDLE;
+    std::string                             entry;
+    std::vector< VkSpecializationMapEntry > specEntries;
+    std::vector< uint8_t >                  specData;
+};
+
+struct GraphicsPipelineInfo
+{
+    ShaderStageInfo vs, fs;
+    bool            hasFs = false;
+
+    std::vector< VkVertexInputBindingDescription >   bindings;
+    std::vector< VkVertexInputAttributeDescription > attributes;
+    VkPrimitiveTopology                              topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkCullModeFlags cullMode   = VK_CULL_MODE_NONE;
+    VkFrontFace     frontFace  = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    bool            depthBias  = false;
+    float           depthBiasConstant = 0, depthBiasSlope = 0, depthBiasClamp = 0;
+    bool            wireframe  = false;
+
+    bool        depthTest    = false;
+    bool        depthWrite   = false;
+    VkCompareOp depthCompare = VK_COMPARE_OP_ALWAYS;
+
+    std::vector< VkPipelineColorBlendAttachmentState > blends;
+
+    bool       dynamicViewport = false, dynamicScissor = false;
+    VkViewport viewport = {};
+    VkRect2D   scissor  = {};
+
+    VkPipelineLayout layout     = VK_NULL_HANDLE;
+    VkRenderPass     renderPass = VK_NULL_HANDLE;
+    uint32_t         viewCount  = 1;
+    std::string      name;
+
+    // Metal
+    bool                                                          failed = false;
+    id< MTLFunction >                                             vfn, ffn;
+    std::unordered_map< std::string, id< MTLRenderPipelineState > > variants; // by attachment formats
+    id< MTLDepthStencilState >                                    depthState;
+};
+
 struct BlasBuild
 {
     VkAccelerationStructureKHR                              dst   = VK_NULL_HANDLE;
@@ -220,6 +289,20 @@ struct State
     id< MTLCommandBuffer >         lastCb;
     uint64_t                       sectionDone = 0; // event value the current section signals
     BoundState                     bound;
+
+    // graphics
+    std::unordered_map< VkRenderPass, RenderPassInfo >        renderPasses;
+    std::unordered_map< VkFramebuffer, FramebufferInfo >      framebuffers;
+    std::unordered_map< VkPipeline, GraphicsPipelineInfo >    gpipelines;
+    bool                                                      rasterEnv    = true;
+    bool                                                      rasterBroken = false;
+    id< MTLComputePipelineState >                             compactIndirect;
+    id< MTLBuffer >                                           indirectScratch;
+
+    // section encoders: one at a time, ordered with passFence
+    id< MTLRenderCommandEncoder > renderEnc;
+    id< MTLBlitCommandEncoder >   blitEnc;
+    bool                          waitASFence = false;
     bool                           computeEnv    = true;
     bool                           fastMath      = false; // RTGL1_METAL_FASTMATH=1
     uint32_t                       asRebuildEvery = 8;    // RTGL1_METAL_AS_REBUILD_EVERY, 1 = never refit
@@ -1448,12 +1531,222 @@ void RTGL1::Metal::DestroyPipeline( VkDevice device, VkPipeline pipeline, const 
     {
         std::lock_guard g( S().lock );
         S().pipelines.erase( pipeline );
+        S().gpipelines.erase( pipeline );
     }
     vkDestroyPipeline( device, pipeline, alloc );
 }
 
+VkResult RTGL1::Metal::CreateRenderPass( VkDevice                      device,
+                                         const VkRenderPassCreateInfo* ci,
+                                         const VkAllocationCallbacks*  alloc,
+                                         VkRenderPass*                 out )
+{
+    const VkResult r = vkCreateRenderPass( device, ci, alloc, out );
+    if( r != VK_SUCCESS )
+    {
+        return r;
+    }
+
+    RenderPassInfo info;
+    for( uint32_t i = 0; i < ci->attachmentCount; i++ )
+    {
+        info.attachments.push_back(
+            { ci->pAttachments[ i ].format, ci->pAttachments[ i ].loadOp, ci->pAttachments[ i ].storeOp } );
+    }
+    if( ci->subpassCount == 1 )
+    {
+        const VkSubpassDescription& sp = ci->pSubpasses[ 0 ];
+        for( uint32_t i = 0; i < sp.colorAttachmentCount; i++ )
+        {
+            info.colorRefs.push_back( sp.pColorAttachments[ i ].attachment );
+        }
+        if( sp.pDepthStencilAttachment )
+        {
+            info.depthRef = sp.pDepthStencilAttachment->attachment;
+        }
+        if( sp.inputAttachmentCount > 0 || sp.pResolveAttachments )
+        {
+            info.supported = false;
+        }
+    }
+    else
+    {
+        info.supported = false;
+    }
+    for( auto* n = static_cast< const VkBaseInStructure* >( ci->pNext ); n; n = n->pNext )
+    {
+        if( n->sType == VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO )
+        {
+            const auto* mv = reinterpret_cast< const VkRenderPassMultiviewCreateInfo* >( n );
+            if( mv->subpassCount > 0 && mv->pViewMasks )
+            {
+                info.viewMask = mv->pViewMasks[ 0 ];
+            }
+        }
+    }
+
+    std::lock_guard g( S().lock );
+    S().renderPasses[ *out ] = std::move( info );
+    return r;
+}
+
+void RTGL1::Metal::DestroyRenderPass( VkDevice device, VkRenderPass rp, const VkAllocationCallbacks* alloc )
+{
+    {
+        std::lock_guard g( S().lock );
+        S().renderPasses.erase( rp );
+    }
+    vkDestroyRenderPass( device, rp, alloc );
+}
+
+VkResult RTGL1::Metal::CreateFramebuffer( VkDevice                       device,
+                                          const VkFramebufferCreateInfo* ci,
+                                          const VkAllocationCallbacks*   alloc,
+                                          VkFramebuffer*                 out )
+{
+    const VkResult r = vkCreateFramebuffer( device, ci, alloc, out );
+    if( r == VK_SUCCESS )
+    {
+        FramebufferInfo info;
+        info.renderPass = ci->renderPass;
+        info.views.assign( ci->pAttachments, ci->pAttachments + ci->attachmentCount );
+        info.width  = ci->width;
+        info.height = ci->height;
+        info.layers = ci->layers;
+
+        std::lock_guard g( S().lock );
+        S().framebuffers[ *out ] = std::move( info );
+    }
+    return r;
+}
+
+void RTGL1::Metal::DestroyFramebuffer( VkDevice device, VkFramebuffer fb, const VkAllocationCallbacks* alloc )
+{
+    {
+        std::lock_guard g( S().lock );
+        S().framebuffers.erase( fb );
+    }
+    vkDestroyFramebuffer( device, fb, alloc );
+}
+
+VkResult RTGL1::Metal::CreateGraphicsPipelines( VkDevice                            device,
+                                                VkPipelineCache                     cache,
+                                                uint32_t                            count,
+                                                const VkGraphicsPipelineCreateInfo* cis,
+                                                const VkAllocationCallbacks*        alloc,
+                                                VkPipeline*                         out )
+{
+    const VkResult r = vkCreateGraphicsPipelines( device, cache, count, cis, alloc, out );
+    if( r != VK_SUCCESS )
+    {
+        return r;
+    }
+
+    std::lock_guard g( S().lock );
+    for( uint32_t i = 0; i < count; i++ )
+    {
+        const VkGraphicsPipelineCreateInfo& ci = cis[ i ];
+        GraphicsPipelineInfo                gp;
+
+        for( uint32_t k = 0; k < ci.stageCount; k++ )
+        {
+            const VkPipelineShaderStageCreateInfo& st = ci.pStages[ k ];
+            ShaderStageInfo                        si;
+            si.module = st.module;
+            si.entry  = st.pName ? st.pName : "main";
+            if( st.pSpecializationInfo )
+            {
+                const VkSpecializationInfo& sp = *st.pSpecializationInfo;
+                si.specEntries.assign( sp.pMapEntries, sp.pMapEntries + sp.mapEntryCount );
+                const auto* data = static_cast< const uint8_t* >( sp.pData );
+                si.specData.assign( data, data + sp.dataSize );
+            }
+            if( st.stage == VK_SHADER_STAGE_VERTEX_BIT )
+            {
+                gp.vs = std::move( si );
+            }
+            else if( st.stage == VK_SHADER_STAGE_FRAGMENT_BIT )
+            {
+                gp.fs    = std::move( si );
+                gp.hasFs = true;
+            }
+            else
+            {
+                gp.failed = true; // geometry / tessellation: not supported
+            }
+        }
+
+        if( const auto* vi = ci.pVertexInputState )
+        {
+            gp.bindings.assign( vi->pVertexBindingDescriptions,
+                                vi->pVertexBindingDescriptions + vi->vertexBindingDescriptionCount );
+            gp.attributes.assign( vi->pVertexAttributeDescriptions,
+                                  vi->pVertexAttributeDescriptions + vi->vertexAttributeDescriptionCount );
+        }
+        if( ci.pInputAssemblyState )
+        {
+            gp.topology = ci.pInputAssemblyState->topology;
+        }
+        if( const auto* rs = ci.pRasterizationState )
+        {
+            gp.cullMode          = rs->cullMode;
+            gp.frontFace         = rs->frontFace;
+            gp.depthBias         = rs->depthBiasEnable;
+            gp.depthBiasConstant = rs->depthBiasConstantFactor;
+            gp.depthBiasSlope    = rs->depthBiasSlopeFactor;
+            gp.depthBiasClamp    = rs->depthBiasClamp;
+            gp.wireframe         = rs->polygonMode == VK_POLYGON_MODE_LINE;
+        }
+        if( const auto* ds = ci.pDepthStencilState )
+        {
+            gp.depthTest    = ds->depthTestEnable;
+            gp.depthWrite   = ds->depthTestEnable && ds->depthWriteEnable;
+            gp.depthCompare = ds->depthCompareOp;
+        }
+        if( const auto* cb = ci.pColorBlendState )
+        {
+            gp.blends.assign( cb->pAttachments, cb->pAttachments + cb->attachmentCount );
+        }
+        if( const auto* dy = ci.pDynamicState )
+        {
+            for( uint32_t k = 0; k < dy->dynamicStateCount; k++ )
+            {
+                gp.dynamicViewport |= dy->pDynamicStates[ k ] == VK_DYNAMIC_STATE_VIEWPORT;
+                gp.dynamicScissor |= dy->pDynamicStates[ k ] == VK_DYNAMIC_STATE_SCISSOR;
+            }
+        }
+        if( const auto* vp = ci.pViewportState )
+        {
+            if( vp->pViewports && vp->viewportCount > 0 )
+            {
+                gp.viewport = vp->pViewports[ 0 ];
+            }
+            if( vp->pScissors && vp->scissorCount > 0 )
+            {
+                gp.scissor = vp->pScissors[ 0 ];
+            }
+        }
+        gp.layout     = ci.layout;
+        gp.renderPass = ci.renderPass;
+        auto rp       = S().renderPasses.find( ci.renderPass );
+        if( rp != S().renderPasses.end() && rp->second.viewMask != 0 )
+        {
+            gp.viewCount = uint32_t( __builtin_popcount( rp->second.viewMask ) );
+        }
+
+        S().gpipelines[ out[ i ] ] = std::move( gp );
+    }
+    return r;
+}
+
 // ================================================================================================
 // native path
+
+namespace
+{
+void CreateCompactIndirect();
+void ShutdownGraphics();
+}
 
 bool RTGL1::Metal::IsEnabled()
 {
@@ -1570,12 +1863,16 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             s.computeEnv  = !( c && c[ 0 ] == '0' );
             const char* f = getenv( "RTGL1_METAL_FASTMATH" );
             s.fastMath    = f && f[ 0 ] == '1';
+            const char* ra = getenv( "RTGL1_METAL_RASTER" );
+            s.rasterEnv    = !( ra && ra[ 0 ] == '0' );
             const char* r = getenv( "RTGL1_METAL_AS_REBUILD_EVERY" );
             if( r && r[ 0 ] )
             {
                 s.asRebuildEvery = uint32_t( std::clamp( atoi( r ), 1, 1000 ) );
             }
         }
+
+        CreateCompactIndirect();
 
         s.enabled = true;
         Log( "native path tracing enabled (RTGL1_METAL_RT=1) on %s%s", s.mtlDevice.name.UTF8String,
@@ -1628,6 +1925,7 @@ void RTGL1::Metal::Shutdown()
         s.passFence  = nil;
         s.profWaitCb = nil;
         s.profCbs.clear();
+        ShutdownGraphics();
         s.dummyBlas  = nil;
         s.event      = nil;
         s.queue      = nil;
@@ -1692,6 +1990,116 @@ bool MakePrepareJob( VkPipeline pipeline, PrepareJob& job, std::string& error )
     return true;
 }
 
+// Compiles translated MSL (retrying without the optional ray query hint added by MetalGen).
+// Without the lock: can run on several threads at once.
+id< MTLLibrary > CompileLibrary( id< MTLDevice >    device,
+                                 const std::string& msl,
+                                 bool               fastMath,
+                                 const std::string& name,
+                                 std::string&       error )
+{
+    NSError*           err = nil;
+    MTLCompileOptions* co  = [MTLCompileOptions new];
+    co.languageVersion     = MTLLanguageVersion3_1;
+    if( @available( macOS 15.0, * ) )
+    {
+        // fast math lets the compiler assume no Inf / NaN, so the shaders' isnan / isinf
+        // checks (that keep bad values out of the reservoirs and the denoiser history)
+        // could be removed; relaxed keeps the other optimizations but honors Inf / NaN
+        co.mathMode = fastMath ? MTLMathModeFast : MTLMathModeRelaxed;
+    }
+    id< MTLLibrary > lib = [device newLibraryWithSource:[NSString stringWithUTF8String:msl.c_str()]
+                                                options:co
+                                                  error:&err];
+    if( !lib )
+    {
+        const std::string hint  = "    ip.assume_geometry_type(geometry_type::triangle);\n";
+        std::string       plain = msl;
+        const size_t      at    = plain.find( hint );
+        if( at != std::string::npos )
+        {
+            plain.erase( at, hint.size() );
+            NSError* err2 = nil;
+            lib = [device newLibraryWithSource:[NSString stringWithUTF8String:plain.c_str()]
+                                       options:co
+                                         error:&err2];
+            if( lib )
+            {
+                Log( "%s: compiled without the triangle-only ray query hint", name.c_str() );
+            }
+        }
+    }
+    if( !lib )
+    {
+        NSString* path = [NSTemporaryDirectory()
+            stringByAppendingPathComponent:[NSString stringWithFormat:@"rtgl1-%s.metal", name.c_str()]];
+        [[NSString stringWithUTF8String:msl.c_str()] writeToFile:path
+                                                      atomically:YES
+                                                        encoding:NSUTF8StringEncoding
+                                                           error:nil];
+        std::string msg = err ? err.localizedDescription.UTF8String : "?";
+        error = "Metal compile failed (source saved to " + std::string( path.UTF8String ) +
+                "): " + msg.substr( 0, 3000 );
+    }
+    return lib;
+}
+
+// The entry point with the specialization constants as function constants, by the types the
+// shader declares (bool, int, uint, float; SPIRV-Cross keeps the constant_id as the index).
+id< MTLFunction > MakeFunction( id< MTLLibrary >                               lib,
+                                const std::string&                             entryPoint,
+                                const std::vector< VkSpecializationMapEntry >& specEntries,
+                                const std::vector< uint8_t >&                  specData,
+                                std::string&                                   error )
+{
+    NSString*                  entry = [NSString stringWithUTF8String:entryPoint.c_str()];
+    MTLFunctionConstantValues* fc    = [MTLFunctionConstantValues new];
+    id< MTLFunction >          probe = [lib newFunctionWithName:entry];
+    if( !probe )
+    {
+        error = "entry point '" + entryPoint + "' not found";
+        return nil;
+    }
+    for( MTLFunctionConstant* c in probe.functionConstantsDictionary.allValues )
+    {
+        for( const VkSpecializationMapEntry& se : specEntries )
+        {
+            if( se.constantID != c.index || se.offset + se.size > specData.size() )
+            {
+                continue;
+            }
+            const uint8_t* src = specData.data() + se.offset;
+            switch( c.type )
+            {
+                case MTLDataTypeBool: {
+                    uint32_t raw = 0;
+                    memcpy( &raw, src, std::min< size_t >( se.size, sizeof( raw ) ) );
+                    const bool b = raw != 0;
+                    [fc setConstantValue:&b type:MTLDataTypeBool atIndex:c.index];
+                    break;
+                }
+                case MTLDataTypeInt:
+                case MTLDataTypeUInt:
+                case MTLDataTypeFloat:
+                    if( se.size == 4 )
+                    {
+                        [fc setConstantValue:src type:c.type atIndex:c.index];
+                    }
+                    break;
+                default: break;
+            }
+        }
+    }
+
+    NSError*          err = nil;
+    id< MTLFunction > fn  = [lib newFunctionWithName:entry constantValues:fc error:&err];
+    if( !fn )
+    {
+        error = "function '" + entryPoint + "' failed: " + ( err ? err.localizedDescription.UTF8String : "?" );
+    }
+    return fn;
+}
+
 // without the lock: can run on several threads at once
 PrepareResult CompilePrepareJob( const PrepareJob& job, id< MTLDevice > device )
 {
@@ -1707,106 +2115,22 @@ PrepareResult CompilePrepareJob( const PrepareJob& job, id< MTLDevice > device )
             return r;
         }
 
-        NSError*           err = nil;
-        MTLCompileOptions* co  = [MTLCompileOptions new];
-        co.languageVersion     = MTLLanguageVersion3_1;
-        if( @available( macOS 15.0, * ) )
-        {
-            // fast math lets the compiler assume no Inf / NaN, so the shaders' isnan / isinf
-            // checks (that keep bad values out of the reservoirs and the denoiser history)
-            // could be removed; relaxed keeps the other optimizations but honors Inf / NaN
-            co.mathMode = job.fastMath ? MTLMathModeFast : MTLMathModeRelaxed;
-        }
-        id< MTLLibrary > lib   = [device newLibraryWithSource:[NSString stringWithUTF8String:sh.msl.c_str()]
-                                                    options:co
-                                                      error:&err];
+        id< MTLLibrary > lib = CompileLibrary( device, sh.msl, job.fastMath, job.name, r.error );
         if( !lib )
         {
-            // retry without the optional ray query hint added by MetalGen
-            const std::string hint = "    ip.assume_geometry_type(geometry_type::triangle);\n";
-            std::string       plain = sh.msl;
-            const size_t      at    = plain.find( hint );
-            if( at != std::string::npos )
-            {
-                plain.erase( at, hint.size() );
-                NSError* err2 = nil;
-                lib = [device newLibraryWithSource:[NSString stringWithUTF8String:plain.c_str()]
-                                           options:co
-                                             error:&err2];
-                if( lib )
-                {
-                    Log( "%s: compiled without the triangle-only ray query hint", job.name.c_str() );
-                }
-            }
-        }
-        if( !lib )
-        {
-            NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                                [NSString stringWithFormat:@"rtgl1-%s.metal", job.name.c_str()]];
-            [[NSString stringWithUTF8String:sh.msl.c_str()] writeToFile:path
-                                                             atomically:YES
-                                                               encoding:NSUTF8StringEncoding
-                                                                  error:nil];
-            std::string msg = err ? err.localizedDescription.UTF8String : "?";
-            r.error = "Metal compile failed (source saved to " + std::string( path.UTF8String ) +
-                      "): " + msg.substr( 0, 3000 );
             return r;
         }
-
-        NSString* entry = [NSString stringWithUTF8String:sh.entryPoint.c_str()];
-
-        // specialization constants -> function constants, by the types the shader declares
-        // (bool, int, uint, float; SPIRV-Cross keeps the constant_id as the index)
-        MTLFunctionConstantValues* fc    = [MTLFunctionConstantValues new];
-        id< MTLFunction >          probe = [lib newFunctionWithName:entry];
-        if( !probe )
-        {
-            r.error = "entry point '" + sh.entryPoint + "' not found";
-            return r;
-        }
-        for( MTLFunctionConstant* c in probe.functionConstantsDictionary.allValues )
-        {
-            for( const VkSpecializationMapEntry& se : job.specEntries )
-            {
-                if( se.constantID != c.index || se.offset + se.size > job.specData.size() )
-                {
-                    continue;
-                }
-                const uint8_t* src = job.specData.data() + se.offset;
-                switch( c.type )
-                {
-                    case MTLDataTypeBool: {
-                        uint32_t raw = 0;
-                        memcpy( &raw, src, std::min< size_t >( se.size, sizeof( raw ) ) );
-                        const bool b = raw != 0;
-                        [fc setConstantValue:&b type:MTLDataTypeBool atIndex:c.index];
-                        break;
-                    }
-                    case MTLDataTypeInt:
-                    case MTLDataTypeUInt:
-                    case MTLDataTypeFloat:
-                        if( se.size == 4 )
-                        {
-                            [fc setConstantValue:src type:c.type atIndex:c.index];
-                        }
-                        break;
-                    default: break;
-                }
-            }
-        }
-
-        id< MTLFunction > fn = [lib newFunctionWithName:entry constantValues:fc error:&err];
+        id< MTLFunction > fn = MakeFunction( lib, sh.entryPoint, job.specEntries, job.specData, r.error );
         if( !fn )
         {
-            r.error = "function '" + sh.entryPoint + "' failed: " +
-                      ( err ? err.localizedDescription.UTF8String : "?" );
             return r;
         }
 
-        MTLComputePipelineDescriptor* pd = [MTLComputePipelineDescriptor new];
-        pd.computeFunction               = fn;
-        pd.label                         = [NSString stringWithUTF8String:job.name.c_str()];
-        id< MTLComputePipelineState > ps = [device newComputePipelineStateWithDescriptor:pd
+        NSError*                      err = nil;
+        MTLComputePipelineDescriptor* pd  = [MTLComputePipelineDescriptor new];
+        pd.computeFunction                = fn;
+        pd.label                          = [NSString stringWithUTF8String:job.name.c_str()];
+        id< MTLComputePipelineState > ps  = [device newComputePipelineStateWithDescriptor:pd
                                                                                  options:MTLPipelineOptionNone
                                                                               reflection:nil
                                                                                    error:&err];
@@ -2040,27 +2364,94 @@ void CommitResidency()
     }
 }
 
-id< MTLComputeCommandEncoder > NewEncoder( id< MTLCommandBuffer > cb )
+// ---- encoders of a section
+//
+// One encoder at a time; each waits for passFence at its start and updates it at its end,
+// so all the work of a section runs in the order it was recorded (resources reached
+// through argument buffers aren't tracked by Metal). Within a compute encoder, a memory
+// barrier follows each dispatch.
+
+void WaitSectionFences( id< MTLComputeCommandEncoder > e )
 {
-    id< MTLComputeCommandEncoder > e = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
-    e.label                          = @"RTGL1 native";
-    return e;
+    State& s = S();
+    [e waitForFence:s.passFence];
+    if( s.waitASFence )
+    {
+        [e waitForFence:s.fence];
+    }
+}
+
+// ends the compute or blit encoder (a render encoder is ended by EndRenderPass)
+void EndNonRenderEncoder()
+{
+    State& s = S();
+    if( s.encoder )
+    {
+        [s.encoder updateFence:s.passFence];
+        [s.encoder endEncoding];
+        s.encoder = nil;
+    }
+    if( s.blitEnc )
+    {
+        [s.blitEnc updateFence:s.passFence];
+        [s.blitEnc endEncoding];
+        s.blitEnc = nil;
+    }
+}
+
+id< MTLComputeCommandEncoder > ComputeEnc()
+{
+    State& s = S();
+    assert( !s.renderEnc );
+    if( s.blitEnc )
+    {
+        EndNonRenderEncoder();
+    }
+    if( !s.encoder )
+    {
+        s.encoder       = [s.cb computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+        s.encoder.label = @"RTGL1 native compute";
+        WaitSectionFences( s.encoder );
+    }
+    return s.encoder;
+}
+
+id< MTLBlitCommandEncoder > BlitEnc()
+{
+    State& s = S();
+    assert( !s.renderEnc );
+    if( s.encoder )
+    {
+        EndNonRenderEncoder();
+    }
+    if( !s.blitEnc )
+    {
+        s.blitEnc       = [s.cb blitCommandEncoder];
+        s.blitEnc.label = @"RTGL1 native copies";
+        [s.blitEnc waitForFence:s.passFence];
+        if( s.waitASFence )
+        {
+            [s.blitEnc waitForFence:s.fence];
+        }
+    }
+    return s.blitEnc;
 }
 
 // profiling: ends the current command buffer, so its GPU time is the work since the last mark
 void SplitForProfiling( const char* internedName )
 {
     State& s = S();
-    [s.encoder updateFence:s.passFence];
-    [s.encoder endEncoding];
+    if( s.renderEnc )
+    {
+        return; // no marks inside a render pass
+    }
+    EndNonRenderEncoder();
     CommitResidency();
     [s.cb commit];
     s.profCbs.push_back( { s.cb, internedName } );
 
     s.cb       = [s.queue commandBuffer];
     s.cb.label = @"RTGL1 native (profiled)";
-    s.encoder  = NewEncoder( s.cb );
-    [s.encoder waitForFence:s.passFence];
 }
 
 void EncodeDispatch( PipelineInfo&          pi,
@@ -2072,8 +2463,8 @@ void EncodeDispatch( PipelineInfo&          pi,
                      uint32_t               groupsY,
                      uint32_t               groupsZ )
 {
-    State& s = S();
-    [s.encoder setComputePipelineState:pi.mtl];
+    id< MTLComputeCommandEncoder > e = ComputeEnc();
+    [e setComputePipelineState:pi.mtl];
     for( uint32_t i = 0; i < setCount; i++ )
     {
         if( sets[ i ] == VK_NULL_HANDLE )
@@ -2082,21 +2473,20 @@ void EncodeDispatch( PipelineInfo&          pi,
         }
         if( id< MTLBuffer > ab = EncodeSet( sets[ i ] ) )
         {
-            [s.encoder setBuffer:ab offset:0 atIndex:i];
+            [e setBuffer:ab offset:0 atIndex:i];
         }
     }
     if( push && pushSize > 0 )
     {
-        [s.encoder setBytes:push length:pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
+        [e setBytes:push length:pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
     }
-    [s.encoder dispatchThreadgroups:MTLSizeMake( groupsX, groupsY, groupsZ )
-              threadsPerThreadgroup:pi.threadsPerGroup];
+    [e dispatchThreadgroups:MTLSizeMake( groupsX, groupsY, groupsZ ) threadsPerThreadgroup:pi.threadsPerGroup];
     // the next pass reads what this one wrote
-    [s.encoder memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+    [e memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
 }
 
-// a command on SectionCmd() that the native path can't do: skipped, and the generic compute
-// passes go back to Vulkan from the next frame on
+// a compute command on SectionCmd() that the native path can't do: skipped, and the generic
+// compute passes go back to Vulkan from the next frame on
 void SectionUnsupported( const char* what )
 {
     std::lock_guard g( S().lock );
@@ -2105,43 +2495,18 @@ void SectionUnsupported( const char* what )
                                    "the compute passes go back to MoltenVK" );
 }
 
-void SectionBindPipeline( VkPipelineBindPoint bp, VkPipeline pipeline )
+// the same for graphics / copies: the render passes go back to Vulkan from the next frame on
+void RasterUnsupported( const std::string& what )
 {
-    if( bp != VK_PIPELINE_BIND_POINT_COMPUTE )
-    {
-        SectionUnsupported( "a graphics pipeline bind" );
-        return;
-    }
     std::lock_guard g( S().lock );
-    S().bound.pipeline = pipeline;
+    S().rasterBroken = true;
+    LogOnce( what + ": not supported in a native Metal section, the render passes go back to MoltenVK" );
 }
 
-void SectionBindSets( VkPipelineBindPoint bp, uint32_t firstSet, uint32_t count, const VkDescriptorSet* sets )
-{
-    if( bp != VK_PIPELINE_BIND_POINT_COMPUTE )
-    {
-        SectionUnsupported( "a graphics descriptor set bind" );
-        return;
-    }
-    std::lock_guard g( S().lock );
-    for( uint32_t i = 0; i < count && firstSet + i < MAX_BOUND_SETS; i++ )
-    {
-        S().bound.sets[ firstSet + i ] = sets[ i ];
-    }
-}
+void SectionBindPipeline( VkPipelineBindPoint bp, VkPipeline pipeline );
+void SectionBindSets( VkPipelineBindPoint bp, uint32_t firstSet, uint32_t count, const VkDescriptorSet* sets );
 
-void SectionPushConstants( uint32_t offset, uint32_t size, const void* data )
-{
-    std::lock_guard g( S().lock );
-    BoundState&     b = S().bound;
-    if( offset + size > sizeof( b.push ) )
-    {
-        LogOnce( "push constants are too large for the native path" );
-        return;
-    }
-    memcpy( b.push + offset, data, size );
-    b.pushSize = std::max( b.pushSize, offset + size );
-}
+void SectionPushConstants( VkShaderStageFlags stages, uint32_t offset, uint32_t size, const void* data );
 
 void SectionDispatch( uint32_t x, uint32_t y, uint32_t z )
 {
@@ -2149,9 +2514,14 @@ void SectionDispatch( uint32_t x, uint32_t y, uint32_t z )
     {
         std::lock_guard g( S().lock );
         State&          s = S();
-        if( !s.encoder )
+        if( !s.cb )
         {
             LogOnce( "a dispatch on the section command buffer outside of a section" );
+            return;
+        }
+        if( s.renderEnc )
+        {
+            RasterUnsupported( "a dispatch inside a render pass" );
             return;
         }
 
@@ -2191,10 +2561,1123 @@ void SectionDispatch( uint32_t x, uint32_t y, uint32_t z )
 
 }
 
+// ================================================================================================
+// graphics in a section: render passes, pipelines, draws
+
+namespace
+{
+
+constexpr uint32_t MAX_VERTEX_BINDINGS = 8;
+
+struct GraphicsBound
+{
+    VkPipeline      pipeline                  = VK_NULL_HANDLE;
+    VkDescriptorSet sets[ MAX_BOUND_SETS ]    = {};
+    id< MTLBuffer > vb[ MAX_VERTEX_BINDINGS ];
+    NSUInteger      vbOffset[ MAX_VERTEX_BINDINGS ] = {};
+    id< MTLBuffer > ib;
+    NSUInteger      ibOffset    = 0;
+    MTLIndexType    ibType      = MTLIndexTypeUInt32;
+    bool            hasViewport = false;
+    bool            hasScissor  = false;
+    VkViewport      viewport    = {};
+    VkRect2D        scissor     = {};
+    uint8_t         push[ 256 ] = {};
+    uint32_t        pushSize    = 0;
+};
+
+struct RenderPassState
+{
+    MTLRenderPassDescriptor*           desc;
+    std::vector< MTLPixelFormat >      colorFormats;
+    std::vector< VkAttachmentStoreOp > colorStore;
+    MTLPixelFormat                     depthFormat   = MTLPixelFormatInvalid;
+    MTLPixelFormat                     stencilFormat = MTLPixelFormatInvalid;
+    VkAttachmentStoreOp                depthStore    = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    uint32_t                           width = 0, height = 0;
+    uint32_t                           viewCount = 1, firstView = 0;
+    std::string                        formatKey;
+    // a render pass the native path can't do: its draws are dropped
+    bool skip = false;
+
+    // what has to be set on the encoder before the next draw
+    bool                  pipelineDirty = true;
+    bool                  setsDirty     = true;
+    bool                  vbDirty       = true;
+    bool                  pushDirty     = true;
+    bool                  viewportDirty = true;
+    bool                  scissorDirty  = true;
+    GraphicsPipelineInfo* gp            = nullptr;
+    MTLPrimitiveType      prim          = MTLPrimitiveTypeTriangle;
+};
+
+struct GraphicsLibrary
+{
+    id< MTLLibrary > lib;
+    std::string      entry;
+};
+
+struct Gfx
+{
+    GraphicsBound                                        bound;
+    RenderPassState                                      rp;
+    std::unordered_map< std::string, GraphicsLibrary >   libs;   // translated shader modules
+    std::unordered_map< uint32_t, id< MTLDepthStencilState > > depthStates;
+};
+
+Gfx& G()
+{
+    static Gfx g;
+    return g;
+}
+
+bool HasDepth( MTLPixelFormat f )
+{
+    return f == MTLPixelFormatDepth16Unorm || f == MTLPixelFormatDepth32Float ||
+           f == MTLPixelFormatDepth32Float_Stencil8 || f == MTLPixelFormatDepth24Unorm_Stencil8;
+}
+
+bool HasStencil( MTLPixelFormat f )
+{
+    return f == MTLPixelFormatDepth32Float_Stencil8 || f == MTLPixelFormatDepth24Unorm_Stencil8 ||
+           f == MTLPixelFormatStencil8 || f == MTLPixelFormatX32_Stencil8;
+}
+
+MTLLoadAction LoadAction( VkAttachmentLoadOp op )
+{
+    switch( op )
+    {
+        case VK_ATTACHMENT_LOAD_OP_LOAD: return MTLLoadActionLoad;
+        case VK_ATTACHMENT_LOAD_OP_CLEAR: return MTLLoadActionClear;
+        default: return MTLLoadActionDontCare;
+    }
+}
+
+MTLVertexFormat VertexFormat( VkFormat f )
+{
+    switch( f )
+    {
+        case VK_FORMAT_R32_SFLOAT: return MTLVertexFormatFloat;
+        case VK_FORMAT_R32G32_SFLOAT: return MTLVertexFormatFloat2;
+        case VK_FORMAT_R32G32B32_SFLOAT: return MTLVertexFormatFloat3;
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return MTLVertexFormatFloat4;
+        case VK_FORMAT_R32_UINT: return MTLVertexFormatUInt;
+        case VK_FORMAT_R32G32_UINT: return MTLVertexFormatUInt2;
+        case VK_FORMAT_R32G32B32_UINT: return MTLVertexFormatUInt3;
+        case VK_FORMAT_R32G32B32A32_UINT: return MTLVertexFormatUInt4;
+        case VK_FORMAT_R32_SINT: return MTLVertexFormatInt;
+        case VK_FORMAT_R32G32_SINT: return MTLVertexFormatInt2;
+        case VK_FORMAT_R32G32B32_SINT: return MTLVertexFormatInt3;
+        case VK_FORMAT_R32G32B32A32_SINT: return MTLVertexFormatInt4;
+        case VK_FORMAT_R16G16_SFLOAT: return MTLVertexFormatHalf2;
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return MTLVertexFormatHalf4;
+        case VK_FORMAT_R8G8B8A8_UNORM: return MTLVertexFormatUChar4Normalized;
+        case VK_FORMAT_R8G8B8A8_SNORM: return MTLVertexFormatChar4Normalized;
+        case VK_FORMAT_R8G8B8A8_UINT: return MTLVertexFormatUChar4;
+        case VK_FORMAT_R8G8B8A8_SINT: return MTLVertexFormatChar4;
+        case VK_FORMAT_B8G8R8A8_UNORM: return MTLVertexFormatUChar4Normalized_BGRA;
+        default: return MTLVertexFormatInvalid;
+    }
+}
+
+MTLBlendFactor BlendFactor( VkBlendFactor f )
+{
+    switch( f )
+    {
+        case VK_BLEND_FACTOR_ZERO: return MTLBlendFactorZero;
+        case VK_BLEND_FACTOR_ONE: return MTLBlendFactorOne;
+        case VK_BLEND_FACTOR_SRC_COLOR: return MTLBlendFactorSourceColor;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return MTLBlendFactorOneMinusSourceColor;
+        case VK_BLEND_FACTOR_DST_COLOR: return MTLBlendFactorDestinationColor;
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return MTLBlendFactorOneMinusDestinationColor;
+        case VK_BLEND_FACTOR_SRC_ALPHA: return MTLBlendFactorSourceAlpha;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return MTLBlendFactorOneMinusSourceAlpha;
+        case VK_BLEND_FACTOR_DST_ALPHA: return MTLBlendFactorDestinationAlpha;
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return MTLBlendFactorOneMinusDestinationAlpha;
+        case VK_BLEND_FACTOR_CONSTANT_COLOR: return MTLBlendFactorBlendColor;
+        case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR: return MTLBlendFactorOneMinusBlendColor;
+        case VK_BLEND_FACTOR_CONSTANT_ALPHA: return MTLBlendFactorBlendAlpha;
+        case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA: return MTLBlendFactorOneMinusBlendAlpha;
+        case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: return MTLBlendFactorSourceAlphaSaturated;
+        case VK_BLEND_FACTOR_SRC1_COLOR: return MTLBlendFactorSource1Color;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR: return MTLBlendFactorOneMinusSource1Color;
+        case VK_BLEND_FACTOR_SRC1_ALPHA: return MTLBlendFactorSource1Alpha;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA: return MTLBlendFactorOneMinusSource1Alpha;
+        default: return MTLBlendFactorOne;
+    }
+}
+
+MTLBlendOperation BlendOp( VkBlendOp op )
+{
+    switch( op )
+    {
+        case VK_BLEND_OP_SUBTRACT: return MTLBlendOperationSubtract;
+        case VK_BLEND_OP_REVERSE_SUBTRACT: return MTLBlendOperationReverseSubtract;
+        case VK_BLEND_OP_MIN: return MTLBlendOperationMin;
+        case VK_BLEND_OP_MAX: return MTLBlendOperationMax;
+        default: return MTLBlendOperationAdd;
+    }
+}
+
+MTLColorWriteMask WriteMask( VkColorComponentFlags m )
+{
+    // the bits are in the opposite order
+    MTLColorWriteMask r = MTLColorWriteMaskNone;
+    if( m & VK_COLOR_COMPONENT_R_BIT )
+    {
+        r |= MTLColorWriteMaskRed;
+    }
+    if( m & VK_COLOR_COMPONENT_G_BIT )
+    {
+        r |= MTLColorWriteMaskGreen;
+    }
+    if( m & VK_COLOR_COMPONENT_B_BIT )
+    {
+        r |= MTLColorWriteMaskBlue;
+    }
+    if( m & VK_COLOR_COMPONENT_A_BIT )
+    {
+        r |= MTLColorWriteMaskAlpha;
+    }
+    return r;
+}
+
+bool PrimitiveType( VkPrimitiveTopology t, MTLPrimitiveType& prim, MTLPrimitiveTopologyClass& cls )
+{
+    switch( t )
+    {
+        case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+            prim = MTLPrimitiveTypePoint;
+            cls  = MTLPrimitiveTopologyClassPoint;
+            return true;
+        case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+            prim = MTLPrimitiveTypeLine;
+            cls  = MTLPrimitiveTopologyClassLine;
+            return true;
+        case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+            prim = MTLPrimitiveTypeLineStrip;
+            cls  = MTLPrimitiveTopologyClassLine;
+            return true;
+        case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+            prim = MTLPrimitiveTypeTriangle;
+            cls  = MTLPrimitiveTopologyClassTriangle;
+            return true;
+        case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+            prim = MTLPrimitiveTypeTriangleStrip;
+            cls  = MTLPrimitiveTopologyClassTriangle;
+            return true;
+        default: return false; // fans, adjacency, patches
+    }
+}
+
+MTLViewport ToMtl( const VkViewport& v )
+{
+    MTLViewport m;
+    m.originX = v.x;
+    m.originY = v.y;
+    m.width   = v.width;
+    m.height  = v.height;
+    m.znear   = v.minDepth;
+    m.zfar    = v.maxDepth;
+    return m;
+}
+
+// Metal requires the scissor to be inside the render target
+MTLScissorRect ToMtl( const VkRect2D& r, uint32_t width, uint32_t height )
+{
+    const int64_t x0 = std::clamp< int64_t >( r.offset.x, 0, width );
+    const int64_t y0 = std::clamp< int64_t >( r.offset.y, 0, height );
+    const int64_t x1 = std::clamp< int64_t >( int64_t( r.offset.x ) + r.extent.width, x0, width );
+    const int64_t y1 = std::clamp< int64_t >( int64_t( r.offset.y ) + r.extent.height, y0, height );
+    MTLScissorRect m;
+    m.x      = NSUInteger( x0 );
+    m.y      = NSUInteger( y0 );
+    m.width  = NSUInteger( x1 - x0 );
+    m.height = NSUInteger( y1 - y0 );
+    return m;
+}
+
+// under the lock
+id< MTLFunction > GraphicsFunction( const ShaderStageInfo& st,
+                                    VkPipelineLayout       layout,
+                                    bool                   multiview,
+                                    const std::string&     name,
+                                    std::string&           error )
+{
+    State& s = S();
+    char   key[ 64 ];
+    snprintf( key, sizeof( key ), "%llx/%llx/%d",
+              ( unsigned long long )( uintptr_t )st.module,
+              ( unsigned long long )( uintptr_t )layout,
+              multiview ? 1 : 0 );
+
+    auto it = G().libs.find( key );
+    if( it == G().libs.end() )
+    {
+        auto mit = s.modules.find( st.module );
+        auto lit = s.pipelineLayouts.find( layout );
+        if( mit == s.modules.end() || lit == s.pipelineLayouts.end() )
+        {
+            error = "shader module or pipeline layout unknown";
+            return nil;
+        }
+        std::vector< MetalGen::SetSlots > sets;
+        for( const auto& l : lit->second )
+        {
+            sets.push_back( l ? l->slots : MetalGen::SetSlots{} );
+        }
+        const MetalGen::ComputeShader sh = MetalGen::TranslateGraphics(
+            mit->second.data(), mit->second.size(), sets, 30100, multiview );
+        if( !sh.ok )
+        {
+            error = "SPIR-V to Metal translation failed: " + sh.error;
+            return nil;
+        }
+        id< MTLLibrary > lib = CompileLibrary( s.mtlDevice, sh.msl, s.fastMath, name, error );
+        if( !lib )
+        {
+            return nil;
+        }
+        it = G().libs.emplace( key, GraphicsLibrary{ lib, sh.entryPoint } ).first;
+    }
+    return MakeFunction( it->second.lib, it->second.entry, st.specEntries, st.specData, error );
+}
+
+// under the lock: the shaders and depth state of a graphics pipeline
+bool PrepareGraphics( GraphicsPipelineInfo& gp )
+{
+    if( gp.vfn )
+    {
+        return true;
+    }
+    if( gp.failed )
+    {
+        return false;
+    }
+    @autoreleasepool
+    {
+        State&      s = S();
+        std::string error;
+        if( gp.name.empty() )
+        {
+            char buf[ 64 ];
+            snprintf( buf, sizeof( buf ), "graphics pipeline %llx", ( unsigned long long )( uintptr_t )&gp );
+            gp.name = buf;
+        }
+        const bool multiview = gp.viewCount > 1;
+
+        id< MTLFunction > vfn = GraphicsFunction( gp.vs, gp.layout, multiview, gp.name + " (vertex)", error );
+        id< MTLFunction > ffn;
+        if( vfn && gp.hasFs )
+        {
+            ffn = GraphicsFunction( gp.fs, gp.layout, multiview, gp.name + " (fragment)", error );
+        }
+        if( !vfn || ( gp.hasFs && !ffn ) )
+        {
+            gp.failed = true;
+            Log( "%s: %s", gp.name.c_str(), error.c_str() );
+            return false;
+        }
+
+        const uint32_t dsKey = ( gp.depthTest ? 1u : 0u ) | ( gp.depthWrite ? 2u : 0u ) | ( uint32_t( gp.depthCompare ) << 4 );
+        auto           dit   = G().depthStates.find( dsKey );
+        if( dit == G().depthStates.end() )
+        {
+            MTLDepthStencilDescriptor* dd = [MTLDepthStencilDescriptor new];
+            dd.depthCompareFunction = gp.depthTest ? CompareFunction( gp.depthCompare ) : MTLCompareFunctionAlways;
+            dd.depthWriteEnabled    = gp.depthWrite;
+            dit = G().depthStates.emplace( dsKey, [s.mtlDevice newDepthStencilStateWithDescriptor:dd] ).first;
+        }
+
+        gp.vfn        = vfn;
+        gp.ffn        = ffn;
+        gp.depthState = dit->second;
+        return true;
+    }
+}
+
+// under the lock: the pipeline state for the attachments of the current render pass
+id< MTLRenderPipelineState > PipelineVariant( GraphicsPipelineInfo& gp, const RenderPassState& rp )
+{
+    auto it = gp.variants.find( rp.formatKey );
+    if( it != gp.variants.end() )
+    {
+        return it->second;
+    }
+
+    @autoreleasepool
+    {
+        MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        pd.label                        = [NSString stringWithUTF8String:gp.name.c_str()];
+        pd.vertexFunction               = gp.vfn;
+        pd.fragmentFunction             = gp.ffn;
+        pd.rasterSampleCount            = 1;
+
+        MTLPrimitiveType          prim;
+        MTLPrimitiveTopologyClass cls;
+        if( !PrimitiveType( gp.topology, prim, cls ) )
+        {
+            Log( "%s: unsupported primitive topology %d", gp.name.c_str(), int( gp.topology ) );
+            gp.variants[ rp.formatKey ] = nil;
+            return nil;
+        }
+        pd.inputPrimitiveTopology = cls;
+
+        MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
+        for( const auto& a : gp.attributes )
+        {
+            const MTLVertexFormat f = VertexFormat( a.format );
+            if( f == MTLVertexFormatInvalid || a.binding >= MAX_VERTEX_BINDINGS )
+            {
+                Log( "%s: unsupported vertex attribute format %d", gp.name.c_str(), int( a.format ) );
+                gp.variants[ rp.formatKey ] = nil;
+                return nil;
+            }
+            vd.attributes[ a.location ].format      = f;
+            vd.attributes[ a.location ].offset      = a.offset;
+            vd.attributes[ a.location ].bufferIndex = MetalGen::VERTEX_BUFFER_BASE + a.binding;
+        }
+        for( const auto& b : gp.bindings )
+        {
+            if( b.binding >= MAX_VERTEX_BINDINGS )
+            {
+                continue;
+            }
+            MTLVertexBufferLayoutDescriptor* l = vd.layouts[ MetalGen::VERTEX_BUFFER_BASE + b.binding ];
+            l.stride       = b.stride;
+            l.stepFunction = b.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE ? MTLVertexStepFunctionPerInstance
+                                                                          : MTLVertexStepFunctionPerVertex;
+            l.stepRate     = 1;
+        }
+        pd.vertexDescriptor = vd;
+
+        for( size_t i = 0; i < rp.colorFormats.size(); i++ )
+        {
+            if( rp.colorFormats[ i ] == MTLPixelFormatInvalid )
+            {
+                continue;
+            }
+            MTLRenderPipelineColorAttachmentDescriptor* ca = pd.colorAttachments[ i ];
+            ca.pixelFormat                                 = rp.colorFormats[ i ];
+            if( i < gp.blends.size() )
+            {
+                const VkPipelineColorBlendAttachmentState& b = gp.blends[ i ];
+                ca.blendingEnabled             = b.blendEnable;
+                ca.sourceRGBBlendFactor        = BlendFactor( b.srcColorBlendFactor );
+                ca.destinationRGBBlendFactor   = BlendFactor( b.dstColorBlendFactor );
+                ca.rgbBlendOperation           = BlendOp( b.colorBlendOp );
+                ca.sourceAlphaBlendFactor      = BlendFactor( b.srcAlphaBlendFactor );
+                ca.destinationAlphaBlendFactor = BlendFactor( b.dstAlphaBlendFactor );
+                ca.alphaBlendOperation         = BlendOp( b.alphaBlendOp );
+                ca.writeMask                   = WriteMask( b.colorWriteMask );
+            }
+        }
+        if( HasDepth( rp.depthFormat ) )
+        {
+            pd.depthAttachmentPixelFormat = rp.depthFormat;
+        }
+        if( HasStencil( rp.stencilFormat ) )
+        {
+            pd.stencilAttachmentPixelFormat = rp.stencilFormat;
+        }
+
+        NSError*                     err = nil;
+        id< MTLRenderPipelineState > pso = [S().mtlDevice newRenderPipelineStateWithDescriptor:pd error:&err];
+        if( !pso )
+        {
+            Log( "%s: render pipeline failed: %s", gp.name.c_str(),
+                 err ? err.localizedDescription.UTF8String : "?" );
+        }
+        gp.variants[ rp.formatKey ] = pso;
+        return pso;
+    }
+}
+
+void BeginRenderEncoder()
+{
+    State&           s  = S();
+    RenderPassState& rp = G().rp;
+
+    s.renderEnc       = [s.cb renderCommandEncoderWithDescriptor:rp.desc];
+    s.renderEnc.label = @"RTGL1 native render pass";
+    [s.renderEnc waitForFence:s.passFence beforeStages:MTLRenderStageVertex];
+    if( s.waitASFence )
+    {
+        [s.renderEnc waitForFence:s.fence beforeStages:MTLRenderStageVertex];
+    }
+
+    rp.pipelineDirty = true;
+    rp.setsDirty     = true;
+    rp.vbDirty       = true;
+    rp.pushDirty     = true;
+    rp.viewportDirty = true;
+    rp.scissorDirty  = true;
+    rp.gp            = nullptr;
+}
+
+// forceStore: keep everything, the render pass continues in another encoder
+void EndRenderEncoder( bool forceStore )
+{
+    State&           s  = S();
+    RenderPassState& rp = G().rp;
+    if( !s.renderEnc )
+    {
+        return;
+    }
+    for( size_t i = 0; i < rp.colorFormats.size(); i++ )
+    {
+        if( rp.colorFormats[ i ] != MTLPixelFormatInvalid )
+        {
+            const bool store = forceStore || rp.colorStore[ i ] == VK_ATTACHMENT_STORE_OP_STORE;
+            [s.renderEnc setColorStoreAction:store ? MTLStoreActionStore : MTLStoreActionDontCare atIndex:i];
+        }
+    }
+    if( rp.depthFormat != MTLPixelFormatInvalid )
+    {
+        const bool store = forceStore || rp.depthStore == VK_ATTACHMENT_STORE_OP_STORE;
+        [s.renderEnc setDepthStoreAction:store ? MTLStoreActionStore : MTLStoreActionDontCare];
+    }
+    if( rp.stencilFormat != MTLPixelFormatInvalid )
+    {
+        [s.renderEnc setStencilStoreAction:forceStore ? MTLStoreActionStore : MTLStoreActionDontCare];
+    }
+    [s.renderEnc updateFence:s.passFence afterStages:MTLRenderStageFragment];
+    [s.renderEnc endEncoding];
+    s.renderEnc = nil;
+}
+
+void SectionBeginRenderPass( const VkRenderPassBeginInfo* bi )
+{
+    @autoreleasepool
+    {
+        std::lock_guard  g( S().lock );
+        State&           s  = S();
+        RenderPassState& rp = G().rp;
+        if( !s.cb )
+        {
+            return;
+        }
+        if( s.renderEnc )
+        {
+            EndRenderEncoder( false );
+        }
+        rp = {};
+
+        auto rpi = s.renderPasses.find( bi->renderPass );
+        auto fbi = s.framebuffers.find( bi->framebuffer );
+        if( rpi == s.renderPasses.end() || fbi == s.framebuffers.end() || !rpi->second.supported )
+        {
+            rp.skip = true;
+            RasterUnsupported( "a render pass (unknown, or with several subpasses / input or resolve attachments)" );
+            return;
+        }
+        const RenderPassInfo&  info = rpi->second;
+        const FramebufferInfo& fb   = fbi->second;
+
+        EndNonRenderEncoder();
+
+        MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
+        std::string              key;
+        for( size_t i = 0; i < info.colorRefs.size(); i++ )
+        {
+            const uint32_t ref = info.colorRefs[ i ];
+            id< MTLTexture > tex = ref < fb.views.size() ? TextureForView( fb.views[ ref ] ) : nil;
+            if( ref == VK_ATTACHMENT_UNUSED || !tex )
+            {
+                if( ref != VK_ATTACHMENT_UNUSED )
+                {
+                    rp.skip = true;
+                    RasterUnsupported( "a render pass attachment without a Metal texture" );
+                    return;
+                }
+                rp.colorFormats.push_back( MTLPixelFormatInvalid );
+                rp.colorStore.push_back( VK_ATTACHMENT_STORE_OP_DONT_CARE );
+                key += "-,";
+                continue;
+            }
+            const RenderPassInfo::Attachment& att = info.attachments[ ref ];
+
+            MTLRenderPassColorAttachmentDescriptor* ca = desc.colorAttachments[ i ];
+            ca.texture                                 = tex;
+            ca.loadAction                              = LoadAction( att.load );
+            if( att.load == VK_ATTACHMENT_LOAD_OP_CLEAR && bi->pClearValues && ref < bi->clearValueCount )
+            {
+                const float* c = bi->pClearValues[ ref ].color.float32;
+                ca.clearColor  = MTLClearColorMake( c[ 0 ], c[ 1 ], c[ 2 ], c[ 3 ] );
+            }
+            ca.storeAction = MTLStoreActionUnknown; // set at the end
+
+            rp.colorFormats.push_back( tex.pixelFormat );
+            rp.colorStore.push_back( att.store );
+            key += std::to_string( int( tex.pixelFormat ) ) + ",";
+        }
+
+        if( info.depthRef != VK_ATTACHMENT_UNUSED )
+        {
+            id< MTLTexture > tex = info.depthRef < fb.views.size() ? TextureForView( fb.views[ info.depthRef ] ) : nil;
+            if( !tex )
+            {
+                rp.skip = true;
+                RasterUnsupported( "a render pass depth attachment without a Metal texture" );
+                return;
+            }
+            const RenderPassInfo::Attachment& att = info.attachments[ info.depthRef ];
+            const MTLPixelFormat              f   = tex.pixelFormat;
+            if( HasDepth( f ) )
+            {
+                desc.depthAttachment.texture    = tex;
+                desc.depthAttachment.loadAction = LoadAction( att.load );
+                if( att.load == VK_ATTACHMENT_LOAD_OP_CLEAR && bi->pClearValues && info.depthRef < bi->clearValueCount )
+                {
+                    desc.depthAttachment.clearDepth = bi->pClearValues[ info.depthRef ].depthStencil.depth;
+                }
+                desc.depthAttachment.storeAction = MTLStoreActionUnknown;
+                rp.depthFormat                   = f;
+                rp.depthStore                    = att.store;
+            }
+            if( HasStencil( f ) )
+            {
+                desc.stencilAttachment.texture     = tex;
+                desc.stencilAttachment.loadAction  = MTLLoadActionClear;
+                desc.stencilAttachment.storeAction = MTLStoreActionUnknown;
+                rp.stencilFormat                   = f;
+            }
+            key += "d" + std::to_string( int( f ) );
+        }
+
+        rp.width                = fb.width;
+        rp.height               = fb.height;
+        desc.renderTargetWidth  = fb.width;
+        desc.renderTargetHeight = fb.height;
+        if( info.viewMask != 0 )
+        {
+            rp.viewCount                 = uint32_t( __builtin_popcount( info.viewMask ) );
+            rp.firstView                 = uint32_t( __builtin_ctz( info.viewMask ) );
+            desc.renderTargetArrayLength = rp.viewCount;
+        }
+        key += "v" + std::to_string( rp.viewCount );
+
+        rp.desc      = desc;
+        rp.formatKey = key;
+        BeginRenderEncoder();
+    }
+}
+
+void SectionEndRenderPass()
+{
+    std::lock_guard g( S().lock );
+    if( G().rp.skip )
+    {
+        G().rp.skip = false;
+        return;
+    }
+    EndRenderEncoder( false );
+}
+
+// under the lock: sets what the next draw needs; false if it can't be drawn
+bool PrepareDraw()
+{
+    State&           s  = S();
+    GraphicsBound&   b  = G().bound;
+    RenderPassState& rp = G().rp;
+    if( !s.renderEnc || rp.skip )
+    {
+        return false;
+    }
+    id< MTLRenderCommandEncoder > e = s.renderEnc;
+
+    if( rp.pipelineDirty )
+    {
+        auto it = s.gpipelines.find( b.pipeline );
+        if( it == s.gpipelines.end() )
+        {
+            RasterUnsupported( "a draw without a known graphics pipeline" );
+            return false;
+        }
+        GraphicsPipelineInfo& gp = it->second;
+        if( !PrepareGraphics( gp ) )
+        {
+            RasterUnsupported( "a graphics pipeline that couldn't be prepared for Metal" );
+            return false;
+        }
+        if( gp.viewCount != rp.viewCount )
+        {
+            RasterUnsupported( "a graphics pipeline used with a render pass with a different view count" );
+            return false;
+        }
+        id< MTLRenderPipelineState > pso = PipelineVariant( gp, rp );
+        if( !pso )
+        {
+            RasterUnsupported( "a graphics pipeline state" );
+            return false;
+        }
+        MTLPrimitiveTopologyClass cls;
+        PrimitiveType( gp.topology, rp.prim, cls );
+
+        [e setRenderPipelineState:pso];
+        [e setDepthStencilState:gp.depthState];
+        [e setCullMode:( gp.cullMode == VK_CULL_MODE_FRONT_BIT  ? MTLCullModeFront
+                         : gp.cullMode == VK_CULL_MODE_BACK_BIT ? MTLCullModeBack
+                                                                : MTLCullModeNone )];
+        // with y flipped in the vertex shaders, triangles appear where they would in Vulkan,
+        // with the same winding on screen
+        [e setFrontFacingWinding:gp.frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE ? MTLWindingCounterClockwise
+                                                                                 : MTLWindingClockwise];
+        if( gp.depthBias )
+        {
+            [e setDepthBias:gp.depthBiasConstant slopeScale:gp.depthBiasSlope clamp:gp.depthBiasClamp];
+        }
+        else
+        {
+            [e setDepthBias:0 slopeScale:0 clamp:0];
+        }
+        [e setTriangleFillMode:gp.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
+
+        if( !gp.dynamicViewport )
+        {
+            [e setViewport:ToMtl( gp.viewport )];
+        }
+        if( !gp.dynamicScissor )
+        {
+            [e setScissorRect:ToMtl( gp.scissor, rp.width, rp.height )];
+        }
+
+        rp.gp            = &gp;
+        rp.pipelineDirty = false;
+        rp.setsDirty     = true;
+        rp.pushDirty     = true;
+        rp.viewportDirty = true;
+        rp.scissorDirty  = true;
+    }
+    GraphicsPipelineInfo& gp = *rp.gp;
+
+    if( rp.viewportDirty && gp.dynamicViewport )
+    {
+        const VkViewport full = { 0, 0, float( rp.width ), float( rp.height ), 0, 1 };
+        [e setViewport:ToMtl( b.hasViewport ? b.viewport : full )];
+        rp.viewportDirty = false;
+    }
+    if( rp.scissorDirty && gp.dynamicScissor )
+    {
+        const VkRect2D full = { { 0, 0 }, { rp.width, rp.height } };
+        [e setScissorRect:ToMtl( b.hasScissor ? b.scissor : full, rp.width, rp.height )];
+        rp.scissorDirty = false;
+    }
+    if( rp.setsDirty )
+    {
+        auto lit = s.pipelineLayouts.find( gp.layout );
+        const uint32_t setCount =
+            lit != s.pipelineLayouts.end() ? std::min< uint32_t >( uint32_t( lit->second.size() ), MAX_BOUND_SETS ) : 0;
+        for( uint32_t i = 0; i < setCount; i++ )
+        {
+            if( b.sets[ i ] == VK_NULL_HANDLE )
+            {
+                continue;
+            }
+            if( id< MTLBuffer > ab = EncodeSet( b.sets[ i ] ) )
+            {
+                [e setVertexBuffer:ab offset:0 atIndex:i];
+                [e setFragmentBuffer:ab offset:0 atIndex:i];
+            }
+        }
+        rp.setsDirty = false;
+    }
+    if( rp.pushDirty && b.pushSize > 0 )
+    {
+        [e setVertexBytes:b.push length:b.pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
+        [e setFragmentBytes:b.push length:b.pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
+        rp.pushDirty = false;
+    }
+    if( rp.vbDirty )
+    {
+        for( uint32_t i = 0; i < MAX_VERTEX_BINDINGS; i++ )
+        {
+            if( b.vb[ i ] )
+            {
+                [e setVertexBuffer:b.vb[ i ] offset:b.vbOffset[ i ] atIndex:MetalGen::VERTEX_BUFFER_BASE + i];
+            }
+        }
+        rp.vbDirty = false;
+    }
+    if( rp.viewCount > 1 )
+    {
+        const uint32_t viewMask[ 2 ] = { rp.firstView, rp.viewCount };
+        [e setVertexBytes:viewMask length:sizeof( viewMask ) atIndex:MetalGen::VIEW_MASK_BUFFER_INDEX];
+        [e setFragmentBytes:viewMask length:sizeof( viewMask ) atIndex:MetalGen::VIEW_MASK_BUFFER_INDEX];
+    }
+    return true;
+}
+
+void SectionDraw( uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance )
+{
+    std::lock_guard g( S().lock );
+    if( !PrepareDraw() || vertexCount == 0 || instanceCount == 0 )
+    {
+        return;
+    }
+    const RenderPassState& rp = G().rp;
+    [S().renderEnc drawPrimitives:rp.prim
+                      vertexStart:firstVertex
+                      vertexCount:vertexCount
+                    instanceCount:instanceCount * rp.viewCount
+                     baseInstance:firstInstance];
+}
+
+void SectionDrawIndexed( uint32_t indexCount,
+                         uint32_t instanceCount,
+                         uint32_t firstIndex,
+                         int32_t  vertexOffset,
+                         uint32_t firstInstance )
+{
+    std::lock_guard g( S().lock );
+    if( !PrepareDraw() || indexCount == 0 || instanceCount == 0 )
+    {
+        return;
+    }
+    const GraphicsBound&   b  = G().bound;
+    const RenderPassState& rp = G().rp;
+    if( !b.ib )
+    {
+        RasterUnsupported( "an indexed draw without an index buffer" );
+        return;
+    }
+    const NSUInteger indexSize = b.ibType == MTLIndexTypeUInt16 ? 2 : 4;
+    [S().renderEnc drawIndexedPrimitives:rp.prim
+                              indexCount:indexCount
+                               indexType:b.ibType
+                             indexBuffer:b.ib
+                       indexBufferOffset:b.ibOffset + NSUInteger( firstIndex ) * indexSize
+                           instanceCount:instanceCount * rp.viewCount
+                              baseVertex:vertexOffset
+                            baseInstance:firstInstance];
+}
+
+// Metal has no draw count from a buffer: a small compute pass copies the commands, with the
+// ones past the count made empty, and maxDrawCount indirect draws read them. The render pass
+// is paused for that compute pass and continues in a new encoder.
+void SectionDrawIndexedIndirectCount( VkBuffer     buffer,
+                                      VkDeviceSize offset,
+                                      VkBuffer     countBuffer,
+                                      VkDeviceSize countOffset,
+                                      uint32_t     maxDrawCount,
+                                      uint32_t     stride )
+{
+    @autoreleasepool
+    {
+        std::lock_guard  g( S().lock );
+        State&           s  = S();
+        GraphicsBound&   b  = G().bound;
+        RenderPassState& rp = G().rp;
+        if( !s.renderEnc || rp.skip || maxDrawCount == 0 )
+        {
+            return;
+        }
+        if( !s.compactIndirect || rp.viewCount > 1 || !b.ib )
+        {
+            RasterUnsupported( "vkCmdDrawIndexedIndirectCount" );
+            return;
+        }
+        id< MTLBuffer > src, cnt;
+        NSUInteger      srcOffset = 0, cntOffset = 0;
+        if( !ResolveBuffer( buffer, offset, src, srcOffset ) || !ResolveBuffer( countBuffer, countOffset, cnt, cntOffset ) ||
+            ( srcOffset & 3 ) || ( cntOffset & 3 ) || ( stride & 3 ) || stride < 20 )
+        {
+            RasterUnsupported( "vkCmdDrawIndexedIndirectCount with these buffers" );
+            return;
+        }
+        const NSUInteger argsSize = 20; // MTLDrawIndexedPrimitivesIndirectArguments
+        if( !s.indirectScratch || s.indirectScratch.length < maxDrawCount * argsSize )
+        {
+            s.indirectScratch = [s.mtlDevice newBufferWithLength:std::max< NSUInteger >( maxDrawCount * argsSize, 4096 )
+                                                         options:MTLResourceStorageModePrivate];
+            s.indirectScratch.label = @"RTGL1 indirect draw commands";
+        }
+
+        EndRenderEncoder( true );
+        {
+            id< MTLComputeCommandEncoder > c = ComputeEnc();
+            [c setComputePipelineState:s.compactIndirect];
+            [c setBuffer:src offset:srcOffset atIndex:0];
+            [c setBuffer:cnt offset:cntOffset atIndex:1];
+            [c setBuffer:s.indirectScratch offset:0 atIndex:2];
+            const uint32_t params[ 4 ] = { stride, maxDrawCount, 0, 0 };
+            [c setBytes:params length:sizeof( params ) atIndex:3];
+            [c dispatchThreadgroups:MTLSizeMake( ( maxDrawCount + 63 ) / 64, 1, 1 )
+                threadsPerThreadgroup:MTLSizeMake( 64, 1, 1 )];
+            EndNonRenderEncoder();
+        }
+        // continue the render pass where it was
+        for( size_t i = 0; i < rp.colorFormats.size(); i++ )
+        {
+            if( rp.colorFormats[ i ] != MTLPixelFormatInvalid )
+            {
+                rp.desc.colorAttachments[ i ].loadAction = MTLLoadActionLoad;
+            }
+        }
+        if( rp.depthFormat != MTLPixelFormatInvalid )
+        {
+            rp.desc.depthAttachment.loadAction = MTLLoadActionLoad;
+        }
+        if( rp.stencilFormat != MTLPixelFormatInvalid )
+        {
+            rp.desc.stencilAttachment.loadAction = MTLLoadActionLoad;
+        }
+        BeginRenderEncoder();
+
+        if( !PrepareDraw() )
+        {
+            return;
+        }
+        for( uint32_t i = 0; i < maxDrawCount; i++ )
+        {
+            [s.renderEnc drawIndexedPrimitives:rp.prim
+                                     indexType:b.ibType
+                                   indexBuffer:b.ib
+                             indexBufferOffset:b.ibOffset
+                                indirectBuffer:s.indirectScratch
+                          indirectBufferOffset:i * argsSize];
+        }
+    }
+}
+
+void SectionCopyBuffer( VkBuffer srcBuffer, VkBuffer dstBuffer, uint32_t count, const VkBufferCopy* regions )
+{
+    @autoreleasepool
+    {
+        std::lock_guard g( S().lock );
+        State&          s = S();
+        if( !s.cb )
+        {
+            return;
+        }
+        if( s.renderEnc )
+        {
+            RasterUnsupported( "a buffer copy inside a render pass" );
+            return;
+        }
+        for( uint32_t i = 0; i < count; i++ )
+        {
+            const VkBufferCopy& r = regions[ i ];
+            id< MTLBuffer >     src, dst;
+            NSUInteger          so = 0, dstOff = 0;
+            if( !ResolveBuffer( srcBuffer, r.srcOffset, src, so ) || !ResolveBuffer( dstBuffer, r.dstOffset, dst, dstOff ) )
+            {
+                RasterUnsupported( "a buffer copy with buffers without Metal buffers" );
+                return;
+            }
+            if( ( so & 3 ) || ( dstOff & 3 ) || ( r.size & 3 ) )
+            {
+                RasterUnsupported( "a buffer copy that isn't 4-byte aligned" );
+                return;
+            }
+            if( r.size == 0 )
+            {
+                continue;
+            }
+            [BlitEnc() copyFromBuffer:src sourceOffset:so toBuffer:dst destinationOffset:dstOff size:r.size];
+        }
+    }
+}
+
+const char* COMPACT_INDIRECT_MSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct DrawArgs { uint indexCount; uint instanceCount; uint indexStart; int baseVertex; uint baseInstance; };
+kernel void rgCompactIndirect( device const uchar* src   [[buffer(0)]],
+                               device const uint*  count [[buffer(1)]],
+                               device DrawArgs*    dst   [[buffer(2)]],
+                               constant uint4&     p     [[buffer(3)]],
+                               uint i [[thread_position_in_grid]] )
+{
+    if( i >= p.y ) return;
+    DrawArgs a = { 0u, 0u, 0u, 0, 0u };
+    if( i < count[ 0 ] )
+    {
+        device const uint* s = (device const uint*)( src + i * p.x );
+        a.indexCount    = s[ 0 ];
+        a.instanceCount = s[ 1 ];
+        a.indexStart    = s[ 2 ];
+        a.baseVertex    = int( s[ 3 ] );
+        a.baseInstance  = s[ 4 ];
+    }
+    dst[ i ] = a;
+}
+)MSL";
+
+// at Init
+void CreateCompactIndirect()
+{
+    State&           s = S();
+    std::string      error;
+    id< MTLLibrary > lib = CompileLibrary( s.mtlDevice, COMPACT_INDIRECT_MSL, false, "compact indirect", error );
+    id< MTLFunction > fn = lib ? [lib newFunctionWithName:@"rgCompactIndirect"] : nil;
+    NSError*          err = nil;
+    s.compactIndirect = fn ? [s.mtlDevice newComputePipelineStateWithFunction:fn error:&err] : nil;
+    if( !s.compactIndirect )
+    {
+        Log( "couldn't create the indirect draw helper: %s", error.empty() && err ? err.localizedDescription.UTF8String : error.c_str() );
+    }
+}
+
+void ShutdownGraphics()
+{
+    State& s          = S();
+    s.compactIndirect = nil;
+    s.indirectScratch = nil;
+    s.renderEnc       = nil;
+    s.blitEnc         = nil;
+    for( auto& [ p, gp ] : s.gpipelines )
+    {
+        gp.vfn        = nil;
+        gp.ffn        = nil;
+        gp.depthState = nil;
+        gp.variants.clear();
+    }
+    G().libs.clear();
+    G().depthStates.clear();
+    G().bound = {};
+    G().rp    = {};
+}
+
+void SectionBindPipeline( VkPipelineBindPoint bp, VkPipeline pipeline )
+{
+    std::lock_guard g( S().lock );
+    if( bp == VK_PIPELINE_BIND_POINT_GRAPHICS )
+    {
+        if( G().bound.pipeline != pipeline )
+        {
+            G().bound.pipeline    = pipeline;
+            G().rp.pipelineDirty = true;
+        }
+        return;
+    }
+    if( bp != VK_PIPELINE_BIND_POINT_COMPUTE )
+    {
+        LogOnce( "unsupported pipeline bind point in a native Metal section" );
+        return;
+    }
+    S().bound.pipeline = pipeline;
+}
+
+void SectionBindSets( VkPipelineBindPoint bp, uint32_t firstSet, uint32_t count, const VkDescriptorSet* sets )
+{
+    std::lock_guard g( S().lock );
+    VkDescriptorSet* dst = bp == VK_PIPELINE_BIND_POINT_GRAPHICS ? G().bound.sets : S().bound.sets;
+    for( uint32_t i = 0; i < count && firstSet + i < MAX_BOUND_SETS; i++ )
+    {
+        dst[ firstSet + i ] = sets[ i ];
+    }
+    if( bp == VK_PIPELINE_BIND_POINT_GRAPHICS )
+    {
+        G().rp.setsDirty = true;
+    }
+}
+
+void SectionPushConstants( VkShaderStageFlags stages, uint32_t offset, uint32_t size, const void* data )
+{
+    std::lock_guard g( S().lock );
+    if( stages & VK_SHADER_STAGE_COMPUTE_BIT )
+    {
+        BoundState& b = S().bound;
+        if( offset + size <= sizeof( b.push ) )
+        {
+            memcpy( b.push + offset, data, size );
+            b.pushSize = std::max( b.pushSize, offset + size );
+        }
+        else
+        {
+            LogOnce( "push constants are too large for the native path" );
+        }
+    }
+    if( stages & ( VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT ) )
+    {
+        GraphicsBound& b = G().bound;
+        if( offset + size <= sizeof( b.push ) )
+        {
+            memcpy( b.push + offset, data, size );
+            b.pushSize       = std::max( b.pushSize, offset + size );
+            G().rp.pushDirty = true;
+        }
+        else
+        {
+            LogOnce( "push constants are too large for the native path" );
+        }
+    }
+}
+
+void SectionBindVertexBuffers( uint32_t first, uint32_t count, const VkBuffer* buffers, const VkDeviceSize* offsets )
+{
+    std::lock_guard g( S().lock );
+    GraphicsBound&  b = G().bound;
+    for( uint32_t i = 0; i < count; i++ )
+    {
+        const uint32_t binding = first + i;
+        if( binding >= MAX_VERTEX_BINDINGS )
+        {
+            continue;
+        }
+        id< MTLBuffer > buf;
+        NSUInteger      off = 0;
+        if( !ResolveBuffer( buffers[ i ], offsets ? offsets[ i ] : 0, buf, off ) )
+        {
+            RasterUnsupported( "a vertex buffer without a Metal buffer" );
+            continue;
+        }
+        b.vb[ binding ]       = buf;
+        b.vbOffset[ binding ] = off;
+    }
+    G().rp.vbDirty = true;
+}
+
+void SectionBindIndexBuffer( VkBuffer buffer, VkDeviceSize offset, VkIndexType type )
+{
+    std::lock_guard g( S().lock );
+    GraphicsBound&  b = G().bound;
+    id< MTLBuffer > buf;
+    NSUInteger      off = 0;
+    if( type != VK_INDEX_TYPE_UINT16 && type != VK_INDEX_TYPE_UINT32 )
+    {
+        RasterUnsupported( "an index type" );
+        return;
+    }
+    if( !ResolveBuffer( buffer, offset, buf, off ) )
+    {
+        RasterUnsupported( "an index buffer without a Metal buffer" );
+        return;
+    }
+    b.ib       = buf;
+    b.ibOffset = off;
+    b.ibType   = type == VK_INDEX_TYPE_UINT16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+}
+
+void SectionSetViewport( const VkViewport& v )
+{
+    std::lock_guard g( S().lock );
+    G().bound.viewport    = v;
+    G().bound.hasViewport = true;
+    G().rp.viewportDirty  = true;
+}
+
+void SectionSetScissor( const VkRect2D& r )
+{
+    std::lock_guard g( S().lock );
+    G().bound.scissor    = r;
+    G().bound.hasScissor = true;
+    G().rp.scissorDirty  = true;
+}
+
+}
+
 bool RTGL1::Metal::IsComputeReady()
 {
     const State& s = S();
     return s.enabled && s.computeEnv && !s.computeBroken;
+}
+
+bool RTGL1::Metal::IsRasterReady()
+{
+    const State& s = S();
+    return IsComputeReady() && s.rasterEnv && !s.rasterBroken;
 }
 
 void RTGL1::Metal::BeginSection( VkCommandBuffer& cmd )
@@ -2211,6 +3694,8 @@ void RTGL1::Metal::BeginSection( VkCommandBuffer& cmd )
         cmd           = SectionCmd();
         s.sectionDone = vulkanDone + 1;
         s.bound       = {};
+        G().bound     = {};
+        G().rp        = {};
 
         // ...that the Metal work waits for on the GPU
         s.cb       = [s.queue commandBuffer];
@@ -2225,16 +3710,11 @@ void RTGL1::Metal::BeginSection( VkCommandBuffer& cmd )
             s.cb.label   = @"RTGL1 native (profiled)";
         }
 
-        const bool built = EncodeAccelerationStructureBuilds();
-
-        s.encoder = NewEncoder( s.cb );
-        if( built )
+        // the encoders of the section wait for these (s.fence) if there are any
+        s.waitASFence = EncodeAccelerationStructureBuilds();
+        if( s.waitASFence && s.profile )
         {
-            [s.encoder waitForFence:s.fence];
-            if( s.profile )
-            {
-                SplitForProfiling( Intern( "AS top level" ) );
-            }
+            SplitForProfiling( Intern( "AS top level" ) );
         }
     }
 }
@@ -2250,7 +3730,7 @@ void RTGL1::Metal::Dispatch( VkPipeline             pipeline,
     {
         std::lock_guard g( S().lock );
         State&          s = S();
-        assert( s.encoder );
+        assert( s.cb && !s.renderEnc );
 
         auto pit = s.pipelines.find( pipeline );
         if( pit == s.pipelines.end() || !pit->second.mtl )
@@ -2266,7 +3746,7 @@ void RTGL1::Metal::Mark( const char* name )
 {
     std::lock_guard g( S().lock );
     State&          s = S();
-    if( s.profile && s.cb && s.encoder )
+    if( s.profile && s.cb )
     {
         @autoreleasepool
         {
@@ -2294,11 +3774,16 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
     {
         std::lock_guard g( S().lock );
         State&          s = S();
-        assert( s.cb && s.encoder );
+        assert( s.cb );
 
-        [s.encoder endEncoding];
-        s.encoder = nil;
+        if( s.renderEnc )
+        {
+            LogOnce( "a native Metal section ended inside a render pass" );
+            EndRenderEncoder( false );
+        }
+        EndNonRenderEncoder();
         CommitResidency();
+        s.waitASFence = false;
 
         const uint64_t metalDone = ++s.timeline;
         assert( metalDone == s.sectionDone );
@@ -2319,8 +3804,7 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
             s.profCbs.clear();
             s.profWaitCb = nil;
 
-            const auto stats = s.asStats;
-            s.asStats        = {};
+            const auto  stats   = s.asStats;
             const char* nBuilds = Intern( "BLAS builds" );
             const char* nRefits = Intern( "BLAS refits" );
             const char* nInst   = Intern( "TLAS instances" );
@@ -2330,7 +3814,7 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
                 out.emplace_back( nBuilds, double( stats.blasBuilds ) );
                 out.emplace_back( nRefits, double( stats.blasRefits ) );
                 out.emplace_back( nInst, double( stats.tlasInstances ) );
-                double                                          prevEnd = waitCb.GPUEndTime;
+                double prevEnd = waitCb.GPUEndTime;
                 for( const ProfiledCb& p : *list )
                 {
                     if( p.cb.status != MTLCommandBufferStatusCompleted )
@@ -2348,7 +3832,6 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
                 S().timings.insert( S().timings.end(), out.begin(), out.end() );
             }];
         }
-
         s.asStats = {};
 
         [s.cb commit];
@@ -2405,7 +3888,7 @@ void RgMtl_vkCmdPushConstants( VkCommandBuffer    cmd,
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        SectionPushConstants( offset, size, data );
+        SectionPushConstants( stages, offset, size, data );
         return;
     }
     vkCmdPushConstants( cmd, layout, stages, offset, size, data );
@@ -2434,7 +3917,7 @@ void RgMtl_vkCmdPipelineBarrier( VkCommandBuffer              cmd,
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        return; // the passes of a section run in order
+        return; // the work of a section runs in order
     }
     vkCmdPipelineBarrier( cmd, src, dst, flags, memCount, mem, bufCount, buf, imgCount, img );
 }
@@ -2443,7 +3926,7 @@ void RgMtl_svkCmdPipelineBarrier2KHR( VkCommandBuffer cmd, const VkDependencyInf
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        return; // the passes of a section run in order
+        return; // the work of a section runs in order
     }
     RTGL1::svkCmdPipelineBarrier2KHR( cmd, info );
 }
@@ -2452,7 +3935,7 @@ void RgMtl_vkCmdCopyBuffer( VkCommandBuffer cmd, VkBuffer src, VkBuffer dst, uin
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        SectionUnsupported( "vkCmdCopyBuffer" );
+        SectionCopyBuffer( src, dst, count, regions );
         return;
     }
     vkCmdCopyBuffer( cmd, src, dst, count, regions );
@@ -2467,7 +3950,7 @@ void RgMtl_vkCmdCopyBufferToImage( VkCommandBuffer          cmd,
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        SectionUnsupported( "vkCmdCopyBufferToImage" );
+        RasterUnsupported( "vkCmdCopyBufferToImage" );
         return;
     }
     vkCmdCopyBufferToImage( cmd, src, dst, layout, count, regions );
@@ -2484,7 +3967,7 @@ void RgMtl_vkCmdBlitImage( VkCommandBuffer    cmd,
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        SectionUnsupported( "vkCmdBlitImage" );
+        RasterUnsupported( "vkCmdBlitImage" );
         return;
     }
     vkCmdBlitImage( cmd, src, srcLayout, dst, dstLayout, count, regions, filter );
@@ -2503,7 +3986,6 @@ void RgMtl_vkCmdResetQueryPool( VkCommandBuffer cmd, VkQueryPool pool, uint32_t 
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        SectionUnsupported( "vkCmdResetQueryPool" );
         return;
     }
     vkCmdResetQueryPool( cmd, pool, first, count );
@@ -2513,9 +3995,123 @@ void RgMtl_vkCmdBeginRenderPass( VkCommandBuffer cmd, const VkRenderPassBeginInf
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        // can't be skipped safely: the draws that follow would go to Vulkan
-        Log( "vkCmdBeginRenderPass inside a native Metal section" );
-        abort();
+        SectionBeginRenderPass( info );
+        return;
     }
     vkCmdBeginRenderPass( cmd, info, contents );
+}
+
+void RgMtl_vkCmdEndRenderPass( VkCommandBuffer cmd )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionEndRenderPass();
+        return;
+    }
+    vkCmdEndRenderPass( cmd );
+}
+
+void RgMtl_vkCmdBindVertexBuffers( VkCommandBuffer     cmd,
+                                   uint32_t            first,
+                                   uint32_t            count,
+                                   const VkBuffer*     buffers,
+                                   const VkDeviceSize* offsets )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionBindVertexBuffers( first, count, buffers, offsets );
+        return;
+    }
+    vkCmdBindVertexBuffers( cmd, first, count, buffers, offsets );
+}
+
+void RgMtl_vkCmdBindIndexBuffer( VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset, VkIndexType type )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionBindIndexBuffer( buffer, offset, type );
+        return;
+    }
+    vkCmdBindIndexBuffer( cmd, buffer, offset, type );
+}
+
+void RgMtl_vkCmdSetViewport( VkCommandBuffer cmd, uint32_t first, uint32_t count, const VkViewport* viewports )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        if( first == 0 && count > 0 )
+        {
+            SectionSetViewport( viewports[ 0 ] );
+        }
+        return;
+    }
+    vkCmdSetViewport( cmd, first, count, viewports );
+}
+
+void RgMtl_vkCmdSetScissor( VkCommandBuffer cmd, uint32_t first, uint32_t count, const VkRect2D* scissors )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        if( first == 0 && count > 0 )
+        {
+            SectionSetScissor( scissors[ 0 ] );
+        }
+        return;
+    }
+    vkCmdSetScissor( cmd, first, count, scissors );
+}
+
+void RgMtl_vkCmdDraw( VkCommandBuffer cmd, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionDraw( vertexCount, instanceCount, firstVertex, firstInstance );
+        return;
+    }
+    vkCmdDraw( cmd, vertexCount, instanceCount, firstVertex, firstInstance );
+}
+
+void RgMtl_vkCmdDrawIndexed( VkCommandBuffer cmd,
+                             uint32_t        indexCount,
+                             uint32_t        instanceCount,
+                             uint32_t        firstIndex,
+                             int32_t         vertexOffset,
+                             uint32_t        firstInstance )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionDrawIndexed( indexCount, instanceCount, firstIndex, vertexOffset, firstInstance );
+        return;
+    }
+    vkCmdDrawIndexed( cmd, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance );
+}
+
+void RgMtl_vkCmdDrawIndexedIndirectCount( VkCommandBuffer cmd,
+                                          VkBuffer        buffer,
+                                          VkDeviceSize    offset,
+                                          VkBuffer        countBuffer,
+                                          VkDeviceSize    countOffset,
+                                          uint32_t        maxDrawCount,
+                                          uint32_t        stride )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionDrawIndexedIndirectCount( buffer, offset, countBuffer, countOffset, maxDrawCount, stride );
+        return;
+    }
+    vkCmdDrawIndexedIndirectCount( cmd, buffer, offset, countBuffer, countOffset, maxDrawCount, stride );
+}
+
+void RgMtl_vkCmdClearAttachments( VkCommandBuffer          cmd,
+                                  uint32_t                 attachmentCount,
+                                  const VkClearAttachment* attachments,
+                                  uint32_t                 rectCount,
+                                  const VkClearRect*       rects )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        RasterUnsupported( "vkCmdClearAttachments" );
+        return;
+    }
+    vkCmdClearAttachments( cmd, attachmentCount, attachments, rectCount, rects );
 }

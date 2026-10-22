@@ -688,6 +688,26 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 
 
     framebuffers->PrepareForSize(renderResolution.GetResolutionState());
+
+#ifdef __APPLE__
+    // macOS, RTGL1_METAL_RT=1: the path tracing passes run natively in Metal, in a section
+    // between Vulkan submissions (split around the decals, which are drawn with Vulkan).
+    // The section continues with the denoiser, volumetrics, exposure and checkerboard
+    // passes, if they could be prepared for Metal (metalCompute). With metalRaster, the
+    // section also covers the rasterization and copies around them: from here to the
+    // upscaling, the frame is recorded straight into Metal.
+    const bool metalPT      = Metal::IsEnabled() && rtPipeline->IsMetalReady();
+    const bool metalCompute = metalPT && Metal::IsComputeReady();
+    const bool metalRaster  = metalCompute && Metal::IsRasterReady();
+    if (metalRaster)
+    {
+        Metal::BeginSection(cmd);
+    }
+#else
+    const bool metalPT      = false;
+    const bool metalCompute = false;
+    const bool metalRaster  = false;
+#endif
     
 
     if (!drawInfo.disableRasterization)
@@ -704,18 +724,6 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         }
     }
 
-
-#ifdef __APPLE__
-    // macOS, RTGL1_METAL_RT=1: the path tracing passes run natively in Metal, in a section
-    // between Vulkan submissions (split around the decals, which are drawn with Vulkan).
-    // The section continues with the denoiser, volumetrics, exposure and checkerboard
-    // passes, if they could be prepared for Metal (metalCompute).
-    const bool metalPT      = Metal::IsEnabled() && rtPipeline->IsMetalReady();
-    const bool metalCompute = metalPT && Metal::IsComputeReady();
-#else
-    const bool metalPT      = false;
-    const bool metalCompute = false;
-#endif
 
     {
         PROFILE_GPU(cmd, "sky raster");
@@ -767,7 +775,10 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         if (metalPT)
         {
             pathTracer->SetMetal(true);
-            Metal::BeginSection(cmd);
+            if (!metalRaster)
+            {
+                Metal::BeginSection(cmd);
+            }
             PathTracer::SetCmd(params, cmd);
         }
 #endif
@@ -776,14 +787,14 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 
         // draw decals on top of primary surface
 #ifdef __APPLE__
-        if (metalPT && decalManager->HasDecals())
+        if (metalPT && !metalRaster && decalManager->HasDecals())
         {
             Metal::EndSection(cmd);
             decalManager->Draw(cmd, frameIndex, uniform, framebuffers, textureManager);
             Metal::BeginSection(cmd);
             PathTracer::SetCmd(params, cmd);
         }
-        else if (!metalPT)
+        else if (!metalPT || metalRaster)
 #endif
         {
             decalManager->Draw(cmd, frameIndex, uniform, framebuffers, textureManager);
@@ -832,7 +843,7 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     volumetric->BarrierToReadIllumination( cmd );
 
 #ifdef __APPLE__
-    if (metalCompute)
+    if (metalCompute && !metalRaster)
     {
         PROFILE_GPU(cmd, "checkerboard");
         Metal::EndSection(cmd);
@@ -869,6 +880,15 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     {
         bloom->Prepare(cmd, frameIndex, uniform, tonemapping);
     }
+
+#ifdef __APPLE__
+    if (metalRaster)
+    {
+        PROFILE_GPU(cmd, "bloom prepare");
+        Metal::EndSection(cmd);
+        PROFILE_GPU(cmd, "native Metal section");
+    }
+#endif
 
 
     FramebufferImageIndex accum = FramebufferImageIndex::FB_IMAGE_INDEX_FINAL;

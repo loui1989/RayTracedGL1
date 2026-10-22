@@ -118,10 +118,14 @@ SetSlots AssignSlots( std::vector< BindingDesc > bindings )
     return r;
 }
 
-ComputeShader TranslateCompute( const uint32_t*                spirv,
-                                size_t                         wordCount,
-                                const std::vector< SetSlots >& sets,
-                                uint32_t                       mslVersion )
+namespace
+{
+ComputeShader Translate( const uint32_t*                spirv,
+                         size_t                         wordCount,
+                         const std::vector< SetSlots >& sets,
+                         uint32_t                       mslVersion,
+                         bool                           graphics,
+                         bool                           multiview )
 {
     ComputeShader result;
 #ifndef RG_HAS_SPIRV_CROSS
@@ -148,14 +152,42 @@ ComputeShader TranslateCompute( const uint32_t*                spirv,
         o.swizzle_buffer_index         = 30;
         o.buffer_size_buffer_index     = 29;
         o.dynamic_offsets_buffer_index = 28;
+        if( graphics )
+        {
+            // fragment outputs get as many components as the attachments have
+            o.pad_fragment_output_components = true;
+            // gl_ViewIndex: the draws are instanced once per view, rendering to the layer of
+            // the view (the instance count is multiplied when drawing)
+            o.multiview                    = multiview;
+            o.multiview_layered_rendering  = multiview;
+            o.view_index_from_device_index = false;
+            o.view_mask_buffer_index       = VIEW_MASK_BUFFER_INDEX;
+        }
         msl.set_msl_options( o );
+
+        if( graphics )
+        {
+            // Vulkan's clip space has y pointing down, Metal's up
+            auto common              = msl.get_common_options();
+            common.vertex.flip_vert_y = true;
+            msl.set_common_options( common );
+        }
+
+        spv::ExecutionModel model = spv::ExecutionModelGLCompute;
+        {
+            const auto eps = msl.get_entry_points_and_stages();
+            if( !eps.empty() )
+            {
+                model = eps[ 0 ].execution_model;
+            }
+        }
 
         for( uint32_t set = 0; set < sets.size(); set++ )
         {
             for( const SlotInfo& s : sets[ set ].slots )
             {
                 spirv_cross::MSLResourceBinding rb;
-                rb.stage       = spv::ExecutionModelGLCompute;
+                rb.stage       = model;
                 rb.basetype    = BaseTypeOf( s.type );
                 rb.desc_set    = set;
                 rb.binding     = s.binding;
@@ -170,7 +202,7 @@ ComputeShader TranslateCompute( const uint32_t*                spirv,
         // push constants: a separate buffer, set with setBytes
         {
             spirv_cross::MSLResourceBinding rb;
-            rb.stage      = spv::ExecutionModelGLCompute;
+            rb.stage      = model;
             rb.basetype   = spirv_cross::SPIRType::Void;
             rb.desc_set   = spirv_cross::kPushConstDescSet;
             rb.binding    = spirv_cross::kPushConstBinding;
@@ -223,6 +255,24 @@ ComputeShader TranslateCompute( const uint32_t*                spirv,
     }
     return result;
 #endif
+}
+}
+
+ComputeShader TranslateCompute( const uint32_t*                spirv,
+                                size_t                         wordCount,
+                                const std::vector< SetSlots >& sets,
+                                uint32_t                       mslVersion )
+{
+    return Translate( spirv, wordCount, sets, mslVersion, false, false );
+}
+
+ComputeShader TranslateGraphics( const uint32_t*                spirv,
+                                 size_t                         wordCount,
+                                 const std::vector< SetSlots >& sets,
+                                 uint32_t                       mslVersion,
+                                 bool                           multiview )
+{
+    return Translate( spirv, wordCount, sets, mslVersion, true, multiview );
 }
 
 }

@@ -68,7 +68,12 @@ void     DestroyImageView( VkDevice, VkImageView, const VkAllocationCallbacks* )
 VkResult CreateShaderModule( VkDevice, const VkShaderModuleCreateInfo*, const VkAllocationCallbacks*, VkShaderModule* );
 void     DestroyShaderModule( VkDevice, VkShaderModule, const VkAllocationCallbacks* );
 VkResult CreateComputePipelines( VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* );
+VkResult CreateGraphicsPipelines( VkDevice, VkPipelineCache, uint32_t, const VkGraphicsPipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* );
 void     DestroyPipeline( VkDevice, VkPipeline, const VkAllocationCallbacks* );
+VkResult CreateRenderPass( VkDevice, const VkRenderPassCreateInfo*, const VkAllocationCallbacks*, VkRenderPass* );
+void     DestroyRenderPass( VkDevice, VkRenderPass, const VkAllocationCallbacks* );
+VkResult CreateFramebuffer( VkDevice, const VkFramebufferCreateInfo*, const VkAllocationCallbacks*, VkFramebuffer* );
+void     DestroyFramebuffer( VkDevice, VkFramebuffer, const VkAllocationCallbacks* );
 
 // ---- native path
 
@@ -121,6 +126,9 @@ inline bool IsSectionCmd( VkCommandBuffer cmd )
 // The generic compute passes (denoiser, volumetrics, exposure, ...) can run in a section:
 // native path is on, RTGL1_METAL_COMPUTE isn't 0, and no pass failed so far.
 bool IsComputeReady();
+// Render passes and draws, buffer copies can run in a section too: IsComputeReady(),
+// RTGL1_METAL_RASTER isn't 0, and nothing failed so far.
+bool IsRasterReady();
 
 // RTGL1_PROFILE=1: GPU time of the work in the section since the previous mark.
 // 'name' must be a string literal. Results arrive a frame or two later, see DrainTimings.
@@ -144,6 +152,15 @@ void RgMtl_vkCmdBlitImage( VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkI
 void RgMtl_vkCmdWriteTimestamp( VkCommandBuffer, VkPipelineStageFlagBits, VkQueryPool, uint32_t );
 void RgMtl_vkCmdResetQueryPool( VkCommandBuffer, VkQueryPool, uint32_t, uint32_t );
 void RgMtl_vkCmdBeginRenderPass( VkCommandBuffer, const VkRenderPassBeginInfo*, VkSubpassContents );
+void RgMtl_vkCmdEndRenderPass( VkCommandBuffer );
+void RgMtl_vkCmdBindVertexBuffers( VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize* );
+void RgMtl_vkCmdBindIndexBuffer( VkCommandBuffer, VkBuffer, VkDeviceSize, VkIndexType );
+void RgMtl_vkCmdSetViewport( VkCommandBuffer, uint32_t, uint32_t, const VkViewport* );
+void RgMtl_vkCmdSetScissor( VkCommandBuffer, uint32_t, uint32_t, const VkRect2D* );
+void RgMtl_vkCmdDraw( VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t );
+void RgMtl_vkCmdDrawIndexed( VkCommandBuffer, uint32_t, uint32_t, uint32_t, int32_t, uint32_t );
+void RgMtl_vkCmdDrawIndexedIndirectCount( VkCommandBuffer, VkBuffer, VkDeviceSize, VkBuffer, VkDeviceSize, uint32_t, uint32_t );
+void RgMtl_vkCmdClearAttachments( VkCommandBuffer, uint32_t, const VkClearAttachment*, uint32_t, const VkClearRect* );
 
 namespace RTGL1
 {

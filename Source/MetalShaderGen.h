@@ -38,6 +38,10 @@ namespace RTGL1::MetalGen
 
 // Metal buffer index of the push constants (argument buffers use indices 0..set count-1)
 constexpr uint32_t PUSH_CONSTANT_BUFFER_INDEX = 27;
+// graphics: (first view, view count) for the multiview emulation, see TranslateGraphics
+constexpr uint32_t VIEW_MASK_BUFFER_INDEX = 26;
+// graphics: vertex buffer of Vulkan binding b is at Metal buffer index VERTEX_BUFFER_BASE + b
+constexpr uint32_t VERTEX_BUFFER_BASE = 16;
 
 struct BindingDesc
 {
@@ -82,5 +86,17 @@ ComputeShader TranslateCompute( const uint32_t*                spirv,
                                 size_t                         wordCount,
                                 const std::vector< SetSlots >& sets,
                                 uint32_t                       mslVersion );
+
+// A vertex or fragment shader (the stage is the one of the SPIR-V's entry point).
+// Vertex attributes are [[attribute(location)]], read from the vertex buffers described by
+// the pipeline's vertex descriptor; clip space y is flipped for Metal. multiview: the
+// render pass has several views, gl_ViewIndex is emulated with instancing (multiply the
+// instance count by the view count, (first view, view count) as two uints at
+// VIEW_MASK_BUFFER_INDEX), and each view renders to its layer.
+ComputeShader TranslateGraphics( const uint32_t*                spirv,
+                                 size_t                         wordCount,
+                                 const std::vector< SetSlots >& sets,
+                                 uint32_t                       mslVersion,
+                                 bool                           multiview );
 
 }

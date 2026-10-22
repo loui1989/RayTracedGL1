@@ -50,6 +50,11 @@
 #define vkDestroyShaderModule(...)         RTGL1::Metal::DestroyShaderModule( __VA_ARGS__ )
 #define vkCreateComputePipelines(...)      RTGL1::Metal::CreateComputePipelines( __VA_ARGS__ )
 #define vkDestroyPipeline(...)             RTGL1::Metal::DestroyPipeline( __VA_ARGS__ )
+#define vkCreateGraphicsPipelines(...)     RTGL1::Metal::CreateGraphicsPipelines( __VA_ARGS__ )
+#define vkCreateRenderPass(...)            RTGL1::Metal::CreateRenderPass( __VA_ARGS__ )
+#define vkDestroyRenderPass(...)           RTGL1::Metal::DestroyRenderPass( __VA_ARGS__ )
+#define vkCreateFramebuffer(...)           RTGL1::Metal::CreateFramebuffer( __VA_ARGS__ )
+#define vkDestroyFramebuffer(...)          RTGL1::Metal::DestroyFramebuffer( __VA_ARGS__ )
 
 #define vkCmdBindPipeline(...)             RgMtl_vkCmdBindPipeline( __VA_ARGS__ )
 #define vkCmdBindDescriptorSets(...)       RgMtl_vkCmdBindDescriptorSets( __VA_ARGS__ )
@@ -63,5 +68,14 @@
 #define vkCmdWriteTimestamp(...)           RgMtl_vkCmdWriteTimestamp( __VA_ARGS__ )
 #define vkCmdResetQueryPool(...)           RgMtl_vkCmdResetQueryPool( __VA_ARGS__ )
 #define vkCmdBeginRenderPass(...)          RgMtl_vkCmdBeginRenderPass( __VA_ARGS__ )
+#define vkCmdEndRenderPass(...)            RgMtl_vkCmdEndRenderPass( __VA_ARGS__ )
+#define vkCmdBindVertexBuffers(...)        RgMtl_vkCmdBindVertexBuffers( __VA_ARGS__ )
+#define vkCmdBindIndexBuffer(...)          RgMtl_vkCmdBindIndexBuffer( __VA_ARGS__ )
+#define vkCmdSetViewport(...)              RgMtl_vkCmdSetViewport( __VA_ARGS__ )
+#define vkCmdSetScissor(...)               RgMtl_vkCmdSetScissor( __VA_ARGS__ )
+#define vkCmdDraw(...)                     RgMtl_vkCmdDraw( __VA_ARGS__ )
+#define vkCmdDrawIndexed(...)              RgMtl_vkCmdDrawIndexed( __VA_ARGS__ )
+#define vkCmdDrawIndexedIndirectCount(...) RgMtl_vkCmdDrawIndexedIndirectCount( __VA_ARGS__ )
+#define vkCmdClearAttachments(...)         RgMtl_vkCmdClearAttachments( __VA_ARGS__ )
 
 #endif
