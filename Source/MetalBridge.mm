@@ -320,7 +320,7 @@ id< MTLBuffer > BufferForMemory( VkDeviceMemory memory )
 }
 
 // Metal buffer and byte offset of a Vulkan buffer (+ offset)
-bool ResolveBuffer( VkBuffer buffer, VkDeviceSize offset, id< MTLBuffer >& outBuf, NSUInteger& outOffset )
+bool ResolveBuffer( VkBuffer buffer, VkDeviceSize offset, id< MTLBuffer > __strong& outBuf, NSUInteger& outOffset )
 {
     State& s  = S();
     auto   it = s.buffers.find( buffer );
@@ -334,7 +334,7 @@ bool ResolveBuffer( VkBuffer buffer, VkDeviceSize offset, id< MTLBuffer >& outBu
 }
 
 // Metal buffer and byte offset of a Vulkan buffer device address
-bool ResolveAddress( VkDeviceAddress address, id< MTLBuffer >& outBuf, NSUInteger& outOffset )
+bool ResolveAddress( VkDeviceAddress address, id< MTLBuffer > __strong& outBuf, NSUInteger& outOffset )
 {
     State& s  = S();
     auto   it = s.buffersByAddress.upper_bound( address );
@@ -468,7 +468,7 @@ id< MTLBuffer > EncodeSet( VkDescriptorSet set )
     // a new buffer of the ring: the previous ones may still be read by the GPU
     si.argBufferCur        = ( si.argBufferCur + 1 ) % ARG_BUFFER_RING;
     const NSUInteger bytes = std::max< NSUInteger >( 1, layout.slots.totalSlots ) * sizeof( uint64_t );
-    id< MTLBuffer >& ab    = si.argBuffers[ si.argBufferCur ];
+    id< MTLBuffer > __strong& ab    = si.argBuffers[ si.argBufferCur ];
     if( !ab || ab.length < bytes )
     {
         ab = [s.mtlDevice newBufferWithLength:bytes options:MTLResourceStorageModeShared];
@@ -932,6 +932,8 @@ bool EncodeAccelerationStructureBuilds()
     [ae endEncoding];
     s.pendingTlas.clear();
     return true;
+}
+
 }
 
 // ================================================================================================
