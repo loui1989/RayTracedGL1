@@ -882,7 +882,9 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     }
 
 #ifdef __APPLE__
-    if (metalRaster)
+    // MetalFX is encoded into the section; without it the section ends here
+    const bool metalFxInSection = metalRaster && renderResolution.IsAmdFsr2Enabled();
+    if (metalRaster && !metalFxInSection)
     {
         PROFILE_GPU(cmd, "bloom prepare");
         Metal::EndSection(cmd);
@@ -901,6 +903,26 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
                                                renderResolution, 
                                                jitter);
         }
+#ifdef __APPLE__
+        else if (metalFxInSection)
+        {
+            PROFILE_GPU(cmd, "bloom prepare");
+            PROFILE_CPU("record path tracing commands");
+            accum = amdFsr2->Apply(cmd,
+                                   frameIndex,
+                                   framebuffers,
+                                   renderResolution,
+                                   jitter,
+                                   uniform->GetData()->timeDelta,
+                                   drawInfo.cameraNear,
+                                   drawInfo.cameraFar,
+                                   drawInfo.fovYRadians);
+            PROFILE_GPU(cmd, "MetalFX");
+            Metal::EndSection(cmd);
+            PROFILE_GPU(cmd, "native Metal section");
+            PROFILE_CPU("MetalFX: wait for GPU + upscale");
+        }
+#endif
         else if (renderResolution.IsAmdFsr2Enabled())
         {
 #ifdef __APPLE__

@@ -576,7 +576,18 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
         // tracing is enabled, so MetalFX could otherwise run before the frame it upscales;
         // wait for all Vulkan work first, and for MetalFX to finish afterwards.
         id< MTLCommandBuffer > cb;
-        if( async )
+        id< MTLFence >         sectionFence;
+        const bool             inSection = RTGL1::Metal::IsSectionCmd( cmd );
+        if( inSection )
+        {
+            // encoded into the native Metal section, which ends after it
+            if( !RTGL1::Metal::ExternalEncoding( cb, sectionFence ) )
+            {
+                return FI::FB_IMAGE_INDEX_FINAL;
+            }
+            g.lastWaitVulkanMs = 0;
+        }
+        else if( async )
         {
             // the GPU waits for the frame's Vulkan work, the CPU doesn't
             cb = [g.asyncQueue commandBuffer];
@@ -591,7 +602,10 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
                 std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
             cb = [g.queue commandBuffer];
         }
-        cb.label = @"RTGL1 MetalFX";
+        if( !inSection )
+        {
+            cb.label = @"RTGL1 MetalFX";
+        }
 
         // 1. convert inputs into formats MetalFX accepts
         {
@@ -608,6 +622,11 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
 
             id< MTLRenderCommandEncoder > enc = [cb renderCommandEncoderWithDescriptor:rp];
             enc.label                         = @"MetalFX input prep";
+            if( sectionFence )
+            {
+                // the inputs were written by the section's work
+                [enc waitForFence:sectionFence beforeStages:MTLRenderStageVertex];
+            }
             [enc setRenderPipelineState:g.prepPipe];
             [enc setDepthStencilState:g.depthAlways];
             [enc setFragmentTexture:finalTex atIndex:0];
@@ -660,7 +679,12 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
             [enc endEncoding];
         }
 
-        if( async )
+        if( inSection )
+        {
+            // committed with the section; its GPU time is in the section's profile
+            g.lastMetalFxGpuMs = 0;
+        }
+        else if( async )
         {
             [cb encodeSignalEvent:g.asyncEvent value:g.asyncSignalValue];
             [cb addCompletedHandler:^( id< MTLCommandBuffer > c ) {

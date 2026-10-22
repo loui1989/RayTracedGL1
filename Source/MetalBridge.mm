@@ -3742,6 +3742,21 @@ void RTGL1::Metal::Dispatch( VkPipeline             pipeline,
     }
 }
 
+bool RTGL1::Metal::ExternalEncoding( id< MTLCommandBuffer > __strong& cb, id< MTLFence > __strong& fence )
+{
+    std::lock_guard g( S().lock );
+    State&          s = S();
+    if( !s.cb || s.renderEnc )
+    {
+        return false;
+    }
+    EndNonRenderEncoder();
+    CommitResidency();
+    cb    = s.cb;
+    fence = s.passFence;
+    return true;
+}
+
 void RTGL1::Metal::Mark( const char* name )
 {
     std::lock_guard g( S().lock );

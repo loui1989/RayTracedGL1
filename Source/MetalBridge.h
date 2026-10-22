@@ -137,6 +137,18 @@ void DrainTimings( const std::function< void( const char* name, double ms ) >& f
 
 }
 
+#ifdef __OBJC__
+#import <Metal/Metal.h>
+namespace RTGL1::Metal
+{
+// For code that encodes its own Metal work into the current section (MetalFX): ends the
+// section's current encoder and gives its command buffer; the first encoder of that work
+// must wait for 'fence' (the section's work reaches its resources untracked). Must not be
+// called inside a render pass. Returns false outside of a section.
+bool ExternalEncoding( id< MTLCommandBuffer > __strong& cb, id< MTLFence > __strong& fence );
+}
+#endif
+
 // ---- command recording shims (see MetalShims.h): forward to Vulkan, or record into Metal
 // when the command buffer is RTGL1::Metal::SectionCmd()
 
