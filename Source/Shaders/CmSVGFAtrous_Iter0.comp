@@ -240,7 +240,14 @@ void atrous0(
                 }
             }
         }
-        indirLimit = count >= 3.0 ? globalUniform.denoiserIndirectDeflicker * sum / count : 0.0;
+        // Only as strong as set once a pixel has some history: right after it appears
+        // (e.g. uncovered behind the weapon) its value is a few noisy samples, and clipping
+        // their bright ones would make it too dark until the history builds up -- a dark
+        // trail behind anything moving in front of a surface
+        const float indirHistory = max(texelFetch(framebufAccumHistoryLength_Sampler, pix, 0).g, 1.0);
+        const float strength     = max(1.0, 32.0 / indirHistory);
+
+        indirLimit = count >= 3.0 ? globalUniform.denoiserIndirectDeflicker * strength * sum / count : 0.0;
         outIndirSH = deflickerSH(outIndirSH, indirLimit);
     }
 
