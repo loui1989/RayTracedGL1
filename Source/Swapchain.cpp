@@ -124,9 +124,15 @@ Swapchain::Swapchain(VkDevice _device,
         r = vkGetPhysicalDeviceSurfacePresentModesKHR(physDevice, surface, &presentModeCount, presentModes.data());
         VK_CHECKERROR(r);
 
-        // try to find mailbox / fifo-relaxed
+        // try to find mailbox / fifo-relaxed;
+        // without mailbox (e.g. MoltenVK: only FIFO and IMMEDIATE), use immediate when vsync is off
         for (auto p : presentModes)
         {
+            if (p == VK_PRESENT_MODE_IMMEDIATE_KHR && presentModeImmediate == VK_PRESENT_MODE_FIFO_KHR)
+            {
+                presentModeImmediate = p;
+            }
+
             if (p == VK_PRESENT_MODE_MAILBOX_KHR)
             {
                 presentModeImmediate = p;
