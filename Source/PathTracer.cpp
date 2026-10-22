@@ -112,6 +112,11 @@ void PathTracer::TraceRaysSplit(const TraceParams &params, uint32_t passIndex, u
 {
     TraceRays(params.cmd, passIndex, width, height, depth);
 
+    if (passCallback)
+    {
+        passCallback(params.cmd, rtPipeline->GetPassName(passIndex));
+    }
+
     if (splitter)
     {
         params.cmd = splitter(params.cmd);

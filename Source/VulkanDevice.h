@@ -59,6 +59,7 @@
 #include "PortalList.h"
 #include "RestirBuffers.h"
 #include "Volumetric.h"
+#include "FrameProfiler.h"
 
 namespace RTGL1
 {
@@ -160,6 +161,8 @@ private:
     double              frameGenGpuMs       = -1;    // last measured, -1 if unknown
     uint32_t            frameGenLogCounter  = 0;
     std::chrono::steady_clock::time_point frameWorkStart;
+    // RTGL1_PROFILE=1
+    std::unique_ptr< FrameProfiler > profiler;
 
     bool                waitForOutOfFrameFence;
     VkFence             outOfFrameFences[MAX_FRAMES_IN_FLIGHT] = {};

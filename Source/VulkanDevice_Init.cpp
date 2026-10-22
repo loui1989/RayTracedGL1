@@ -77,6 +77,11 @@ VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
 
     memAllocator        = std::make_shared<MemoryAllocator>(instance, device, physDevice);
 
+    if (FrameProfiler::IsRequested())
+    {
+        profiler = std::make_unique<FrameProfiler>(device, physDevice->Get(), memAllocator);
+    }
+
     cmdManager          = std::make_shared<CommandBufferManager>(device, queues);
 
     uniform             = std::make_shared<GlobalUniform>(device, memAllocator);
@@ -335,6 +340,7 @@ VulkanDevice::~VulkanDevice()
     blueNoise.reset();
     textureManager.reset();
     cubemapManager.reset();
+    profiler.reset();
     memAllocator.reset();
 
     vkDestroySurfaceKHR(instance, surface, nullptr);

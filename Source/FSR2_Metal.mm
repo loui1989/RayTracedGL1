@@ -19,6 +19,7 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_metal.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
@@ -36,6 +37,9 @@ struct MfxState
 {
     VkDevice                    vkDevice = VK_NULL_HANDLE;
     PFN_vkExportMetalObjectsEXT exportFn = nullptr;
+
+    double lastWaitVulkanMs = 0; // profiling
+    double lastMetalFxGpuMs = 0;
 
     id< MTLDevice >               device    = nil;
     id< MTLCommandQueue >         queue     = nil;
@@ -462,7 +466,12 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
         // MoltenVK commits its submissions from a background thread when ray tracing
         // is enabled, so MetalFX could otherwise run before the frame it upscales.
         // Wait for all Vulkan work first, and for MetalFX to finish afterwards.
-        vkQueueWaitIdle( queue );
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            vkQueueWaitIdle( queue );
+            g.lastWaitVulkanMs =
+                std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
+        }
 
         id< MTLCommandBuffer > cb = [g.queue commandBuffer];
         cb.label                  = @"RTGL1 MetalFX";
@@ -536,6 +545,7 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
 
         [cb commit];
         [cb waitUntilCompleted];
+        g.lastMetalFxGpuMs = ( cb.GPUEndTime - cb.GPUStartTime ) * 1000.0;
     }
 
     return FI::FB_IMAGE_INDEX_UPSCALED_PONG;
@@ -552,6 +562,12 @@ void EncodeCopy( id< MTLCommandBuffer > cb, id< MTLTexture > src, id< MTLTexture
     [enc dispatchThreads:MTLSizeMake( w, h, 1 ) threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
     [enc endEncoding];
 }
+}
+
+void RTGL1::FSR2::GetLastTimings( double& waitVulkanMs, double& metalFxGpuMs )
+{
+    waitVulkanMs = g.lastWaitVulkanMs;
+    metalFxGpuMs = g.lastMetalFxGpuMs;
 }
 
 bool RTGL1::FSR2::IsFrameGenSupported()

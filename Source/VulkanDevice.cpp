@@ -33,8 +33,24 @@
 
 using namespace RTGL1;
 
+// RTGL1_PROFILE=1: GPU / CPU time per stage of a frame
+#define PROFILE_GPU( cmd, name )            \
+    do                                       \
+    {                                        \
+        if( profiler )                       \
+            profiler->Gpu( ( cmd ), name );  \
+    } while( 0 )
+#define PROFILE_CPU( name )       \
+    do                             \
+    {                              \
+        if( profiler )             \
+            profiler->Cpu( name ); \
+    } while( 0 )
+
 VkCommandBuffer VulkanDevice::BeginFrame(const RgStartFrameInfo &startInfo)
 {
+    PROFILE_CPU("game (outside the renderer)");
+
     uint32_t frameIndex = currentFrameState.IncrementFrameIndexAndGet();
 
     if (!waitForOutOfFrameFence)
@@ -53,8 +69,10 @@ VkCommandBuffer VulkanDevice::BeginFrame(const RgStartFrameInfo &startInfo)
 #else
     swapchain->RequestVsync(startInfo.requestVSync);
 #endif
+    PROFILE_CPU("wait for GPU (frame fence)");
     swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
     frameWorkStart = std::chrono::steady_clock::now();
+    PROFILE_CPU("acquire swapchain image");
 
     VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
 
@@ -104,6 +122,11 @@ VkCommandBuffer VulkanDevice::BeginFrame(const RgStartFrameInfo &startInfo)
     decalManager->PrepareForFrame(frameIndex);
 
     VkCommandBuffer cmd = cmdManager->StartGraphicsCmd();
+
+    if (profiler)
+    {
+        profiler->BeginFrame(cmd, frameIndex);
+    }
 
 #ifdef __APPLE__
     // GPU time of this frame index's previous use (its fence was waited for above)
@@ -605,6 +628,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
 
 void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 {
+    PROFILE_CPU("game uploads geometry");
+    PROFILE_GPU(cmd, "geometry uploads");
 #ifdef __APPLE__
     {
         uint32_t mode = drawInfo.pRenderResolutionParams ? drawInfo.pRenderResolutionParams->frameGeneration : 0;
@@ -646,6 +671,7 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
                           uniform->GetData()->rayCullMaskWorld, 
                           allowGeometryWithSkyFlag,
                           drawInfo.disableRayTracedGeometry);
+    PROFILE_GPU(cmd, "vertex preprocess + AS build");
 
 
     framebuffers->PrepareForSize(renderResolution.GetResolutionState());
@@ -667,10 +693,17 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 
 
     {
+        PROFILE_GPU(cmd, "sky raster");
         lightGrid->Build(cmd, frameIndex, uniform, blueNoise, scene->GetLightManager());
 
         decalManager->SubmitForFrame(cmd, frameIndex);
         portalList->SubmitForFrame(cmd, frameIndex);
+        PROFILE_GPU(cmd, "light grid");
+
+        if (profiler)
+        {
+            pathTracer->SetPassCallback([this](VkCommandBuffer c, const char* name) { profiler->Gpu(c, name); });
+        }
 
 #ifdef __APPLE__
         // macOS (MoltenVK): after a vkCmdTraceRaysKHR dispatch, later commands in the same
@@ -709,6 +742,7 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 
         // draw decals on top of primary surface
         decalManager->Draw(cmd, frameIndex, uniform, framebuffers, textureManager);
+        PROFILE_GPU(cmd, "decals");
 
         if (uniform->GetData()->reflectRefractMaxDepth > 0)
         {
@@ -723,9 +757,13 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 
         pathTracer->CalculateGradientsSamples(params);
         pathTracer->SetCommandBufferSplitter( nullptr );
+        pathTracer->SetPassCallback( nullptr );
         denoiser->Denoise(cmd, frameIndex, uniform);
+        PROFILE_GPU(cmd, "denoiser");
         volumetric->ProcessScattering( cmd, frameIndex, uniform.get(), blueNoise.get() );
+        PROFILE_GPU(cmd, "volumetric process");
         tonemapping->CalculateExposure(cmd, frameIndex, uniform);
+        PROFILE_GPU(cmd, "exposure");
     }
 
     imageComposition->PrepareForRaster( cmd, frameIndex, uniform.get() );
@@ -749,8 +787,10 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
             drawInfo.pLensFlareParams );
     }
 
+    PROFILE_GPU(cmd, "raster (sprites, particles)");
     imageComposition->Finalize(
         cmd, frameIndex, uniform.get(), tonemapping.get(), volumetric.get() );
+    PROFILE_GPU(cmd, "composition");
 
 
     bool enableBloom = drawInfo.pBloomParams == nullptr || (drawInfo.pBloomParams != nullptr && drawInfo.pBloomParams->bloomIntensity > 0.0f);
@@ -775,8 +815,11 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         {
 #ifdef __APPLE__
             // MetalFX encodes its own Metal command buffer on the same queue
+            PROFILE_GPU(cmd, "bloom prepare");
+            PROFILE_CPU("record path tracing commands");
             cmdManager->Submit(cmd);
             cmd = VK_NULL_HANDLE;
+            PROFILE_CPU("submit (MoltenVK)");
 #endif
             accum = amdFsr2->Apply(cmd, frameIndex, 
                                                 framebuffers, 
@@ -787,7 +830,16 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
                                                 drawInfo.cameraFar, 
                                                 drawInfo.fovYRadians );
 #ifdef __APPLE__
+            PROFILE_CPU("MetalFX: wait for GPU + upscale");
+            if (profiler)
+            {
+                double waitMs, mfxGpuMs;
+                FSR2::GetLastTimings(waitMs, mfxGpuMs);
+                profiler->Value("CPU waits for path tracing GPU work", waitMs);
+                profiler->Value("MetalFX GPU", mfxGpuMs);
+            }
             cmd = cmdManager->StartGraphicsCmd();
+            PROFILE_GPU(cmd, "MetalFX + CPU sync gap");
 #endif
         }
 
@@ -843,6 +895,7 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     }
 
 #ifdef __APPLE__
+    PROFILE_GPU(cmd, "upscaled post effects");
     // macOS (MoltenVK): draw the HUD and present from a fresh command buffer,
     // for the same reason as the path tracer's command buffer splitting
     if (frameGenTimestamps != VK_NULL_HANDLE)
@@ -922,8 +975,10 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         currentFrameState.SetSemaphore(frameGenImageAvailableSemaphores[frameIndex]);
     }
     amdFsr2->FrameGenFinish(frameIndex, framebuffers, accum);
+    PROFILE_CPU("post effects + frame generation");
 
     cmd = cmdManager->StartGraphicsCmd();
+    PROFILE_GPU(cmd, "frame generation + gap");
 #endif
 
     // draw geometry such as HUD into an upscaled framebuf
@@ -965,6 +1020,9 @@ void VulkanDevice::EndFrame(VkCommandBuffer cmd)
     uint32_t frameIndex = currentFrameState.GetFrameIndex();
     VkSemaphore semaphoreToWait = currentFrameState.GetSemaphoreForWaitAndRemove();
 
+    PROFILE_GPU(cmd, "HUD + copy to screen");
+    PROFILE_CPU("record HUD");
+
     // submit command buffer, but wait until presentation engine has completed using image
     cmdManager->Submit(
         cmd, 
@@ -973,8 +1031,11 @@ void VulkanDevice::EndFrame(VkCommandBuffer cmd)
         renderFinishedSemaphores[frameIndex],
         frameFences[frameIndex]);
 
+    PROFILE_CPU("submit");
+
     // present on a surface when rendering will be finished
     swapchain->Present(queues, renderFinishedSemaphores[frameIndex]);
+    PROFILE_CPU("present");
 
     frameId++;
 }

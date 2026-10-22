@@ -66,6 +66,7 @@ public:
     // pass index is one of SBT_INDEX_RAYGEN_*
     void BindPass( VkCommandBuffer cmd, uint32_t passIndex ) const;
     VkPipelineLayout GetLayout() const;
+    const char*      GetPassName( uint32_t passIndex ) const { return passes[ passIndex ].pName; }
 
     // compute workgroup size of the passes (must match RaygenCommon.h)
     static constexpr uint32_t GROUP_SIZE_X = 8;

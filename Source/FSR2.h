@@ -70,6 +70,10 @@ namespace RTGL1
         // returned false): puts the real frame back into 'accum'.
         void FrameGenFinish(uint32_t frameIndex, const std::shared_ptr<Framebuffers> &framebuffers,
                             FramebufferImageIndex accum);
+
+        // timings of the last Apply(), for profiling: CPU wait for the Vulkan queue
+        // to be idle, and the MetalFX command buffer's GPU time
+        static void GetLastTimings(double &waitVulkanMs, double &metalFxGpuMs);
 #endif
 
     private:

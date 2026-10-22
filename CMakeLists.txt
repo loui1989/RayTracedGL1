@@ -35,6 +35,7 @@ set(Sources
     "Source/ScratchBuffer.cpp"
     "Source/Utils.cpp"
     "Source/PathTracer.cpp"
+    "Source/FrameProfiler.cpp"
     "Source/Common.cpp"
     "Source/Matrix.cpp"
     "Source/Rasterizer.cpp"

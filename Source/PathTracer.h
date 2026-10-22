@@ -87,6 +87,9 @@ public:
     // vkCmdTraceRaysKHR in the experimental MoltenVK ray tracing; optional with ray queries)
     void SetCommandBufferSplitter( std::function< VkCommandBuffer( VkCommandBuffer ) > fn ) { splitter = std::move( fn ); }
 
+    // if set, called after every path tracing pass (for profiling)
+    void SetPassCallback( std::function< void( VkCommandBuffer, const char* ) > fn ) { passCallback = std::move( fn ); }
+
 private:
     void TraceRays(
         VkCommandBuffer cmd,
@@ -100,6 +103,7 @@ private:
 private:
     std::shared_ptr<RayTracingPipeline> rtPipeline;
     std::function< VkCommandBuffer( VkCommandBuffer ) > splitter;
+    std::function< void( VkCommandBuffer, const char* ) > passCallback;
     VkDescriptorSet boundSets[ 16 ] = {};
     uint32_t        boundSetCount   = 0;
 };
