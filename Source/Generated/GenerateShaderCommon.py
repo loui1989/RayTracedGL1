@@ -611,7 +611,7 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_FLOAT32,      1,      "denoiserMaxHistory",               1),
 
     (TYPE_FLOAT32,      1,      "denoiserSpecMaxHistory",           1),
-    (TYPE_FLOAT32,      1,      "_pad1",                            1),
+    (TYPE_FLOAT32,      1,      "volumeHistory",                    1),
     (TYPE_FLOAT32,      1,      "_pad2",                            1),
     (TYPE_FLOAT32,      1,      "_pad3",                            1),
 

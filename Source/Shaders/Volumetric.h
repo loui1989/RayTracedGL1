@@ -102,6 +102,34 @@ vec4 volume_sample( const vec3 world )
     return textureLod( g_volumetric_Sampler, sp, 0.0 );
 }
 
+vec4 volume_sample_Prev( const ivec3 curcell );
+
+// the previous frame's value for the cell, if the cell's position was inside the
+// previous frame's volume (otherwise it's new in view: no history)
+bool volume_sample_Prev_Checked( const ivec3 curcell, out vec4 prev )
+{
+    const vec3 curworld = volume_getCenter( curcell );
+
+    const vec4 ndc = globalUniform.volumeViewProj_Prev * vec4( curworld, 1.0 );
+    if( ndc.w <= 0.0 )
+    {
+        return false;
+    }
+    const vec2  uv   = ndc.xy / ndc.w * 0.5 + 0.5;
+    const float dist = length( curworld - globalUniform.cameraPositionPrev.xyz );
+
+    // half a cell of margin, so the clamped edge values aren't reused
+    const vec2 margin = 0.5 / vec2( VOLUMETRIC_SIZE_X, VOLUMETRIC_SIZE_Y );
+    if( any( lessThan( uv, margin ) ) || any( greaterThan( uv, 1.0 - margin ) ) ||
+        dist < globalUniform.volumeCameraNear || dist > globalUniform.volumeCameraFar )
+    {
+        return false;
+    }
+
+    prev = volume_sample_Prev( curcell );
+    return true;
+}
+
 vec4 volume_sample_Prev( const ivec3 curcell )
 {
     vec3 curworld = volume_getCenter( curcell );

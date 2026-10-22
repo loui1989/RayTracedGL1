@@ -33,7 +33,7 @@ layout( local_size_x = COMPUTE_VOLUMETRIC_GROUP_SIZE_X,
         local_size_y = COMPUTE_VOLUMETRIC_GROUP_SIZE_Y,
         local_size_z = 1 ) in;
 
-layout( constant_id = 0 ) const float g_temporalWeight = 0.95;
+// how much of the previous frame's fog is kept (was a constant 0.95): globalUniform.volumeHistory
 
 // rgb - in−scattered light accumulated so far
 // a   - accumulated scattering coefficient
@@ -48,10 +48,10 @@ void store( const ivec3 cell, const vec4 colorAndDensity )
 {
     vec4 final = vec4( colorAndDensity.rgb, exp( -colorAndDensity.a ) );
 
-    if( g_temporalWeight > 0.0 )
+    vec4 prev;
+    if( globalUniform.volumeHistory > 0.0 && volume_sample_Prev_Checked( cell, prev ) )
     {
-        vec4 prev = volume_sample_Prev( cell );
-        final     = mix( final, prev, g_temporalWeight );
+        final = mix( final, prev, globalUniform.volumeHistory );
     }
 
     // rgb - in−scattered light accumulated so far

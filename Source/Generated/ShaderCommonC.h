@@ -295,7 +295,7 @@ struct ShGlobalUniform
     float restirTemporalRadius;
     float denoiserMaxHistory;
     float denoiserSpecMaxHistory;
-    float _pad1;
+    float volumeHistory;
     float _pad2;
     float _pad3;
     int32_t instanceGeomInfoOffset[48];

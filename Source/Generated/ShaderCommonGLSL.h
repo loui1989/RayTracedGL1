@@ -290,7 +290,7 @@ struct ShGlobalUniform
     float restirTemporalRadius;
     float denoiserMaxHistory;
     float denoiserSpecMaxHistory;
-    float _pad1;
+    float volumeHistory;
     float _pad2;
     float _pad3;
     ivec4 instanceGeomInfoOffset[12];

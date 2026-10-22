@@ -1202,6 +1202,10 @@ typedef struct RgDrawFrameDenoisingParams
     // Denoiser: the same for reflections (scaled down by the surface's smoothness).
     // Original: 256. Default: 64
     float       reflectionMaxHistory;
+    // Volumetric fog: how much of the previous frame's fog is kept each frame (0 - none,
+    // noisier; 0.95 - about 20 frames, smooth, but light shafts trail when moving).
+    // Original: 0.95. Default: 0.85
+    float       fogHistory;
 } RgDrawFrameDenoisingParams;
 
 typedef struct RgDrawFrameInfo
