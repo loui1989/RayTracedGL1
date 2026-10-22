@@ -1194,6 +1194,13 @@ bool EncodeAccelerationStructureBuilds()
 // ================================================================================================
 // Vulkan call interception
 
+namespace
+{
+// translated graphics shaders are cached by module and pipeline layout handle; Vulkan may
+// reuse a handle value after the object is destroyed
+void ForgetGraphicsLibraries( uint64_t handle );
+}
+
 VkResult RTGL1::Metal::CreateDescriptorSetLayout( VkDevice                               device,
                                                   const VkDescriptorSetLayoutCreateInfo* ci,
                                                   const VkAllocationCallbacks*           alloc,
@@ -1251,6 +1258,7 @@ void RTGL1::Metal::DestroyPipelineLayout( VkDevice device, VkPipelineLayout l, c
     {
         std::lock_guard g( S().lock );
         S().pipelineLayouts.erase( l );
+        ForgetGraphicsLibraries( uint64_t( uintptr_t( l ) ) );
     }
     vkDestroyPipelineLayout( device, l, alloc );
 }
@@ -1508,17 +1516,20 @@ void RTGL1::Metal::DestroyImageView( VkDevice device, VkImageView view, const Vk
     vkDestroyImageView( device, view, alloc );
 }
 
+void RTGL1::Metal::ForgetImage( VkImage image )
+{
+    std::lock_guard g( S().lock );
+    auto            it = S().imageTextures.find( image );
+    if( it != S().imageTextures.end() )
+    {
+        RemoveResident( it->second );
+        S().imageTextures.erase( it );
+    }
+}
+
 void RTGL1::Metal::DestroyImage( VkDevice device, VkImage image, const VkAllocationCallbacks* alloc )
 {
-    {
-        std::lock_guard g( S().lock );
-        auto            it = S().imageTextures.find( image );
-        if( it != S().imageTextures.end() )
-        {
-            RemoveResident( it->second );
-            S().imageTextures.erase( it );
-        }
-    }
+    ForgetImage( image );
     vkDestroyImage( device, image, alloc );
 }
 
@@ -1541,6 +1552,7 @@ void RTGL1::Metal::DestroyShaderModule( VkDevice device, VkShaderModule module, 
     {
         std::lock_guard g( S().lock );
         S().modules.erase( module );
+        ForgetGraphicsLibraries( uint64_t( uintptr_t( module ) ) );
     }
     vkDestroyShaderModule( device, module, alloc );
 }
@@ -2413,6 +2425,12 @@ void CommitResidency()
     }
 }
 
+// push constant data is kept in 256-byte arrays; Metal's structs may be padded to 16 bytes
+NSUInteger PushLength( uint32_t size )
+{
+    return std::min< NSUInteger >( ( NSUInteger( size ) + 15 ) & ~NSUInteger( 15 ), 256 );
+}
+
 // ---- encoders of a section
 //
 // One encoder at a time; each waits for passFence at its start and updates it at its end,
@@ -2527,7 +2545,8 @@ void EncodeDispatch( PipelineInfo&          pi,
     }
     if( push && pushSize > 0 )
     {
-        [e setBytes:push length:pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
+        // Metal's struct of the push constants may be padded to 16 bytes; 'push' is 256
+        [e setBytes:push length:PushLength( pushSize ) atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
     }
     [e dispatchThreadgroups:MTLSizeMake( groupsX, groupsY, groupsZ ) threadsPerThreadgroup:pi.threadsPerGroup];
     // the next pass reads what this one wrote
@@ -3077,13 +3096,13 @@ void EndRenderEncoder( bool forceStore )
     {
         if( rp.colorFormats[ i ] != MTLPixelFormatInvalid )
         {
-            const bool store = forceStore || rp.colorStore[ i ] == VK_ATTACHMENT_STORE_OP_STORE;
+            const bool store = forceStore || rp.colorStore[ i ] != VK_ATTACHMENT_STORE_OP_DONT_CARE;
             [s.renderEnc setColorStoreAction:store ? MTLStoreActionStore : MTLStoreActionDontCare atIndex:i];
         }
     }
     if( rp.depthFormat != MTLPixelFormatInvalid )
     {
-        const bool store = forceStore || rp.depthStore == VK_ATTACHMENT_STORE_OP_STORE;
+        const bool store = forceStore || rp.depthStore != VK_ATTACHMENT_STORE_OP_DONT_CARE;
         [s.renderEnc setDepthStoreAction:store ? MTLStoreActionStore : MTLStoreActionDontCare];
     }
     if( rp.stencilFormat != MTLPixelFormatInvalid )
@@ -3151,8 +3170,33 @@ void SectionBeginRenderPass( const VkRenderPassBeginInfo* bi )
             ca.loadAction                              = LoadAction( att.load );
             if( att.load == VK_ATTACHMENT_LOAD_OP_CLEAR && bi->pClearValues && ref < bi->clearValueCount )
             {
-                const float* c = bi->pClearValues[ ref ].color.float32;
-                ca.clearColor  = MTLClearColorMake( c[ 0 ], c[ 1 ], c[ 2 ], c[ 3 ] );
+                const VkClearColorValue& c = bi->pClearValues[ ref ].color;
+                switch( att.format )
+                {
+                    case VK_FORMAT_R32_UINT:
+                    case VK_FORMAT_R32G32_UINT:
+                    case VK_FORMAT_R32G32B32A32_UINT:
+                    case VK_FORMAT_R16_UINT:
+                    case VK_FORMAT_R16G16_UINT:
+                    case VK_FORMAT_R16G16B16A16_UINT:
+                    case VK_FORMAT_R8_UINT:
+                    case VK_FORMAT_R8G8B8A8_UINT:
+                        ca.clearColor = MTLClearColorMake( c.uint32[ 0 ], c.uint32[ 1 ], c.uint32[ 2 ], c.uint32[ 3 ] );
+                        break;
+                    case VK_FORMAT_R32_SINT:
+                    case VK_FORMAT_R32G32_SINT:
+                    case VK_FORMAT_R32G32B32A32_SINT:
+                    case VK_FORMAT_R16_SINT:
+                    case VK_FORMAT_R16G16_SINT:
+                    case VK_FORMAT_R16G16B16A16_SINT:
+                    case VK_FORMAT_R8_SINT:
+                    case VK_FORMAT_R8G8B8A8_SINT:
+                        ca.clearColor = MTLClearColorMake( c.int32[ 0 ], c.int32[ 1 ], c.int32[ 2 ], c.int32[ 3 ] );
+                        break;
+                    default:
+                        ca.clearColor = MTLClearColorMake( c.float32[ 0 ], c.float32[ 1 ], c.float32[ 2 ], c.float32[ 3 ] );
+                        break;
+                }
             }
             ca.storeAction = MTLStoreActionUnknown; // set at the end
 
@@ -3333,8 +3377,8 @@ bool PrepareDraw()
     }
     if( rp.pushDirty && b.pushSize > 0 )
     {
-        [e setVertexBytes:b.push length:b.pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
-        [e setFragmentBytes:b.push length:b.pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
+        [e setVertexBytes:b.push length:PushLength( b.pushSize ) atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
+        [e setFragmentBytes:b.push length:PushLength( b.pushSize ) atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
         rp.pushDirty = false;
     }
     if( rp.vbDirty )
@@ -3402,8 +3446,66 @@ void SectionDrawIndexed( uint32_t indexCount,
 }
 
 // Metal has no draw count from a buffer: a small compute pass copies the commands, with the
-// ones past the count made empty, and maxDrawCount indirect draws read them. The render pass
-// is paused for that compute pass and continues in a new encoder.
+// ones past the count made empty, and maxDrawCount indirect draws read them. That compute pass
+// is done before the render pass if PrepareDrawIndexedIndirectCount was called with the same
+// arguments; otherwise the render pass is paused for it and continues in a new encoder.
+
+struct IndirectCountArgs
+{
+    VkBuffer     buffer      = VK_NULL_HANDLE;
+    VkDeviceSize offset      = 0;
+    VkBuffer     countBuffer = VK_NULL_HANDLE;
+    VkDeviceSize countOffset = 0;
+    uint32_t     maxDrawCount = 0;
+    uint32_t     stride       = 0;
+
+    bool operator==( const IndirectCountArgs& o ) const
+    {
+        return buffer == o.buffer && offset == o.offset && countBuffer == o.countBuffer &&
+               countOffset == o.countOffset && maxDrawCount == o.maxDrawCount && stride == o.stride;
+    }
+};
+IndirectCountArgs g_preparedIndirect; // compacted into indirectScratch, not drawn yet
+
+constexpr NSUInteger INDIRECT_ARGS_SIZE = 20; // MTLDrawIndexedPrimitivesIndirectArguments
+
+// under the lock, outside of a render pass
+bool EncodeIndirectCompaction( const IndirectCountArgs& a )
+{
+    State& s = S();
+    if( !s.compactIndirect )
+    {
+        return false;
+    }
+    id< MTLBuffer > src, cnt;
+    NSUInteger      srcOffset = 0, cntOffset = 0;
+    if( !ResolveBuffer( a.buffer, a.offset, src, srcOffset ) ||
+        !ResolveBuffer( a.countBuffer, a.countOffset, cnt, cntOffset ) || ( srcOffset & 3 ) ||
+        ( cntOffset & 3 ) || ( a.stride & 3 ) || a.stride < INDIRECT_ARGS_SIZE )
+    {
+        return false;
+    }
+    if( !s.indirectScratch || s.indirectScratch.length < a.maxDrawCount * INDIRECT_ARGS_SIZE )
+    {
+        s.indirectScratch =
+            [s.mtlDevice newBufferWithLength:std::max< NSUInteger >( a.maxDrawCount * INDIRECT_ARGS_SIZE, 4096 )
+                                     options:MTLResourceStorageModePrivate];
+        s.indirectScratch.label = @"RTGL1 indirect draw commands";
+    }
+
+    id< MTLComputeCommandEncoder > c = ComputeEnc();
+    [c setComputePipelineState:s.compactIndirect];
+    [c setBuffer:src offset:srcOffset atIndex:0];
+    [c setBuffer:cnt offset:cntOffset atIndex:1];
+    [c setBuffer:s.indirectScratch offset:0 atIndex:2];
+    const uint32_t params[ 4 ] = { a.stride, a.maxDrawCount, 0, 0 };
+    [c setBytes:params length:sizeof( params ) atIndex:3];
+    [c dispatchThreadgroups:MTLSizeMake( ( a.maxDrawCount + 63 ) / 64, 1, 1 )
+        threadsPerThreadgroup:MTLSizeMake( 64, 1, 1 )];
+    [c memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    return true;
+}
+
 void SectionDrawIndexedIndirectCount( VkBuffer     buffer,
                                       VkDeviceSize offset,
                                       VkBuffer     countBuffer,
@@ -3417,61 +3519,51 @@ void SectionDrawIndexedIndirectCount( VkBuffer     buffer,
         State&           s  = S();
         GraphicsBound&   b  = G().bound;
         RenderPassState& rp = G().rp;
+
+        const IndirectCountArgs args = { buffer, offset, countBuffer, countOffset, maxDrawCount, stride };
+        const bool              prepared = g_preparedIndirect == args;
+        g_preparedIndirect               = {};
+
         if( !s.renderEnc || rp.skip || maxDrawCount == 0 )
         {
             return;
         }
-        if( !s.compactIndirect || rp.viewCount > 1 || !b.ib )
+        if( rp.viewCount > 1 || !b.ib )
         {
             RasterUnsupported( "vkCmdDrawIndexedIndirectCount" );
             return;
         }
-        id< MTLBuffer > src, cnt;
-        NSUInteger      srcOffset = 0, cntOffset = 0;
-        if( !ResolveBuffer( buffer, offset, src, srcOffset ) || !ResolveBuffer( countBuffer, countOffset, cnt, cntOffset ) ||
-            ( srcOffset & 3 ) || ( cntOffset & 3 ) || ( stride & 3 ) || stride < 20 )
-        {
-            RasterUnsupported( "vkCmdDrawIndexedIndirectCount with these buffers" );
-            return;
-        }
-        const NSUInteger argsSize = 20; // MTLDrawIndexedPrimitivesIndirectArguments
-        if( !s.indirectScratch || s.indirectScratch.length < maxDrawCount * argsSize )
-        {
-            s.indirectScratch = [s.mtlDevice newBufferWithLength:std::max< NSUInteger >( maxDrawCount * argsSize, 4096 )
-                                                         options:MTLResourceStorageModePrivate];
-            s.indirectScratch.label = @"RTGL1 indirect draw commands";
-        }
 
-        EndRenderEncoder( true );
+        if( !prepared )
         {
-            id< MTLComputeCommandEncoder > c = ComputeEnc();
-            [c setComputePipelineState:s.compactIndirect];
-            [c setBuffer:src offset:srcOffset atIndex:0];
-            [c setBuffer:cnt offset:cntOffset atIndex:1];
-            [c setBuffer:s.indirectScratch offset:0 atIndex:2];
-            const uint32_t params[ 4 ] = { stride, maxDrawCount, 0, 0 };
-            [c setBytes:params length:sizeof( params ) atIndex:3];
-            [c dispatchThreadgroups:MTLSizeMake( ( maxDrawCount + 63 ) / 64, 1, 1 )
-                threadsPerThreadgroup:MTLSizeMake( 64, 1, 1 )];
+            EndRenderEncoder( true );
+            const bool ok = EncodeIndirectCompaction( args );
             EndNonRenderEncoder();
-        }
-        // continue the render pass where it was
-        for( size_t i = 0; i < rp.colorFormats.size(); i++ )
-        {
-            if( rp.colorFormats[ i ] != MTLPixelFormatInvalid )
+
+            // continue the render pass where it was
+            for( size_t i = 0; i < rp.colorFormats.size(); i++ )
             {
-                rp.desc.colorAttachments[ i ].loadAction = MTLLoadActionLoad;
+                if( rp.colorFormats[ i ] != MTLPixelFormatInvalid )
+                {
+                    rp.desc.colorAttachments[ i ].loadAction = MTLLoadActionLoad;
+                }
+            }
+            if( rp.depthFormat != MTLPixelFormatInvalid )
+            {
+                rp.desc.depthAttachment.loadAction = MTLLoadActionLoad;
+            }
+            if( rp.stencilFormat != MTLPixelFormatInvalid )
+            {
+                rp.desc.stencilAttachment.loadAction = MTLLoadActionLoad;
+            }
+            BeginRenderEncoder();
+
+            if( !ok )
+            {
+                RasterUnsupported( "vkCmdDrawIndexedIndirectCount with these buffers" );
+                return;
             }
         }
-        if( rp.depthFormat != MTLPixelFormatInvalid )
-        {
-            rp.desc.depthAttachment.loadAction = MTLLoadActionLoad;
-        }
-        if( rp.stencilFormat != MTLPixelFormatInvalid )
-        {
-            rp.desc.stencilAttachment.loadAction = MTLLoadActionLoad;
-        }
-        BeginRenderEncoder();
 
         if( !PrepareDraw() )
         {
@@ -3484,7 +3576,7 @@ void SectionDrawIndexedIndirectCount( VkBuffer     buffer,
                                    indexBuffer:b.ib
                              indexBufferOffset:b.ibOffset
                                 indirectBuffer:s.indirectScratch
-                          indirectBufferOffset:i * argsSize];
+                          indirectBufferOffset:i * INDIRECT_ARGS_SIZE];
         }
     }
 }
@@ -3674,6 +3766,17 @@ void SectionBlitImage( VkImage srcImage, VkImage dstImage, uint32_t count, const
                 threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
             [e memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
         }
+    }
+}
+
+void ForgetGraphicsLibraries( uint64_t handle )
+{
+    for( auto it = G().libs.begin(); it != G().libs.end(); )
+    {
+        unsigned long long m = 0, l = 0;
+        int                mv = 0;
+        const bool         parsed = sscanf( it->first.c_str(), "%llx/%llx/%d", &m, &l, &mv ) == 3;
+        it = parsed && ( m == handle || l == handle ) ? G().libs.erase( it ) : std::next( it );
     }
 }
 
@@ -3900,6 +4003,34 @@ void RTGL1::Metal::Dispatch( VkPipeline             pipeline,
             return;
         }
         EncodeDispatch( pit->second, sets, setCount, nullptr, 0, groupsX, groupsY, groupsZ );
+    }
+}
+
+void RTGL1::Metal::PrepareDrawIndexedIndirectCount( VkCommandBuffer cmd,
+                                                    VkBuffer        buffer,
+                                                    VkDeviceSize    offset,
+                                                    VkBuffer        countBuffer,
+                                                    VkDeviceSize    countOffset,
+                                                    uint32_t        maxDrawCount,
+                                                    uint32_t        stride )
+{
+    if( !IsSectionCmd( cmd ) )
+    {
+        return;
+    }
+    @autoreleasepool
+    {
+        std::lock_guard g( S().lock );
+        g_preparedIndirect = {};
+        if( !S().cb || S().renderEnc || maxDrawCount == 0 )
+        {
+            return;
+        }
+        const IndirectCountArgs args = { buffer, offset, countBuffer, countOffset, maxDrawCount, stride };
+        if( EncodeIndirectCompaction( args ) )
+        {
+            g_preparedIndirect = args;
+        }
     }
 }
 

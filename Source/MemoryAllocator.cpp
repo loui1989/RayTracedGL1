@@ -155,6 +155,9 @@ void MemoryAllocator::DestroyTextureImage(VkImage image)
         return;
     }
 
+#ifdef __APPLE__
+    Metal::ForgetImage(image);
+#endif
     vmaDestroyImage(allocator, image, imgAllocs[image]);
     imgAllocs.erase(image);
 }

@@ -676,6 +676,11 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
             [enc setBytes:&prm length:sizeof( prm ) atIndex:0];
             [enc dispatchThreads:MTLSizeMake( rs.upscaledWidth, rs.upscaledHeight, 1 )
                 threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
+            if( sectionFence )
+            {
+                // the section's next passes read the output through argument buffers
+                [enc updateFence:sectionFence];
+            }
             [enc endEncoding];
         }
 

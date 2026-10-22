@@ -309,6 +309,15 @@ void RTGL1::LensFlares::SyncForDraw(VkCommandBuffer cmd, uint32_t frameIndex)
         return;
     }		
 
+#ifdef __APPLE__
+    // native Metal: prepare the draw count before the render pass starts
+    Metal::PrepareDrawIndexedIndirectCount(cmd,
+                                           indirectDrawCommands.GetBuffer(), GetIndirectDrawCommandsOffset(),
+                                           indirectDrawCommands.GetBuffer(), GetIndirectDrawCountOffset(),
+                                           LENS_FLARES_MAX_DRAW_CMD_COUNT,
+                                           sizeof(ShIndirectDrawCommand));
+#endif
+
     VkBufferMemoryBarrier2KHR bs[5] = {};
 
     {

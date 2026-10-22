@@ -66,6 +66,8 @@ VkDeviceAddress GetBufferDeviceAddress( VkDevice, const VkBufferDeviceAddressInf
 void     FreeMemory( VkDevice, VkDeviceMemory, const VkAllocationCallbacks* );
 void     DestroyImageView( VkDevice, VkImageView, const VkAllocationCallbacks* );
 void     DestroyImage( VkDevice, VkImage, const VkAllocationCallbacks* );
+// call before destroying an image another way (e.g. vmaDestroyImage)
+void     ForgetImage( VkImage );
 VkResult CreateShaderModule( VkDevice, const VkShaderModuleCreateInfo*, const VkAllocationCallbacks*, VkShaderModule* );
 void     DestroyShaderModule( VkDevice, VkShaderModule, const VkAllocationCallbacks* );
 VkResult CreateComputePipelines( VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* );
@@ -123,6 +125,16 @@ inline bool IsSectionCmd( VkCommandBuffer cmd )
 {
     return cmd == SectionCmd();
 }
+
+// In a section, before the render pass: does the preparation for a later
+// vkCmdDrawIndexedIndirectCount with the same arguments, so the pass isn't interrupted.
+void PrepareDrawIndexedIndirectCount( VkCommandBuffer cmd,
+                                      VkBuffer        buffer,
+                                      VkDeviceSize    offset,
+                                      VkBuffer        countBuffer,
+                                      VkDeviceSize    countOffset,
+                                      uint32_t        maxDrawCount,
+                                      uint32_t        stride );
 
 // The generic compute passes (denoiser, volumetrics, exposure, ...) can run in a section:
 // native path is on, RTGL1_METAL_COMPUTE isn't 0, and no pass failed so far.
