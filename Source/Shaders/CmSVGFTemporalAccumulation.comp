@@ -74,7 +74,7 @@ float getSpecMinAccumFrames()
 }
 #define SPEC_MAX_HITDISTANCE_ACCUM_FRAMES 16
 #define SPEC_MIN_ACCUM_FRAMES (getSpecMinAccumFrames())
-#define SPEC_MAX_ACCUM_FRAMES 256
+#define SPEC_MAX_ACCUM_FRAMES (globalUniform.denoiserSpecMaxHistory) // was 256
 #define SPEC_ACCUM_BASE_POWER 0.5   // [0.5, 1] greater values - less aggressive accumulation
 #define SPEC_ACCUM_CURVE      0.66  // [1 low, 0.5 high] aggressiveness of history rejection depending on viewing angle
 float getSpecAccumSpeed(float Amax, float roughness, float NoV, float parallax)
@@ -337,9 +337,9 @@ void main()
         // direct diffuse
         {
             diffHistoryLength *= pow(1.0 - antilagAlpha_Diff, 10);
-            diffHistoryLength = clamp(diffHistoryLength + 1.0, 1.0, 256.0);
+            diffHistoryLength = clamp(diffHistoryLength + 1.0, 1.0, globalUniform.denoiserMaxHistory);
 
-            const float minAlpha = 0.01;
+            const float minAlpha = 1.0 / globalUniform.denoiserMaxHistory; // was 0.01
             float alphaColor   = max(minAlpha, 1.0 / diffHistoryLength);
             float alphaMoments = max(minAlpha, 1.0 / diffHistoryLength);
 
@@ -354,9 +354,9 @@ void main()
         // indirect diffuse
         {
             indirHistoryLength *= pow(1.0 - antilagAlpha_Indir, 10);
-            indirHistoryLength = clamp(indirHistoryLength + 1.0, 1.0, 256.0);
+            indirHistoryLength = clamp(indirHistoryLength + 1.0, 1.0, globalUniform.denoiserMaxHistory);
 
-            const float minAlpha = 0.01;
+            const float minAlpha = 1.0 / globalUniform.denoiserMaxHistory; // was 0.01
             float alphaColor = max(minAlpha, 1.0 / indirHistoryLength);
 
             alphaColor = mix(alphaColor, 1.0, antilagAlpha_Indir);

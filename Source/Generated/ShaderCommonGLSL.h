@@ -288,7 +288,11 @@ struct ShGlobalUniform
     uint blueNoiseSeeding;
     uint antilagSquared;
     float restirTemporalRadius;
-    float _pad0;
+    float denoiserMaxHistory;
+    float denoiserSpecMaxHistory;
+    float _pad1;
+    float _pad2;
+    float _pad3;
     ivec4 instanceGeomInfoOffset[12];
     ivec4 instanceGeomInfoOffsetPrev[12];
     ivec4 instanceGeomCount[12];

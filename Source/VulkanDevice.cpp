@@ -641,12 +641,14 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             dn.indirectHistory       = 8;
             dn.indirectSpatialReuse  = 4;
             dn.indirectSpatialRadius = 8.0f;
-            dn.indirectFireflyClamp  = 16.0f;
+            dn.indirectFireflyClamp  = 64.0f;
             dn.temporalReuseJitter   = 0.0f;
             dn.indirectDenseFilter   = true;
             dn.indirectDeflicker     = 2.0f;
             dn.blueNoise             = true;
             dn.antilagSquared        = true;
+            dn.maxHistory            = 64.0f;
+            dn.reflectionMaxHistory  = 64.0f;
         }
 
         // environment overrides, e.g. to compare settings without the game's menu
@@ -675,6 +677,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
         envFloat( "RTGL1_DENOISE_DEFLICKER", dn.indirectDeflicker );
         envFloat( "RTGL1_BLUE_NOISE", blue );
         envFloat( "RTGL1_ANTILAG_SQUARED", sq );
+        envFloat( "RTGL1_DENOISE_HISTORY", dn.maxHistory );
+        envFloat( "RTGL1_DENOISE_SPEC_HISTORY", dn.reflectionMaxHistory );
 
         gu->restirGiMaxHistory        = uint32_t( std::clamp( history, 0.0f, 64.0f ) );
         gu->restirGiSpatialSamples    = uint32_t( std::clamp( spatial, 0.0f, 8.0f ) );
@@ -686,13 +690,16 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
         gu->denoiserIndirectDeflicker = std::clamp( dn.indirectDeflicker, 0.0f, 100.0f );
         gu->blueNoiseSeeding          = blue != 0.f ? 1 : 0;
         gu->antilagSquared            = sq != 0.f ? 1 : 0;
+        gu->denoiserMaxHistory        = std::clamp( dn.maxHistory, 4.0f, 256.0f );
+        gu->denoiserSpecMaxHistory    = std::clamp( dn.reflectionMaxHistory, 4.0f, 256.0f );
 
         // log when the settings change
-        static float lastLogged[ 9 ] = { -1 };
-        const float  now[ 9 ]        = {
+        static float lastLogged[ 11 ] = { -1 };
+        const float  now[ 11 ]        = {
             float( gu->restirGiMaxHistory ),   float( gu->restirGiSpatialSamples ), gu->restirGiSpatialRadius,
             gu->restirGiFireflyClamp,          gu->restirGiTemporalRadius,          float( gu->denoiserIndirectDense ),
             gu->denoiserIndirectDeflicker,     float( gu->blueNoiseSeeding ),       float( gu->antilagSquared ),
+            gu->denoiserMaxHistory,            gu->denoiserSpecMaxHistory,
         };
         if( memcmp( lastLogged, now, sizeof( now ) ) != 0 )
         {
@@ -700,7 +707,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             fprintf( stderr,
                      "[RTGL1] lighting stability: GI history %u, spatial reuse %u (radius %.1f px), "
                      "firefly clamp %.1f, reuse jitter %.1f px, dense filter %u, deflicker %.1f, "
-                     "blue noise %u, squared anti-lag %u\n",
+                     "blue noise %u, squared anti-lag %u, history %.0f / reflections %.0f frames\n",
                      gu->restirGiMaxHistory,
                      gu->restirGiSpatialSamples,
                      double( gu->restirGiSpatialRadius ),
@@ -709,7 +716,9 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
                      gu->denoiserIndirectDense,
                      double( gu->denoiserIndirectDeflicker ),
                      gu->blueNoiseSeeding,
-                     gu->antilagSquared );
+                     gu->antilagSquared,
+                     double( gu->denoiserMaxHistory ),
+                     double( gu->denoiserSpecMaxHistory ) );
         }
     }
 }

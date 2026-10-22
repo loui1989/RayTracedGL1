@@ -293,7 +293,11 @@ struct ShGlobalUniform
     uint32_t blueNoiseSeeding;
     uint32_t antilagSquared;
     float restirTemporalRadius;
-    float _pad0;
+    float denoiserMaxHistory;
+    float denoiserSpecMaxHistory;
+    float _pad1;
+    float _pad2;
+    float _pad3;
     int32_t instanceGeomInfoOffset[48];
     int32_t instanceGeomInfoOffsetPrev[48];
     int32_t instanceGeomCount[48];

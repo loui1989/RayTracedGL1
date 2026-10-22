@@ -157,9 +157,11 @@ void main()
 
     if (globalUniform.antilagSquared != 0)
     {
-        // as Quake II RTX: small differences (noise) barely shorten the history,
-        // large ones (real changes of lighting) still do
-        gradDIS *= gradDIS;
+        // as Quake II RTX's direct light: small differences (noise) barely shorten the
+        // history, large ones (real changes of lighting) still do. Not for the indirect
+        // light and reflections: their sensitivities are low already, squaring would
+        // leave moving reflections and bounce light ghosting
+        gradDIS[0] *= gradDIS[0];
     }
 
     gradDIS[0] *= globalUniform.gradientMultDiffuse;

@@ -608,7 +608,12 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_UINT32,       1,      "blueNoiseSeeding",                 1),
     (TYPE_UINT32,       1,      "antilagSquared",                   1),
     (TYPE_FLOAT32,      1,      "restirTemporalRadius",             1),
-    (TYPE_FLOAT32,      1,      "_pad0",                            1),
+    (TYPE_FLOAT32,      1,      "denoiserMaxHistory",               1),
+
+    (TYPE_FLOAT32,      1,      "denoiserSpecMaxHistory",           1),
+    (TYPE_FLOAT32,      1,      "_pad1",                            1),
+    (TYPE_FLOAT32,      1,      "_pad2",                            1),
+    (TYPE_FLOAT32,      1,      "_pad3",                            1),
 
     #(TYPE_FLOAT32,      1,      "_pad0",                            1),
     #(TYPE_FLOAT32,      1,      "_pad1",                            1),

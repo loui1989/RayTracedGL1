@@ -1178,7 +1178,7 @@ typedef struct RgDrawFrameDenoisingParams
     // Indirect light: radius of the spatial reuse in pixels. Default: 8
     float       indirectSpatialRadius;
     // Indirect light: a new sample brighter than this multiple of the local average is
-    // dimmed to it (0 - off). Default: 16
+    // dimmed to it (0 - off). Default: 64
     float       indirectFireflyClamp;
     // Max random offset (in pixels) when reusing the previous frame's light samples
     // (direct and indirect). The original 2 makes bright samples drift between pixels,
@@ -1193,9 +1193,15 @@ typedef struct RgDrawFrameDenoisingParams
     // Random numbers keep their blue noise distribution across pixels (as Quake II RTX),
     // so the noise left after filtering is fine-grained instead of blotchy. Default: true
     RgBool32    blueNoise;
-    // Anti-lag: square the measured change of lighting, so noise barely shortens the
-    // denoiser's history, but real changes still do. Default: true
+    // Anti-lag of the direct light: square the measured change of lighting, so noise
+    // barely shortens the denoiser's history, but real changes still do. Default: true
     RgBool32    antilagSquared;
+    // Denoiser: how many frames the direct and indirect diffuse light are averaged over
+    // at most. Lower - less ghosting behind moving things, more noise. Original: 256. Default: 64
+    float       maxHistory;
+    // Denoiser: the same for reflections (scaled down by the surface's smoothness).
+    // Original: 256. Default: 64
+    float       reflectionMaxHistory;
 } RgDrawFrameDenoisingParams;
 
 typedef struct RgDrawFrameInfo
