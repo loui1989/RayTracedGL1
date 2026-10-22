@@ -105,6 +105,26 @@ VkCommandBuffer VulkanDevice::BeginFrame(const RgStartFrameInfo &startInfo)
 
     VkCommandBuffer cmd = cmdManager->StartGraphicsCmd();
 
+#ifdef __APPLE__
+    // GPU time of this frame index's previous use (its fence was waited for above)
+    if (frameGenTimestamps != VK_NULL_HANDLE)
+    {
+        if (frameGenTimestampsWritten[frameIndex])
+        {
+            uint64_t ts[2] = {};
+            VkResult r = vkGetQueryPoolResults(device, frameGenTimestamps, frameIndex * 2, 2,
+                                               sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            if (r == VK_SUCCESS && ts[1] > ts[0])
+            {
+                frameGenGpuMs = double(ts[1] - ts[0]) * double(frameGenTimestampPeriodNs) / 1e6;
+            }
+            frameGenTimestampsWritten[frameIndex] = false;
+        }
+        vkCmdResetQueryPool(cmd, frameGenTimestamps, frameIndex * 2, 2);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frameGenTimestamps, frameIndex * 2);
+    }
+#endif
+
     BeginCmdLabel(cmd, "Prepare for frame");
 
     // start dynamic geometry recording to current frame
@@ -817,6 +837,11 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 #ifdef __APPLE__
     // macOS (MoltenVK): draw the HUD and present from a fresh command buffer,
     // for the same reason as the path tracer's command buffer splitting
+    if (frameGenTimestamps != VK_NULL_HANDLE)
+    {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frameGenTimestamps, frameIndex * 2 + 1);
+        frameGenTimestampsWritten[frameIndex] = true;
+    }
     cmdManager->Submit(cmd);
 
     // MetalFX frame generation (experimental): show a frame generated between the
@@ -824,9 +849,19 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     bool frameGenEngage = false;
     if (frameGenMode != 0)
     {
+        // GPU time of the frame's rendering if available (it leaves out waiting for
+        // the display, which with vsync and frame generation is most of the frame);
+        // otherwise CPU time since the swapchain image was acquired
         const double workMs =
-            std::chrono::duration< double, std::milli >(std::chrono::steady_clock::now() - frameWorkStart).count();
+            frameGenGpuMs > 0
+                ? frameGenGpuMs
+                : std::chrono::duration< double, std::milli >(std::chrono::steady_clock::now() - frameWorkStart).count();
         frameGenWorkMs = frameGenWorkMs <= 0 ? workMs : frameGenWorkMs * 0.9 + workMs * 0.1;
+        if (frameGenMode == 2 && ++frameGenLogCounter % 300 == 0)
+        {
+            fprintf(stderr, "[FrameGen] auto: frame takes %.1f ms (%s), generating: %s\n", frameGenWorkMs,
+                    frameGenGpuMs > 0 ? "GPU" : "CPU", frameGenAutoEngaged ? "yes" : "no");
+        }
 
         if (frameGenMode == 2)
         {

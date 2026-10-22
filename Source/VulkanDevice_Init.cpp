@@ -762,6 +762,36 @@ void VulkanDevice::CreateSyncPrimitives()
         SET_DEBUG_NAME(device, frameFences[i], VK_OBJECT_TYPE_FENCE, "Frame fence");
         SET_DEBUG_NAME(device, outOfFrameFences[i], VK_OBJECT_TYPE_FENCE, "Out of frame fence");
     }
+
+#ifdef __APPLE__
+    // GPU timestamps for frame generation's "auto" mode
+    {
+        VkPhysicalDeviceProperties props = {};
+        vkGetPhysicalDeviceProperties(physDevice->Get(), &props);
+
+        uint32_t familyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physDevice->Get(), &familyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> families(familyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(physDevice->Get(), &familyCount, families.data());
+
+        const uint32_t gi = queues->GetIndexGraphics();
+        if (gi < familyCount && families[gi].timestampValidBits > 0 && props.limits.timestampPeriod > 0)
+        {
+            VkQueryPoolCreateInfo qi = {};
+            qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qi.queryCount = 2 * MAX_FRAMES_IN_FLIGHT;
+            if (vkCreateQueryPool(device, &qi, nullptr, &frameGenTimestamps) == VK_SUCCESS)
+            {
+                frameGenTimestampPeriodNs = props.limits.timestampPeriod;
+            }
+            else
+            {
+                frameGenTimestamps = VK_NULL_HANDLE;
+            }
+        }
+    }
+#endif
 }
 
 VkSurfaceKHR VulkanDevice::GetSurfaceFromUser(VkInstance instance, const RgInstanceCreateInfo &info)
@@ -894,6 +924,13 @@ void VulkanDevice::DestroyDevice()
 
 void VulkanDevice::DestroySyncPrimitives()
 {
+#ifdef __APPLE__
+    if (frameGenTimestamps != VK_NULL_HANDLE)
+    {
+        vkDestroyQueryPool(device, frameGenTimestamps, nullptr);
+        frameGenTimestamps = VK_NULL_HANDLE;
+    }
+#endif
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);

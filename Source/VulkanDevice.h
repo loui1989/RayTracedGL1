@@ -153,6 +153,12 @@ private:
     bool                frameGenAutoEngaged = false;
     bool                frameGenActive      = false; // last frame had a generated frame
     double              frameGenWorkMs      = 0;     // smoothed render time per frame
+    // GPU timestamps around each frame's rendering (excludes waiting for the display)
+    VkQueryPool         frameGenTimestamps  = VK_NULL_HANDLE;
+    float               frameGenTimestampPeriodNs = 0;
+    bool                frameGenTimestampsWritten[MAX_FRAMES_IN_FLIGHT] = {};
+    double              frameGenGpuMs       = -1;    // last measured, -1 if unknown
+    uint32_t            frameGenLogCounter  = 0;
     std::chrono::steady_clock::time_point frameWorkStart;
 
     bool                waitForOutOfFrameFence;
