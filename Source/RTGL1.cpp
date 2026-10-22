@@ -275,6 +275,11 @@ RgBool32 rgIsRenderUpscaleTechniqueAvailable(RgInstance rgInstance, RgRenderUpsc
 }
 
 
+RgBool32 rgIsFrameGenerationActive(RgInstance rgInstance)
+{
+    return Call(rgInstance, &VulkanDevice::IsFrameGenerationActive);
+}
+
 const char *rgGetResultDescription(RgResult result)
 {
     return RgException::GetRgResultName(result);

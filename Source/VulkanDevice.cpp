@@ -49,11 +49,12 @@ VkCommandBuffer VulkanDevice::BeginFrame(const RgStartFrameInfo &startInfo)
 
 #ifdef __APPLE__
     // frame generation presents two images per frame and relies on vsync to space them out
-    swapchain->RequestVsync(startInfo.requestVSync || FSR2::IsFrameGenRequested());
+    swapchain->RequestVsync(startInfo.requestVSync || frameGenMode != 0);
 #else
     swapchain->RequestVsync(startInfo.requestVSync);
 #endif
     swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
+    frameWorkStart = std::chrono::steady_clock::now();
 
     VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
 
@@ -584,6 +585,28 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
 
 void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 {
+#ifdef __APPLE__
+    {
+        uint32_t mode = drawInfo.pRenderResolutionParams ? drawInfo.pRenderResolutionParams->frameGeneration : 0;
+        const char* e = getenv("RTGL1_FRAMEGEN");
+        if (e && e[0] == '1')
+        {
+            mode = 1;
+        }
+        if (mode > 2 || !renderResolution.IsAmdFsr2Enabled() || !FSR2::IsFrameGenSupported())
+        {
+            mode = 0;
+        }
+        if (mode != frameGenMode)
+        {
+            frameGenAutoEngaged = false;
+            frameGenWorkMs      = 0;
+            fprintf(stderr, "[FrameGen] mode: %s\n", mode == 0 ? "off" : mode == 1 ? "on" : "auto");
+        }
+        frameGenMode = mode;
+        amdFsr2->SetFrameGenWanted(mode != 0);
+    }
+#endif
     // end of "Prepare for frame" label
     EndCmdLabel(cmd);
 
@@ -798,9 +821,39 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 
     // MetalFX frame generation (experimental): show a frame generated between the
     // previous and this one first, with the HUD drawn on top, then this frame
-    if (renderResolution.IsAmdFsr2Enabled() &&
-        amdFsr2->FrameGenInterpolate(frameIndex, framebuffers, accum))
+    bool frameGenEngage = false;
+    if (frameGenMode != 0)
     {
+        const double workMs =
+            std::chrono::duration< double, std::milli >(std::chrono::steady_clock::now() - frameWorkStart).count();
+        frameGenWorkMs = frameGenWorkMs <= 0 ? workMs : frameGenWorkMs * 0.9 + workMs * 0.1;
+
+        if (frameGenMode == 2)
+        {
+            // auto: generate frames only while the game can't render at ~60 fps itself
+            const bool wasEngaged = frameGenAutoEngaged;
+            if (!frameGenAutoEngaged && frameGenWorkMs > 17.5)
+            {
+                frameGenAutoEngaged = true;
+            }
+            else if (frameGenAutoEngaged && frameGenWorkMs < 15.0)
+            {
+                frameGenAutoEngaged = false;
+            }
+            if (wasEngaged != frameGenAutoEngaged)
+            {
+                fprintf(stderr, "[FrameGen] auto: %s (frame takes %.1f ms)\n",
+                        frameGenAutoEngaged ? "on" : "off", frameGenWorkMs);
+            }
+        }
+        frameGenEngage = frameGenMode == 1 || frameGenAutoEngaged;
+    }
+    frameGenActive = false;
+
+    if (renderResolution.IsAmdFsr2Enabled() &&
+        amdFsr2->FrameGenInterpolate(frameIndex, framebuffers, accum, frameGenEngage))
+    {
+        frameGenActive = true;
         cmd = cmdManager->StartGraphicsCmd();
         if (!drawInfo.disableRasterization)
         {

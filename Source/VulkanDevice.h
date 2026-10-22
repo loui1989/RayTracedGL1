@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include <RTGL1/RTGL1.h>
 
 #include <memory>
@@ -108,6 +110,7 @@ public:
 
     bool IsSuspended() const;
     bool IsRenderUpscaleTechniqueAvailable(RgRenderUpscaleTechnique technique) const;
+    RgBool32 IsFrameGenerationActive() const { return frameGenActive ? 1 : 0; }
 
 
     void Print(const char *pMessage) const;
@@ -146,6 +149,11 @@ private:
     // macOS frame generation: the generated frame's present
     VkSemaphore         frameGenImageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
     VkSemaphore         frameGenRenderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
+    uint32_t            frameGenMode        = 0;     // 0 off, 1 on, 2 auto
+    bool                frameGenAutoEngaged = false;
+    bool                frameGenActive      = false; // last frame had a generated frame
+    double              frameGenWorkMs      = 0;     // smoothed render time per frame
+    std::chrono::steady_clock::time_point frameWorkStart;
 
     bool                waitForOutOfFrameFence;
     VkFence             outOfFrameFences[MAX_FRAMES_IN_FLIGHT] = {};

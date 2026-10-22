@@ -1133,6 +1133,10 @@ typedef struct RgDrawFrameRenderResolutionParams
     // Needed, if pixelized look is needed, but the actual rendering should
     // be done in higher resolution.
     const RgExtent2D            *pPixelizedRenderSize;
+    // macOS only: MetalFX frame generation, used with the MetalFX upscaler
+    // (RG_RENDER_UPSCALE_TECHNIQUE_AMD_FSR2 slot). 0 - off, 1 - on,
+    // 2 - auto (only while the game can't keep up with the display).
+    uint32_t                    frameGeneration;
 } RgDrawFrameRenderResolutionParams;
 
 typedef struct RgDrawFrameLensFlareParams
@@ -1210,6 +1214,9 @@ RGAPI RgResult RGCONV rgDrawFrame(
 RGAPI RgBool32 RGCONV rgIsRenderUpscaleTechniqueAvailable(
     RgInstance                          rgInstance,
     RgRenderUpscaleTechnique            technique);
+
+// macOS only: true if the last frame was shown together with a generated frame.
+RGAPI RgBool32 RGCONV rgIsFrameGenerationActive(RgInstance rgInstance);
 
 RGAPI const char* RGCONV rgGetResultDescription(RgResult result);
 

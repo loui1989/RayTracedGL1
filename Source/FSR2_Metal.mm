@@ -56,6 +56,9 @@ struct MfxState
     id< MTLTexture >              fgPrev    = nil; // previous frame
     id< MTLTexture >              fgOut     = nil; // generated frame
     bool                          fgHasPrev = false;
+    bool                          fgWanted  = false;
+    bool                          fgBuiltWanted = false; // fgWanted when the textures were made
+    bool                          fgSavedThisFrame = false;
     bool                          fgAppliedThisFrame      = false;
     bool                          fgInterpolatedThisFrame = false;
     RgFloat2D                     fgJitter  = {};
@@ -272,7 +275,8 @@ void ReleaseScaler()
 
 bool EnsureScaler( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
 {
-    if( g.scaler && g.renderW == rw && g.renderH == rh && g.outW == ow && g.outH == oh )
+    if( g.scaler && g.renderW == rw && g.renderH == rh && g.outW == ow && g.outH == oh &&
+        g.fgBuiltWanted == g.fgWanted )
     {
         return true;
     }
@@ -298,7 +302,8 @@ bool EnsureScaler( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
 
     // optional frame interpolator; its texture usage requirements are added below
     MTLTextureUsage fgColorUsage = 0, fgOutUsage = 0, fgDepthUsage = 0, fgMotionUsage = 0;
-    if( RTGL1::FSR2::IsFrameGenRequested() )
+    g.fgBuiltWanted = g.fgWanted;
+    if( g.fgWanted && RTGL1::FSR2::IsFrameGenSupported() )
     {
         if( @available( macOS 26.0, * ) )
         {
@@ -549,38 +554,41 @@ void EncodeCopy( id< MTLCommandBuffer > cb, id< MTLTexture > src, id< MTLTexture
 }
 }
 
-bool RTGL1::FSR2::IsFrameGenRequested()
+bool RTGL1::FSR2::IsFrameGenSupported()
 {
-    static int requested = -1;
-    if( requested < 0 )
+    static int supported = -1;
+    if( supported < 0 )
     {
-        const char* v = getenv( "RTGL1_FRAMEGEN" );
-        requested     = 0;
-        if( v && v[ 0 ] == '1' )
+        supported = 0;
+        if( @available( macOS 26.0, * ) )
         {
-            if( @available( macOS 26.0, * ) )
+            @autoreleasepool
             {
-                @autoreleasepool
-                {
-                    id< MTLDevice > dev = MTLCreateSystemDefaultDevice();
-                    requested = ( dev && [MTLFXFrameInterpolatorDescriptor supportsDevice:dev] ) ? 1 : 0;
-                }
-            }
-            if( !requested )
-            {
-                Log( "frame generation was requested, but this Mac doesn't support MetalFX frame interpolation" );
+                id< MTLDevice > dev = MTLCreateSystemDefaultDevice();
+                supported = ( dev && [MTLFXFrameInterpolatorDescriptor supportsDevice:dev] ) ? 1 : 0;
             }
         }
+        if( !supported )
+        {
+            Log( "MetalFX frame interpolation isn't supported on this Mac" );
+        }
     }
-    return requested == 1;
+    return supported == 1;
+}
+
+void RTGL1::FSR2::SetFrameGenWanted( bool wanted )
+{
+    g.fgWanted = wanted;
 }
 
 bool RTGL1::FSR2::FrameGenInterpolate( uint32_t                               frameIndex,
                                        const std::shared_ptr< Framebuffers >& framebuffers,
-                                       FramebufferImageIndex                  accum )
+                                       FramebufferImageIndex                  accum,
+                                       bool                                   engage )
 {
     g.fgInterpolatedThisFrame = false;
-    if( !g.fgInterp || !g.fgAppliedThisFrame )
+    g.fgSavedThisFrame        = false;
+    if( !g.fgInterp || !g.fgAppliedThisFrame || !engage )
     {
         return false;
     }
@@ -601,6 +609,7 @@ bool RTGL1::FSR2::FrameGenInterpolate( uint32_t                               fr
 
         // keep this frame (before the HUD) for later
         EncodeCopy( cb, accumTex, g.fgCur, g.outW, g.outH );
+        g.fgSavedThisFrame = true;
 
         if( g.fgHasPrev )
         {
@@ -658,7 +667,7 @@ void RTGL1::FSR2::FrameGenFinish( uint32_t                               frameIn
             }
         }
 
-        if( g.fgInterp && g.fgAppliedThisFrame )
+        if( g.fgInterp && g.fgSavedThisFrame )
         {
             std::swap( g.fgCur, g.fgPrev );
             g.fgHasPrev = true;
@@ -669,6 +678,7 @@ void RTGL1::FSR2::FrameGenFinish( uint32_t                               frameIn
         }
         g.fgAppliedThisFrame      = false;
         g.fgInterpolatedThisFrame = false;
+        g.fgSavedThisFrame        = false;
     }
 }
 
