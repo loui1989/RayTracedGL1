@@ -86,7 +86,10 @@ VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
 
 #ifdef __APPLE__
     // RTGL1_METAL_RT=1: path tracing natively in Metal
-    Metal::Init(device, cmdManager);
+    if (!Metal::Init(device, cmdManager) && MetalNative::Enabled())
+    {
+        throw RgException(RG_GRAPHICS_API_ERROR, "Metal only mode (RTGL1_METAL_ONLY=1) couldn't start the Metal renderer");
+    }
 #endif
 
     uniform             = std::make_shared<GlobalUniform>(device, memAllocator);

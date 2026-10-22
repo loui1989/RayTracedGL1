@@ -28,6 +28,7 @@
 
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -90,6 +91,16 @@ struct NativeFence
     std::mutex              lock;
     std::condition_variable cv;
     bool                    signaled = false;
+    // owns this object until vkDestroyFence; completion handlers keep their own copy,
+    // so a handler that runs after the fence was destroyed doesn't touch freed memory
+    std::shared_ptr< NativeFence > self;
+
+    static void Signal( const std::shared_ptr< NativeFence >& f )
+    {
+        std::lock_guard l( f->lock );
+        f->signaled = true;
+        f->cv.notify_all();
+    }
 };
 
 struct NativeSurface

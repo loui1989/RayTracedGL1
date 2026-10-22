@@ -435,6 +435,15 @@ id< MTLTexture > TextureForView( VkImageView view )
     {
         return nil;
     }
+    if( MetalNative::Enabled() )
+    {
+        // views of swapchain images: the drawable changes every frame, not cached
+        auto* v = reinterpret_cast< MetalNative::NativeImageView* >( view );
+        if( v->image && v->image->swapchain )
+        {
+            return MetalNative::SwapchainTexture( reinterpret_cast< VkImage >( v->image ) );
+        }
+    }
     auto it = s.viewTextures.find( view );
     if( it != s.viewTextures.end() )
     {
@@ -1845,6 +1854,12 @@ bool RTGL1::Metal::IsInSection()
 void RTGL1::Metal::Disable( const char* reason )
 {
     std::lock_guard g( S().lock );
+    if( MetalNative::Enabled() )
+    {
+        // Metal only: there's nothing to fall back to, keep the rest of the frame running
+        Log( "a native Metal pipeline is unavailable: %s", reason );
+        return;
+    }
     if( S().enabled )
     {
         Log( "native path tracing turned off: %s", reason );
@@ -2005,6 +2020,17 @@ void RTGL1::Metal::Shutdown()
             pi.mtl = nil;
         }
         s.resident.clear();
+        if( s.residency && s.queue )
+        {
+            if( @available( macOS 15.0, * ) )
+            {
+                // the queue outlives this (Metal only mode keeps one for the whole process)
+                id< MTLResidencySet > rs = s.residency;
+                [rs removeAllAllocations];
+                [rs commit];
+                [s.queue removeResidencySet:rs];
+            }
+        }
         s.residency  = nil;
         s.scratch    = nil;
         s.fence      = nil;
@@ -3694,6 +3720,7 @@ kernel void rgBlit( texture2d< float, access::sample > src [[texture(0)]],
     const int2 n  = abs( p.dst1 - p.dst0 );
     if( int( gid.x ) >= n.x || int( gid.y ) >= n.y ) return;
     const int2   d  = lo + int2( gid );
+    if( any( d < 0 ) || any( uint2( d ) >= uint2( dst.get_width(), dst.get_height() ) ) ) return;
     const float2 t  = ( float2( d ) + 0.5 - float2( p.dst0 ) ) / float2( p.dst1 - p.dst0 );
     const float2 uv = ( p.src0 + t * ( p.src1 - p.src0 ) ) / p.srcTexSize;
     float4 c = src.sample( smp, uv, level( 0 ) );
@@ -4147,6 +4174,11 @@ void RTGL1::Metal::Dispatch( VkPipeline             pipeline,
     }
 }
 
+namespace
+{
+void Record( VkCommandBuffer cmd, std::function< void() > f ); // Metal only: see below
+}
+
 void RTGL1::Metal::PrepareDrawIndexedIndirectCount( VkCommandBuffer cmd,
                                                     VkBuffer        buffer,
                                                     VkDeviceSize    offset,
@@ -4155,6 +4187,19 @@ void RTGL1::Metal::PrepareDrawIndexedIndirectCount( VkCommandBuffer cmd,
                                                     uint32_t        maxDrawCount,
                                                     uint32_t        stride )
 {
+    const IndirectCountArgs args = { buffer, offset, countBuffer, countOffset, maxDrawCount, stride };
+    if( MetalNative::IsNativeCmd( cmd ) )
+    {
+        // Metal only: compacted at this point of the command buffer, before the render pass
+        Record( cmd, [ args ]() {
+            g_preparedIndirect = {};
+            if( S().cb && !S().renderEnc && args.maxDrawCount != 0 && EncodeIndirectCompaction( args ) )
+            {
+                g_preparedIndirect = args;
+            }
+        } );
+        return;
+    }
     if( !IsSectionCmd( cmd ) )
     {
         return;
@@ -4167,7 +4212,6 @@ void RTGL1::Metal::PrepareDrawIndexedIndirectCount( VkCommandBuffer cmd,
         {
             return;
         }
-        const IndirectCountArgs args = { buffer, offset, countBuffer, countOffset, maxDrawCount, stride };
         if( EncodeIndirectCompaction( args ) )
         {
             g_preparedIndirect = args;
@@ -4286,10 +4330,9 @@ void FinishSectionCommandBuffer( const std::function< void( id< MTLCommandBuffer
     }
     if( fence )
     {
+        std::shared_ptr< MetalNative::NativeFence > keep = fence->self;
         [s.cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
-            std::lock_guard l( fence->lock );
-            fence->signaled = true;
-            fence->cv.notify_all();
+            MetalNative::NativeFence::Signal( keep );
         }];
     }
 
@@ -4373,6 +4416,11 @@ void RTGL1::Metal::RecordQueuedBuilds( VkCommandBuffer cmd )
             return;
         }
         EndNonRenderEncoder();
+        // builds queued (not yet recorded) meanwhile stay queued
+        std::vector< BlasBuild > queuedBlas;
+        std::vector< TlasBuild > queuedTlas;
+        queuedBlas.swap( s.pendingBlas );
+        queuedTlas.swap( s.pendingTlas );
         s.pendingBlas = blas;
         s.pendingTlas = tlas;
         // the encoders after these wait for them
@@ -4380,6 +4428,8 @@ void RTGL1::Metal::RecordQueuedBuilds( VkCommandBuffer cmd )
         {
             s.waitASFence = true;
         }
+        s.pendingBlas.swap( queuedBlas );
+        s.pendingTlas.swap( queuedTlas );
     } );
 }
 
@@ -4488,16 +4538,25 @@ VkResult RTGL1::MetalNative::vkQueueSubmit( VkQueue, uint32_t count, const VkSub
         State&          s = S();
         auto*           f = reinterpret_cast< NativeFence* >( fence );
 
+        if( !s.queue )
+        {
+            // Metal::Init failed: don't leave the caller waiting on the fence forever
+            if( f )
+            {
+                NativeFence::Signal( f->self );
+            }
+            return VK_ERROR_DEVICE_LOST;
+        }
+
         if( count == 0 )
         {
             if( f )
             {
                 // signaled when the work submitted before is done
                 id< MTLCommandBuffer > cb = [s.queue commandBuffer];
+                std::shared_ptr< NativeFence > keep = f->self;
                 [cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
-                    std::lock_guard l( f->lock );
-                    f->signaled = true;
-                    f->cv.notify_all();
+                    NativeFence::Signal( keep );
                 }];
                 [cb commit];
                 MetalNative::NoteCommitted( cb );

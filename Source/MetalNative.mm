@@ -383,6 +383,11 @@ VkResult RTGL1::MetalNative::vkCreateInstance( const VkInstanceCreateInfo*  ci,
         Log( "no Metal device with ray tracing" );
         return VK_ERROR_INCOMPATIBLE_DRIVER;
     }
+#ifndef RG_HAS_SPIRV_CROSS
+    // every shader is translated to Metal, there's no other way to run them here
+    Log( "built without SPIRV-Cross (RG_SPIRV_CROSS_DIR), Metal only mode is unavailable" );
+    return VK_ERROR_INCOMPATIBLE_DRIVER;
+#endif
     if( @available( macOS 15.0, * ) )
     {
     }
@@ -1482,7 +1487,9 @@ void RTGL1::MetalNative::vkUpdateDescriptorSets( VkDevice, uint32_t, const VkWri
 
 VkResult RTGL1::MetalNative::vkCreateFence( VkDevice, const VkFenceCreateInfo* ci, const VkAllocationCallbacks*, VkFence* out )
 {
-    auto* f     = new NativeFence;
+    auto sp     = std::make_shared< NativeFence >();
+    auto* f     = sp.get();
+    f->self     = std::move( sp );
     f->signaled = ( ci->flags & VK_FENCE_CREATE_SIGNALED_BIT ) != 0;
     *out        = Handle< VkFence >( f );
     return VK_SUCCESS;
@@ -1490,7 +1497,11 @@ VkResult RTGL1::MetalNative::vkCreateFence( VkDevice, const VkFenceCreateInfo* c
 
 void RTGL1::MetalNative::vkDestroyFence( VkDevice, VkFence fence, const VkAllocationCallbacks* )
 {
-    delete Obj< NativeFence >( fence );
+    if( auto* f = Obj< NativeFence >( fence ) )
+    {
+        // freed here unless a completion handler still holds it
+        std::shared_ptr< NativeFence > drop = std::move( f->self );
+    }
 }
 
 VkResult RTGL1::MetalNative::vkWaitForFences( VkDevice, uint32_t count, const VkFence* fences, VkBool32 waitAll, uint64_t timeoutNs )
