@@ -146,7 +146,15 @@ struct MtlAS
 {
     id< MTLAccelerationStructure > as;
     NSUInteger                     size = 0;
-    id< MTLBuffer >                instances; // top level: instance descriptors
+
+    // top level: instance descriptors, written by the CPU for each build, so a buffer is
+    // reused only after the GPU work that read it has completed
+    std::vector< ArgBuffer > instances;
+
+    // bottom level: the layout it was last built / refit with, to refit it instead of
+    // rebuilding when a per-frame rebuilt (dynamic) structure keeps the same layout
+    std::vector< uint64_t > layout;
+    uint32_t                refitsSinceBuild = 0;
 };
 
 struct BlasBuild
@@ -214,6 +222,11 @@ struct State
     BoundState                     bound;
     bool                           computeEnv    = true;
     bool                           fastMath      = false; // RTGL1_METAL_FASTMATH=1
+    uint32_t                       asRebuildEvery = 8;    // RTGL1_METAL_AS_REBUILD_EVERY, 1 = never refit
+    struct
+    {
+        uint32_t blasBuilds = 0, blasRefits = 0, tlasInstances = 0;
+    } asStats;
     bool                           computeBroken = false;
 
     // RTGL1_PROFILE=1: a section is split into a command buffer per mark
@@ -795,6 +808,9 @@ bool EnsureDummyBlas( id< MTLAccelerationStructureCommandEncoder > ae, NSUIntege
     return true;
 }
 
+void        CommitResidency();
+const char* Intern( const char* name );
+
 // Encodes the queued builds into s.cb. Returns true if s.fence is updated after them.
 bool EncodeAccelerationStructureBuilds()
 {
@@ -826,6 +842,24 @@ bool EncodeAccelerationStructureBuilds()
             {
                 continue;
             }
+            // Geometry rebuilt every frame (dynamic, built with "prefer fast build"): refit
+            // the previous structure instead when the layout is the same, with a full build
+            // every asRebuildEvery frames to restore the quality of the hierarchy
+            const bool perFrame =
+                !b.update && ( b.flags & VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR ) &&
+                s.asRebuildEvery > 1;
+            std::vector< uint64_t > layout;
+            if( perFrame )
+            {
+                d.usage |= MTLAccelerationStructureUsageRefit;
+                for( size_t g = 0; g < b.geoms.size(); g++ )
+                {
+                    const auto& t = b.geoms[ g ].geometry.triangles;
+                    layout.push_back( ( uint64_t( b.ranges[ g ].primitiveCount ) << 32 ) |
+                                      ( uint64_t( t.indexType ) << 8 ) | uint64_t( b.geoms[ g ].flags ) );
+                }
+            }
+
             const MTLAccelerationStructureSizes sizes = [s.mtlDevice accelerationStructureSizesWithDescriptor:d];
 
             MtlAS&     m         = s.as[ b.dst ];
@@ -834,7 +868,14 @@ bool EncodeAccelerationStructureBuilds()
             {
                 continue;
             }
-            const bool refit = b.update && !recreated && ( d.usage & MTLAccelerationStructureUsageRefit );
+            bool refit = b.update && !recreated && ( d.usage & MTLAccelerationStructureUsageRefit );
+            if( perFrame )
+            {
+                refit = !recreated && m.layout == layout && m.refitsSinceBuild + 1 < s.asRebuildEvery;
+                m.refitsSinceBuild = refit ? m.refitsSinceBuild + 1 : 0;
+                m.layout           = std::move( layout );
+            }
+            refit ? s.asStats.blasRefits++ : s.asStats.blasBuilds++;
 
             items.push_back( { &b, d, refit, scratchTotal } );
             scratchTotal += Align256( std::max< NSUInteger >(
@@ -874,6 +915,16 @@ bool EncodeAccelerationStructureBuilds()
         [ae endEncoding];
         blasEncoded = true;
         s.pendingBlas.clear();
+
+        if( s.profile && !s.pendingTlas.empty() )
+        {
+            // measured separately from the top level build
+            CommitResidency();
+            [s.cb commit];
+            s.profCbs.push_back( { s.cb, Intern( "AS bottom level" ) } );
+            s.cb       = [s.queue commandBuffer];
+            s.cb.label = @"RTGL1 native (profiled)";
+        }
     }
 
     if( s.pendingTlas.empty() )
@@ -900,12 +951,34 @@ bool EncodeAccelerationStructureBuilds()
         const NSUInteger count = std::max< NSUInteger >( t.instances.size(), 1 );
         MtlAS&           m     = s.as[ t.dst ];
         const NSUInteger instBytes = count * sizeof( MTLAccelerationStructureUserIDInstanceDescriptor );
-        if( !m.instances || m.instances.length < instBytes )
+        id< MTLBuffer >  instBuf;
         {
-            m.instances       = [s.mtlDevice newBufferWithLength:instBytes options:MTLResourceStorageModeShared];
-            m.instances.label = @"RTGL1 TLAS instances";
+            const uint64_t completed = s.event.signaledValue;
+            ArgBuffer*     slot      = nullptr;
+            for( ArgBuffer& a : m.instances )
+            {
+                if( a.lastUse <= completed )
+                {
+                    slot = &a;
+                    break;
+                }
+            }
+            if( !slot )
+            {
+                m.instances.push_back( {} );
+                slot = &m.instances.back();
+            }
+            if( !slot->buffer || slot->buffer.length < instBytes )
+            {
+                slot->buffer       = [s.mtlDevice newBufferWithLength:instBytes + instBytes / 4
+                                                        options:MTLResourceStorageModeShared];
+                slot->buffer.label = @"RTGL1 TLAS instances";
+            }
+            slot->lastUse = s.sectionDone;
+            instBuf       = slot->buffer;
         }
-        auto* dst = static_cast< MTLAccelerationStructureUserIDInstanceDescriptor* >( m.instances.contents );
+        s.asStats.tlasInstances += uint32_t( t.instances.size() );
+        auto* dst = static_cast< MTLAccelerationStructureUserIDInstanceDescriptor* >( instBuf.contents );
 
         // index 0: the placeholder, for instances that are hidden
         if( s.dummyBlas )
@@ -972,7 +1045,7 @@ bool EncodeAccelerationStructureBuilds()
 
         MTLInstanceAccelerationStructureDescriptor* d = [MTLInstanceAccelerationStructureDescriptor descriptor];
         d.instanceDescriptorType          = MTLAccelerationStructureInstanceDescriptorTypeUserID;
-        d.instanceDescriptorBuffer        = m.instances;
+        d.instanceDescriptorBuffer        = instBuf;
         d.instanceDescriptorBufferOffset  = 0;
         d.instanceDescriptorStride        = sizeof( MTLAccelerationStructureUserIDInstanceDescriptor );
         d.instanceCount                   = count;
@@ -1497,6 +1570,11 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             s.computeEnv  = !( c && c[ 0 ] == '0' );
             const char* f = getenv( "RTGL1_METAL_FASTMATH" );
             s.fastMath    = f && f[ 0 ] == '1';
+            const char* r = getenv( "RTGL1_METAL_AS_REBUILD_EVERY" );
+            if( r && r[ 0 ] )
+            {
+                s.asRebuildEvery = uint32_t( std::clamp( atoi( r ), 1, 1000 ) );
+            }
         }
 
         s.enabled = true;
@@ -1642,6 +1720,25 @@ PrepareResult CompilePrepareJob( const PrepareJob& job, id< MTLDevice > device )
         id< MTLLibrary > lib   = [device newLibraryWithSource:[NSString stringWithUTF8String:sh.msl.c_str()]
                                                     options:co
                                                       error:&err];
+        if( !lib )
+        {
+            // retry without the optional ray query hint added by MetalGen
+            const std::string hint = "    ip.assume_geometry_type(geometry_type::triangle);\n";
+            std::string       plain = sh.msl;
+            const size_t      at    = plain.find( hint );
+            if( at != std::string::npos )
+            {
+                plain.erase( at, hint.size() );
+                NSError* err2 = nil;
+                lib = [device newLibraryWithSource:[NSString stringWithUTF8String:plain.c_str()]
+                                           options:co
+                                             error:&err2];
+                if( lib )
+                {
+                    Log( "%s: compiled without the triangle-only ray query hint", job.name.c_str() );
+                }
+            }
+        }
         if( !lib )
         {
             NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:
@@ -2136,7 +2233,7 @@ void RTGL1::Metal::BeginSection( VkCommandBuffer& cmd )
             [s.encoder waitForFence:s.fence];
             if( s.profile )
             {
-                SplitForProfiling( Intern( "acceleration structure builds" ) );
+                SplitForProfiling( Intern( "AS top level" ) );
             }
         }
     }
@@ -2222,8 +2319,17 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
             s.profCbs.clear();
             s.profWaitCb = nil;
 
+            const auto stats = s.asStats;
+            s.asStats        = {};
+            const char* nBuilds = Intern( "BLAS builds" );
+            const char* nRefits = Intern( "BLAS refits" );
+            const char* nInst   = Intern( "TLAS instances" );
+
             [s.cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
                 std::vector< std::pair< const char*, double > > out;
+                out.emplace_back( nBuilds, double( stats.blasBuilds ) );
+                out.emplace_back( nRefits, double( stats.blasRefits ) );
+                out.emplace_back( nInst, double( stats.tlasInstances ) );
                 double                                          prevEnd = waitCb.GPUEndTime;
                 for( const ProfiledCb& p : *list )
                 {
@@ -2242,6 +2348,8 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
                 S().timings.insert( S().timings.end(), out.begin(), out.end() );
             }];
         }
+
+        s.asStats = {};
 
         [s.cb commit];
         s.lastCb = s.cb;

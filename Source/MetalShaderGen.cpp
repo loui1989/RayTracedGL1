@@ -181,6 +181,18 @@ ComputeShader TranslateCompute( const uint32_t*                spirv,
 
         result.msl = msl.compile();
 
+        // Ray queries: the acceleration structures contain only triangles, so tell the
+        // intersector it doesn't need to handle bounding box geometry
+        {
+            const std::string from = "    intersection_params ip;\n";
+            const size_t      at   = result.msl.find( from );
+            if( at != std::string::npos )
+            {
+                result.msl.insert( at + from.size(),
+                                   "    ip.assume_geometry_type(geometry_type::triangle);\n" );
+            }
+        }
+
         if( msl.needs_buffer_size_buffer() || msl.needs_swizzle_buffer() ||
             msl.needs_acceleration_structure_address_table() )
         {
