@@ -100,7 +100,7 @@ void RTGL1::PortalList::CreateDescriptors()
         .binding = BINDING_PORTAL_INSTANCES,
         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+        .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT,
     };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo =

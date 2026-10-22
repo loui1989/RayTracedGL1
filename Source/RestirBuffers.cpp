@@ -42,10 +42,10 @@ void RTGL1::RestirBuffers::BarrierInitial( VkCommandBuffer cmd )
     VkBufferMemoryBarrier2 b = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
         .srcStageMask =
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | RG_STAGE2_PATH_TRACER,
         .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
         .dstStageMask =
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | RG_STAGE2_PATH_TRACER,
         .dstAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT,
         .srcQueueFamilyIndex = 0,
         .dstQueueFamilyIndex = 0,

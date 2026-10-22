@@ -79,7 +79,7 @@ void RTGL1::Volumetric::ProcessScattering( VkCommandBuffer      cmd,
             .sType        = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
             .pNext        = nullptr,
             .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                            RG_STAGE2_PATH_TRACER,
             .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
             .dstStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT_KHR,
             .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT_KHR | VK_ACCESS_2_SHADER_WRITE_BIT,

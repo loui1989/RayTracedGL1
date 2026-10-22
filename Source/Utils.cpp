@@ -104,7 +104,7 @@ void Utils::ASBuildMemoryBarrier(VkCommandBuffer cmd)
     vkCmdPipelineBarrier(
         cmd,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        RG_STAGE_PATH_TRACER,
         0,
         1, &barrier,
         0, nullptr,

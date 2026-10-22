@@ -262,7 +262,8 @@ vec3 getNormal(const vec3 position, const vec3 normalFromMap, const vec3 normalG
 #ifdef RAYGEN_PRIMARY_SHADER
 void main() 
 {
-    const ivec2 regularPix = ivec2(gl_LaunchIDEXT.xy);
+    RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
+    const ivec2 regularPix = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 pix = getCheckerboardPix(regularPix);
     const vec2 inUV = getPixelUVWithJitter(regularPix);
 
@@ -341,7 +342,8 @@ void main()
     }
 
 
-    const ivec2 regularPix = ivec2(gl_LaunchIDEXT.xy);
+    RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
+    const ivec2 regularPix = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 pix = getCheckerboardPix(regularPix);
     const vec2 inUV = getPixelUVWithJitter(regularPix);
 

@@ -47,7 +47,8 @@ float phaseFunction_Schlick( const vec3 tolight, const vec3 toviewer, float assy
 
 void main()
 {
-    const ivec3 cell = ivec3( gl_LaunchIDEXT.xyz );
+    RAYGEN_RETURN_IF_OUTSIDE( VOLUMETRIC_SIZE_X, VOLUMETRIC_SIZE_Y, VOLUMETRIC_SIZE_Z );
+    const ivec3 cell = ivec3( gl_GlobalInvocationID.xyz );
 
     if( globalUniform.volumeEnableType != VOLUME_ENABLE_VOLUMETRIC )
     {

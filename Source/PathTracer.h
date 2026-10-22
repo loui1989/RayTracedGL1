@@ -82,19 +82,19 @@ public:
     void TraceIndirectllumination(const TraceParams &params);
     void TraceVolumetric( const TraceParams& params );
 
-    // macOS: if set, called after every vkCmdTraceRaysKHR with the current command buffer;
-    // must submit it and return a fresh one (works around state corruption in the
-    // experimental MoltenVK ray tracing for the rest of a command buffer)
+    // macOS: if set, called after every path tracing pass with the current command buffer;
+    // must submit it and return a fresh one (worked around state corruption after
+    // vkCmdTraceRaysKHR in the experimental MoltenVK ray tracing; optional with ray queries)
     void SetCommandBufferSplitter( std::function< VkCommandBuffer( VkCommandBuffer ) > fn ) { splitter = std::move( fn ); }
 
 private:
     void TraceRays(
         VkCommandBuffer cmd,
-        uint32_t sbtRayGenIndex,
+        uint32_t passIndex,
         uint32_t width, uint32_t height, uint32_t depth = 1);
     void TraceRaysSplit(
         const TraceParams &params,
-        uint32_t sbtRayGenIndex,
+        uint32_t passIndex,
         uint32_t width, uint32_t height, uint32_t depth = 1);
 
 private:

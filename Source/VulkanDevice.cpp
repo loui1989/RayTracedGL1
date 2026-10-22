@@ -673,14 +673,22 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         portalList->SubmitForFrame(cmd, frameIndex);
 
 #ifdef __APPLE__
-        // macOS (MoltenVK): after a ray tracing dispatch, later commands in the same
-        // command buffer may read wrong push constants, so continue each pass in a
-        // fresh command buffer
-        pathTracer->SetCommandBufferSplitter( [ this, &cmd ]( VkCommandBuffer old ) {
-            cmdManager->Submit( old );
-            cmd = cmdManager->StartGraphicsCmd();
-            return cmd;
-        } );
+        // macOS (MoltenVK): after a vkCmdTraceRaysKHR dispatch, later commands in the same
+        // command buffer could read wrong push constants, so each pass was continued in a
+        // fresh command buffer. The path tracer now uses ray queries in ordinary compute
+        // shaders, so this is off by default; RTGL1_SPLIT_CMD=1 turns it back on.
+        static const bool splitCmd = [] {
+            const char* e = getenv( "RTGL1_SPLIT_CMD" );
+            return e && e[ 0 ] == '1';
+        }();
+        if( splitCmd )
+        {
+            pathTracer->SetCommandBufferSplitter( [ this, &cmd ]( VkCommandBuffer old ) {
+                cmdManager->Submit( old );
+                cmd = cmdManager->StartGraphicsCmd();
+                return cmd;
+            } );
+        }
 #endif
         const auto params = pathTracer->Bind( cmd,
                                               frameIndex,

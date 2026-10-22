@@ -1,4 +1,4 @@
-// Copyright (c) 2021 Sultim Tsyrendashiev
+// Copyright (c) 2022 Sultim Tsyrendashiev
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,13 +19,33 @@
 // SOFTWARE.
 
 #version 460
-#extension GL_EXT_ray_tracing : require
 
-#include "ShaderCommonGLSLFunc.h"
+// don't need albedo for direct illumination
+#define MATERIAL_MAX_ALBEDO_LAYERS 0
 
-layout(location = PAYLOAD_INDEX_SHADOW) rayPayloadInEXT ShPayloadShadow payloadShadow;
+#define DESC_SET_TLAS 0
+#define DESC_SET_FRAMEBUFFERS 1
+#define DESC_SET_GLOBAL_UNIFORM 2
+#define DESC_SET_VERTEX_DATA 3
+#define DESC_SET_TEXTURES 4
+#define DESC_SET_RANDOM 5
+#define DESC_SET_LIGHT_SOURCES 6
+#define LIGHT_SAMPLE_METHOD (LIGHT_SAMPLE_METHOD_INITIAL)
+#include "RaygenCommon.h"
 
 void main()
 {
-    payloadShadow.isShadowed = 0;
+    RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
+    const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    const uint seed = getRandomSeed(pix, globalUniform.frameId);
+    const Surface surf = fetchGbufferSurface(pix);
+
+    if (surf.isSky)
+    {
+        imageStoreReservoirInitial(emptyReservoir(), pix);
+        return;
+    }
+
+    Reservoir normalizedInitial = calcInitialReservoir(seed, RANDOM_SALT_INITIAL_RESERVOIRS_BASE, surf, getLightPointRnd(seed));
+    imageStoreReservoirInitial(normalizedInitial, pix);
 }

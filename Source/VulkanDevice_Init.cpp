@@ -593,9 +593,15 @@ void VulkanDevice::CreateDevice()
     rtPipelineFeatures.pNext = &sync2Features;
     rtPipelineFeatures.rayTracingPipeline = 1;
 
+    // the path tracer casts rays with ray queries from compute shaders
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.pNext = &rtPipelineFeatures;
+    rayQueryFeatures.rayQuery = 1;
+
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures = {};
     asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-    asFeatures.pNext = &rtPipelineFeatures;
+    asFeatures.pNext = &rayQueryFeatures;
     asFeatures.accelerationStructure = 1;
 
     VkPhysicalDeviceFeatures2 physicalDeviceFeatures2 = {};
@@ -612,7 +618,8 @@ void VulkanDevice::CreateDevice()
         VkPhysicalDevice16BitStorageFeatures s16 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES, &sMv };
         VkPhysicalDeviceSynchronization2FeaturesKHR sSync2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR, &s16 };
         VkPhysicalDeviceRayTracingPipelineFeaturesKHR sRt = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR, &sSync2 };
-        VkPhysicalDeviceAccelerationStructureFeaturesKHR sAs = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, &sRt };
+        VkPhysicalDeviceRayQueryFeaturesKHR sRq = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, &sRt };
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR sAs = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, &sRq };
         VkPhysicalDeviceFeatures2 sF2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &sAs };
         vkGetPhysicalDeviceFeatures2(physDevice->Get(), &sF2);
 
@@ -639,7 +646,14 @@ void VulkanDevice::CreateDevice()
         RG_MASK_STRUCT("Sync2", sync2Features, sSync2, synchronization2);
         RG_MASK_STRUCT("RayTracingPipeline", rtPipelineFeatures, sRt, rayTracingPipeline);
         RG_MASK_STRUCT("AccelerationStructure", asFeatures, sAs, accelerationStructure);
+        RG_MASK_STRUCT("RayQuery", rayQueryFeatures, sRq, rayQuery);
         #undef RG_MASK_STRUCT
+
+        if (!sRq.rayQuery)
+        {
+            userPrint->Print("RTGL1/macOS: ray queries are NOT reported by MoltenVK - "
+                             "the path tracer needs them");
+        }
 
         if (!sRt.rayTracingPipeline || !sAs.accelerationStructure)
         {
@@ -664,6 +678,7 @@ void VulkanDevice::CreateDevice()
         VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME,
         VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
         VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME,
     };

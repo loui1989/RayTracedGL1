@@ -74,6 +74,14 @@ inline void VK_CHECKERROR(const VkResult r)
 }
 
 
+// Pipeline stages in which the path tracer reads/writes resources: its passes are
+// compute shaders with ray queries (formerly ray tracing shaders)
+#define RG_STAGE_PATH_TRACER \
+    ( VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT )
+#define RG_STAGE2_PATH_TRACER \
+    ( VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT )
+
+
 #define SET_DEBUG_NAME(device, obj, type, pName) AddDebugName((device), reinterpret_cast<uint64_t>(obj), (type), (pName))
 
 

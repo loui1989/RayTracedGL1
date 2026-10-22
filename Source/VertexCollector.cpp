@@ -633,7 +633,7 @@ bool RTGL1::VertexCollector::RecopyTexCoordsFromStaging( VkCommandBuffer cmd )
 
     vkCmdPipelineBarrier( cmd,
                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                          VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                          RG_STAGE_PATH_TRACER,
                           0,
                           0,
                           nullptr,
@@ -916,7 +916,7 @@ void VertexCollector::InsertVertexPreprocessFinishBarrier( VkCommandBuffer cmd )
     vkCmdPipelineBarrier( cmd,
                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                           VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                              VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                              RG_STAGE_PATH_TRACER,
                           0,
                           0,
                           nullptr,

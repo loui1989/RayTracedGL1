@@ -21,6 +21,7 @@
 #include "PathTracer.h"
 #include "Generated/ShaderCommonC.h"
 #include "CmdLabel.h"
+#include "Utils.h"
 
 using namespace RTGL1;
 
@@ -43,8 +44,6 @@ PathTracer::TraceParams PathTracer::Bind( VkCommandBuffer                  cmd,
                                           const PortalList*                portalList,
                                           const Volumetric*                volumetric )
 {
-    rtPipeline->Bind(cmd);
-
     VkDescriptorSet sets[] = {
         // ray tracing acceleration structures
         scene->GetASManager()->GetTLASDescSet(frameIndex),
@@ -72,15 +71,8 @@ PathTracer::TraceParams PathTracer::Bind( VkCommandBuffer                  cmd,
         volumetric->GetDescSet(frameIndex),
     };
 
-    vkCmdBindDescriptorSets( cmd,
-                             VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-                             rtPipeline->GetLayout(),
-                             0,
-                             std::size( sets ),
-                             sets,
-                             0,
-                             nullptr );
-
+    // bound before each pass in TraceRaysSplit, as other compute passes
+    // (e.g. decals, light grid) can replace compute descriptor sets in between
     static_assert( sizeof( sets ) <= sizeof( boundSets ) );
     boundSetCount = static_cast< uint32_t >( std::size( sets ) );
     std::copy( std::begin( sets ), std::end( sets ), boundSets );
@@ -96,34 +88,33 @@ PathTracer::TraceParams PathTracer::Bind( VkCommandBuffer                  cmd,
     return p;
 }
 
-void PathTracer::TraceRays(VkCommandBuffer cmd, uint32_t sbtRayGenIndex, uint32_t width, uint32_t height, uint32_t depth)
+void PathTracer::TraceRays( VkCommandBuffer cmd, uint32_t passIndex, uint32_t width, uint32_t height, uint32_t depth )
 {
-    VkStridedDeviceAddressRegionKHR raygenEntry, missEntry, hitEntry, callableEntry;
-    rtPipeline->GetEntries(sbtRayGenIndex, raygenEntry, missEntry, hitEntry, callableEntry);
+    rtPipeline->BindPass( cmd, passIndex );
+    vkCmdBindDescriptorSets( cmd,
+                             VK_PIPELINE_BIND_POINT_COMPUTE,
+                             rtPipeline->GetLayout(),
+                             0,
+                             boundSetCount,
+                             boundSets,
+                             0,
+                             nullptr );
 
-    svkCmdTraceRaysKHR(
-        cmd,
-        &raygenEntry, &missEntry, &hitEntry, &callableEntry,
-        width, height, depth);
+    // one compute thread per ray-generation invocation; the shaders
+    // return early for threads outside of width x height
+    vkCmdDispatch( cmd,
+                   Utils::GetWorkGroupCount( width, RayTracingPipeline::GROUP_SIZE_X ),
+                   Utils::GetWorkGroupCount( height, RayTracingPipeline::GROUP_SIZE_Y ),
+                   depth );
 }
 
-void PathTracer::TraceRaysSplit(const TraceParams &params, uint32_t sbtRayGenIndex, uint32_t width, uint32_t height, uint32_t depth)
+void PathTracer::TraceRaysSplit(const TraceParams &params, uint32_t passIndex, uint32_t width, uint32_t height, uint32_t depth)
 {
-    TraceRays(params.cmd, sbtRayGenIndex, width, height, depth);
+    TraceRays(params.cmd, passIndex, width, height, depth);
 
     if (splitter)
     {
         params.cmd = splitter(params.cmd);
-
-        rtPipeline->Bind(params.cmd);
-        vkCmdBindDescriptorSets( params.cmd,
-                                 VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-                                 rtPipeline->GetLayout(),
-                                 0,
-                                 boundSetCount,
-                                 boundSets,
-                                 0,
-                                 nullptr );
     }
 }
 

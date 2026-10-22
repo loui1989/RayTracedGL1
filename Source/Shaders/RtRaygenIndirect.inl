@@ -216,7 +216,8 @@ float getDiffuseWeight( float roughness )
 #ifdef RT_RAYGEN_INDIRECT_INIT
 void main()
 {
-    const ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
+    RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
+    const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
     const uint seed = getRandomSeed(pix, globalUniform.frameId);
     uint salt = RANDOM_SALT_RESAMPLE_INDIRECT_BASE;
 
@@ -252,7 +253,8 @@ ReservoirIndirect loadInitialSampleAsReservoir( const ivec2 pix )
 
 void main()
 {
-    const ivec2 pix  = ivec2( gl_LaunchIDEXT.xy );
+    RAYGEN_RETURN_IF_OUTSIDE( uint( globalUniform.renderWidth ), uint( globalUniform.renderHeight ), 1 );
+    const ivec2 pix  = ivec2( gl_GlobalInvocationID.xy );
     const uint  seed = getRandomSeed( pix, globalUniform.frameId );
     uint        salt = RANDOM_SALT_RESAMPLE_INDIRECT_BASE;
 

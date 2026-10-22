@@ -21,7 +21,19 @@
 #ifndef RAYGEN_COMMON_H_
 #define RAYGEN_COMMON_H_
 
-#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_ray_query : require
+
+// The path tracer's ray generation stages run as compute shaders, casting rays
+// with ray queries (portable to Metal's intersector) instead of a ray tracing
+// pipeline. One invocation = one former launch ID.
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+#define RAYGEN_RETURN_IF_OUTSIDE( w, h, d )                                   \
+    if( gl_GlobalInvocationID.x >= ( w ) || gl_GlobalInvocationID.y >= ( h ) || \
+        gl_GlobalInvocationID.z >= ( d ) )                                    \
+    {                                                                         \
+        return;                                                               \
+    }
 
 
 
@@ -91,11 +103,86 @@ layout(set = DESC_SET_PORTALS, binding = BINDING_PORTAL_INSTANCES) uniform reado
 #endif
 
 
-layout(location = PAYLOAD_INDEX_DEFAULT) rayPayloadEXT ShPayload g_payload;
+// Former any-hit shader (RtAlphaTest.rahit): alpha-tested geometry is skipped where
+// its first albedo layer is transparent enough.
+#define ALPHA_THRESHOLD 0.5
 
-#if LIGHT_SAMPLE_METHOD != LIGHT_SAMPLE_METHOD_NONE
-layout(location = PAYLOAD_INDEX_SHADOW) rayPayloadEXT ShPayloadShadow g_payloadShadow;
-#endif
+bool isCandidateAlphaTestPassed( int instanceId, int instanceCustomIndex, int geometryIndex, int primitiveId, vec2 inBaryCoords )
+{
+    const ShTriangle tr = getTriangle( instanceId, instanceCustomIndex, geometryIndex, primitiveId );
+
+    const vec3 baryCoords = vec3( 1.0f - inBaryCoords.x - inBaryCoords.y, inBaryCoords.x, inBaryCoords.y );
+    const vec2 texCoord   = tr.layerTexCoord[ 0 ] * baryCoords;
+
+    // check only first material's albedo
+    const vec4 color = getTextureSample( tr.materials[ 0 ][ MATERIAL_ALBEDO_ALPHA_INDEX ], texCoord ) * tr.materialColors[ 0 ];
+
+    return ( color.r + color.g + color.b ) / 3 * color.a + color.a >= ALPHA_THRESHOLD;
+}
+
+// Former closest-hit (RtClsOpaque.rchit) and miss (RtMiss.rmiss) shaders: the nearest
+// accepted triangle, or an empty payload.
+ShPayload traceRayQuery( uint rayFlags, uint cullMask, vec3 origin, float tMin, vec3 direction, float tMax )
+{
+    ShPayload p;
+    p.baryCoords       = vec2( 0.0 );
+    p.instIdAndIndex   = UINT32_MAX;
+    p.geomAndPrimIndex = UINT32_MAX;
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT( rq, topLevelAS, rayFlags, cullMask & 0xFF, origin, tMin, direction, tMax );
+
+    while( rayQueryProceedEXT( rq ) )
+    {
+        if( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT )
+        {
+            // only alpha-tested instances are non-opaque (ASManager sets FORCE_NO_OPAQUE
+            // on them and FORCE_OPAQUE on all others), so every candidate needs the test
+            if( isCandidateAlphaTestPassed( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
+                                            rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ),
+                                            rayQueryGetIntersectionGeometryIndexEXT( rq, false ),
+                                            rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ),
+                                            rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) )
+            {
+                rayQueryConfirmIntersectionEXT( rq );
+            }
+        }
+    }
+
+    if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+    {
+        p.baryCoords       = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+        p.instIdAndIndex   = packInstanceIdAndCustomIndex( rayQueryGetIntersectionInstanceIdEXT( rq, true ),
+                                                         rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+        p.geomAndPrimIndex = packGeometryAndPrimitiveIndex( rayQueryGetIntersectionGeometryIndexEXT( rq, true ),
+                                                            rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+    }
+    return p;
+}
+
+// Former shadow ray (miss shader RtMissShadowCheck.rmiss): true if anything is hit.
+bool traceRayQueryAnyHit( uint rayFlags, uint cullMask, vec3 origin, float tMin, vec3 direction, float tMax )
+{
+    rayQueryEXT rq;
+    rayQueryInitializeEXT( rq, topLevelAS, rayFlags | gl_RayFlagsTerminateOnFirstHitEXT, cullMask & 0xFF, origin, tMin, direction, tMax );
+
+    while( rayQueryProceedEXT( rq ) )
+    {
+        if( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT )
+        {
+            if( isCandidateAlphaTestPassed( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
+                                            rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ),
+                                            rayQueryGetIntersectionGeometryIndexEXT( rq, false ),
+                                            rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ),
+                                            rayQueryGetIntersectionBarycentricsEXT( rq, false ) ) )
+            {
+                rayQueryConfirmIntersectionEXT( rq );
+            }
+        }
+    }
+
+    return rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
 
 
 
@@ -202,65 +289,25 @@ bool doesPayloadContainHitInfo(const ShPayload p)
     return true;
 }
 
-void resetPayload()
-{
-    g_payload.baryCoords = vec2(0.0);
-    g_payload.instIdAndIndex = UINT32_MAX;
-    g_payload.geomAndPrimIndex = UINT32_MAX;
-}
-
 ShPayload tracePrimaryRay(vec3 origin, vec3 direction)
 {
-    resetPayload();
-
-    uint cullMask = getPrimaryVisibilityCullMask();
-
-    traceRayEXT(
-        topLevelAS,
-        getAdditionalRayFlags(), 
-        cullMask, 
-        0, 0,     // sbtRecordOffset, sbtRecordStride
-        SBT_INDEX_MISS_DEFAULT, 
-        origin, globalUniform.primaryRayMinDist, direction, globalUniform.rayLength, 
-        PAYLOAD_INDEX_DEFAULT);
-
-    return g_payload; 
+    return traceRayQuery( getAdditionalRayFlags(),
+                          getPrimaryVisibilityCullMask(),
+                          origin, globalUniform.primaryRayMinDist, direction, globalUniform.rayLength );
 }
 
 ShPayload traceReflectionRefractionRay(vec3 origin, vec3 direction, uint surfInstCustomIndex, uint geometryInstanceFlags, bool isRefraction)
 {
-    resetPayload();
-
-    uint cullMask = getReflectionRefractionCullMask(surfInstCustomIndex, geometryInstanceFlags, isRefraction);
-
-    traceRayEXT(
-        topLevelAS,
-        getAdditionalRayFlags(), 
-        cullMask, 
-        0, 0,     // sbtRecordOffset, sbtRecordStride
-        SBT_INDEX_MISS_DEFAULT, 
-        origin, 0.001, direction, globalUniform.rayLength, 
-        PAYLOAD_INDEX_DEFAULT);
-
-    return g_payload; 
+    return traceRayQuery( getAdditionalRayFlags(),
+                          getReflectionRefractionCullMask( surfInstCustomIndex, geometryInstanceFlags, isRefraction ),
+                          origin, 0.001, direction, globalUniform.rayLength );
 }
 
 ShPayload traceIndirectRay(uint surfInstCustomIndex, vec3 surfPosition, vec3 bounceDirection)
 {
-    resetPayload();
-
-    uint cullMask = getIndirectIlluminationCullMask(surfInstCustomIndex);
-
-    traceRayEXT(
-        topLevelAS,
-        getAdditionalRayFlags(), 
-        cullMask, 
-        0, 0,     // sbtRecordOffset, sbtRecordStride
-        SBT_INDEX_MISS_DEFAULT, 
-        surfPosition, 0.001, bounceDirection, globalUniform.rayLength, 
-        PAYLOAD_INDEX_DEFAULT); 
-
-    return g_payload;
+    return traceRayQuery( getAdditionalRayFlags(),
+                          getIndirectIlluminationCullMask( surfInstCustomIndex ),
+                          surfPosition, 0.001, bounceDirection, globalUniform.rayLength );
 }
 
 
@@ -306,9 +353,6 @@ vec3 getSky(vec3 direction)
 
 bool traceShadowRay(uint surfInstCustomIndex, vec3 start, vec3 end, bool ignoreFirstPersonViewer /* = false */)
 {
-    // prepare shadow payload
-    g_payloadShadow.isShadowed = 1;  
-
     uint cullMask = getShadowCullMask(surfInstCustomIndex);
 
     if (ignoreFirstPersonViewer)
@@ -320,16 +364,7 @@ bool traceShadowRay(uint surfInstCustomIndex, vec3 start, vec3 end, bool ignoreF
     float maxDistance = length(l);
     l /= maxDistance;
 
-    traceRayEXT(
-        topLevelAS, 
-        gl_RayFlagsSkipClosestHitShaderEXT | getAdditionalRayFlags(), 
-        cullMask, 
-        0, 0, 	// sbtRecordOffset, sbtRecordStride
-        SBT_INDEX_MISS_SHADOW, 		// shadow missIndex
-        start, 0.001, l, maxDistance - SHADOW_RAY_EPS, 
-        PAYLOAD_INDEX_SHADOW);
-
-    return g_payloadShadow.isShadowed == 1;
+    return traceRayQueryAnyHit( getAdditionalRayFlags(), cullMask, start, 0.001, l, maxDistance - SHADOW_RAY_EPS );
 }
 
 float traceVisibility(const Surface surf, const vec3 lightPosition, uint lightIndex)

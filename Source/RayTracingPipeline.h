@@ -34,6 +34,10 @@
 namespace RTGL1
 {
 
+// The path tracer's passes. Rays are cast with ray queries (GL_EXT_ray_query) from
+// ordinary compute shaders - the model Metal uses natively - instead of a Vulkan ray
+// tracing pipeline with a shader binding table. One compute pipeline per pass; all
+// share one pipeline layout. Indices are the former SBT_INDEX_RAYGEN_* values.
 class RayTracingPipeline : public IShaderDependency
 {
 public:
@@ -59,36 +63,24 @@ public:
     RayTracingPipeline& operator=(const RayTracingPipeline& other) = delete;
     RayTracingPipeline& operator=(RayTracingPipeline&& other) noexcept = delete;
 
-    void Bind(VkCommandBuffer cmd);
-
-    void GetEntries(uint32_t sbtRayGenIndex,
-                    VkStridedDeviceAddressRegionKHR &raygenEntry,
-                    VkStridedDeviceAddressRegionKHR &missEntry,
-                    VkStridedDeviceAddressRegionKHR &hitEntry,
-                    VkStridedDeviceAddressRegionKHR &callableEntry) const;
+    // pass index is one of SBT_INDEX_RAYGEN_*
+    void BindPass( VkCommandBuffer cmd, uint32_t passIndex ) const;
     VkPipelineLayout GetLayout() const;
-    
+
+    // compute workgroup size of the passes (must match RaygenCommon.h)
+    static constexpr uint32_t GROUP_SIZE_X = 8;
+    static constexpr uint32_t GROUP_SIZE_Y = 8;
+
     void OnShaderReload(const ShaderManager *shaderManager) override;
 
 private:
     void CreatePipelineLayout(const VkDescriptorSetLayout *pSetLayouts, uint32_t setLayoutCount);
 
-    void CreatePipeline(const ShaderManager *shaderManager);
-    void DestroyPipeline();
-    void CreateSBT();
-    void DestroySBT();
-
-    void AddGeneralGroup(uint32_t generalIndex);
-
-    void AddRayGenGroup(uint32_t raygenIndex);
-    void AddMissGroup(uint32_t missIndex);
-    void AddHitGroup(uint32_t closestHitIndex);
-    void AddHitGroupOnlyAny(uint32_t anyHitIndex);
-    void AddHitGroup(uint32_t closestHitIndex, uint32_t anyHitIndex);
-    void AddHitGroup(uint32_t closestHitIndex, uint32_t anyHitIndex, uint32_t intersectionIndex);
+    void CreatePipelines(const ShaderManager *shaderManager);
+    void DestroyPipelines();
 
 private:
-    struct ShaderStageInfo
+    struct PassInfo
     {
         const char *pName;
         // One uint specialization const to use in the shader. Can be null.
@@ -96,26 +88,14 @@ private:
         uint32_t *pSpecConst;
     };
 
+    static constexpr uint32_t PASS_COUNT = 8;
+
 private:
     VkDevice device;
-    std::shared_ptr<PhysicalDevice> physDevice;
 
-    std::vector<ShaderStageInfo> shaderStageInfos;
-
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups;
-    VkPipelineLayout rtPipelineLayout;
-    VkPipeline rtPipeline;
-
-    std::shared_ptr<AutoBuffer> shaderBindingTable;
-    bool copySBTFromStaging;
-
-    uint32_t groupBaseAlignment;
-    uint32_t handleSize;
-    uint32_t alignedHandleSize;
-
-    uint32_t raygenShaderCount;
-    uint32_t hitGroupCount;
-    uint32_t missShaderCount;
+    PassInfo         passes[ PASS_COUNT ];
+    VkPipeline       pipelines[ PASS_COUNT ];
+    VkPipelineLayout pipelineLayout;
 
     uint32_t primaryRaysMaxAlbedoLayers;
     uint32_t indirectIlluminationMaxAlbedoLayers;

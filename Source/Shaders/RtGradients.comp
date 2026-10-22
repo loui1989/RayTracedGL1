@@ -42,7 +42,7 @@
 
 void main()
 {
-    const ivec2 gradPix = ivec2(gl_LaunchIDEXT.xy);
+    const ivec2 gradPix = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 screenSize = ivec2(globalUniform.renderWidth, globalUniform.renderHeight);
 
     if (gradPix.x * COMPUTE_ASVGF_STRATA_SIZE >= screenSize.x || gradPix.y * COMPUTE_ASVGF_STRATA_SIZE >= screenSize.y)
