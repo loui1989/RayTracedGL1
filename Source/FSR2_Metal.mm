@@ -21,6 +21,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
 
 #include "Common.h"
 #include "Framebuffers.h"
@@ -47,6 +48,18 @@ struct MfxState
     id< MTLTexture >          depthTex = nil;
     id< MTLTexture >          motionTex = nil;
     id< MTLTexture >          outTex   = nil;
+
+    // frame interpolation (macOS 26+), id<MTLFXFrameInterpolator>
+    id                            fgInterp  = nil;
+    id< MTLComputePipelineState > fgCopyPipe = nil;
+    id< MTLTexture >              fgCur     = nil; // this frame, before the HUD
+    id< MTLTexture >              fgPrev    = nil; // previous frame
+    id< MTLTexture >              fgOut     = nil; // generated frame
+    bool                          fgHasPrev = false;
+    bool                          fgAppliedThisFrame      = false;
+    bool                          fgInterpolatedThisFrame = false;
+    RgFloat2D                     fgJitter  = {};
+    float                         fgDt = 0, fgNear = 0, fgFar = 0, fgFovY = 0;
 
     uint32_t renderW = 0, renderH = 0, outW = 0, outH = 0;
     bool     reset          = true;
@@ -136,6 +149,17 @@ kernel void mfx_copy_out( texture2d< float, access::read >  src [[texture(0)]],
     }
     dst.write( float4( c, 1.0 ), gid );
 }
+
+// plain copy between textures of the same size (any float formats)
+kernel void mfx_copy( texture2d< float, access::read >  src [[texture(0)]],
+                      texture2d< float, access::write > dst [[texture(1)]],
+                      uint2 gid [[thread_position_in_grid]] )
+{
+    if( gid.x >= dst.get_width() || gid.y >= dst.get_height() )
+        return;
+    float3 c = ( gid.x < src.get_width() && gid.y < src.get_height() ) ? src.read( gid ).rgb : float3( 0.0 );
+    dst.write( float4( c, 1.0 ), gid );
+}
 )";
 
 bool InitDevice( VkDevice vkDevice, VkQueue vkQueue )
@@ -207,7 +231,9 @@ bool InitDevice( VkDevice vkDevice, VkQueue vkQueue )
 
     g.copyPipe = [g.device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfx_copy_out"]
                                                          error:&err];
-    if( !g.prepPipe || !g.copyPipe || !g.depthAlways )
+    g.fgCopyPipe = [g.device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"mfx_copy"]
+                                                           error:&err];
+    if( !g.prepPipe || !g.copyPipe || !g.fgCopyPipe || !g.depthAlways )
     {
         fprintf( stderr, "[MetalFX] pipeline creation failed: %s\n", err ? err.localizedDescription.UTF8String : "?" );
         return false;
@@ -236,6 +262,11 @@ void ReleaseScaler()
     g.depthTex = nil;
     g.motionTex = nil;
     g.outTex   = nil;
+    g.fgInterp = nil;
+    g.fgCur    = nil;
+    g.fgPrev   = nil;
+    g.fgOut    = nil;
+    g.fgHasPrev = false;
     g.renderW = g.renderH = g.outW = g.outH = 0;
 }
 
@@ -265,6 +296,37 @@ bool EnsureScaler( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
         return false;
     }
 
+    // optional frame interpolator; its texture usage requirements are added below
+    MTLTextureUsage fgColorUsage = 0, fgOutUsage = 0, fgDepthUsage = 0, fgMotionUsage = 0;
+    if( RTGL1::FSR2::IsFrameGenRequested() )
+    {
+        if( @available( macOS 26.0, * ) )
+        {
+            MTLFXFrameInterpolatorDescriptor* fd = [MTLFXFrameInterpolatorDescriptor new];
+            fd.colorTextureFormat                = MTLPixelFormatRGBA16Float;
+            fd.outputTextureFormat               = MTLPixelFormatRGBA16Float;
+            fd.depthTextureFormat                = MTLPixelFormatDepth32Float;
+            fd.motionTextureFormat               = MTLPixelFormatRG16Float;
+            fd.inputWidth                        = rw; // depth and motion: render size
+            fd.inputHeight                       = rh;
+            fd.outputWidth                       = ow; // colour: upscaled size
+            fd.outputHeight                      = oh;
+            id< MTLFXFrameInterpolator > fi      = [fd newFrameInterpolatorWithDevice:g.device];
+            if( fi )
+            {
+                g.fgInterp    = fi;
+                fgColorUsage  = fi.colorTextureUsage;
+                fgOutUsage    = fi.outputTextureUsage;
+                fgDepthUsage  = fi.depthTextureUsage;
+                fgMotionUsage = fi.motionTextureUsage;
+            }
+            else
+            {
+                fprintf( stderr, "[MetalFX] can't create a %ux%u -> %ux%u frame interpolator\n", rw, rh, ow, oh );
+            }
+        }
+    }
+
     auto makeTex = [ & ]( MTLPixelFormat fmt, uint32_t w, uint32_t h, MTLTextureUsage usage ) {
         MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
                                                                                        width:w
@@ -277,11 +339,29 @@ bool EnsureScaler( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
     g.colorTex = makeTex( MTLPixelFormatRGBA16Float, rw, rh,
                           g.scaler.colorTextureUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead );
     g.depthTex = makeTex( MTLPixelFormatDepth32Float, rw, rh,
-                          g.scaler.depthTextureUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead );
+                          g.scaler.depthTextureUsage | fgDepthUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead );
     g.motionTex = makeTex( MTLPixelFormatRG16Float, rw, rh,
-                           g.scaler.motionTextureUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead );
+                           g.scaler.motionTextureUsage | fgMotionUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead );
     g.outTex   = makeTex( MTLPixelFormatRGBA16Float, ow, oh,
                           g.scaler.outputTextureUsage | MTLTextureUsageShaderRead );
+    if( g.fgInterp )
+    {
+        const MTLTextureUsage colorUsage = fgColorUsage | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        g.fgCur  = makeTex( MTLPixelFormatRGBA16Float, ow, oh, colorUsage );
+        g.fgPrev = makeTex( MTLPixelFormatRGBA16Float, ow, oh, colorUsage );
+        g.fgOut  = makeTex( MTLPixelFormatRGBA16Float, ow, oh, fgOutUsage | MTLTextureUsageShaderRead );
+        if( !g.fgCur || !g.fgPrev || !g.fgOut )
+        {
+            Log( "frame interpolation textures couldn't be allocated, frame generation is off" );
+            g.fgInterp = nil;
+            g.fgCur = g.fgPrev = g.fgOut = nil;
+        }
+        else
+        {
+            fprintf( stderr, "[MetalFX] frame interpolation on (%ux%u)\n", ow, oh );
+        }
+        g.fgHasPrev = false;
+    }
     if( !g.colorTex || !g.depthTex || !g.motionTex || !g.outTex )
     {
         Log( "texture allocation failed" );
@@ -312,6 +392,7 @@ RTGL1::FSR2::~FSR2()
         ReleaseScaler();
         g.prepPipe    = nil;
         g.copyPipe    = nil;
+        g.fgCopyPipe  = nil;
         g.depthAlways = nil;
         g.queue       = nil;
         g.device      = nil;
@@ -420,8 +501,20 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
             g.scaler.depthReversed      = NO;
             g.scaler.reset              = g.reset;
             [g.scaler encodeToCommandBuffer:cb];
+            if( g.reset )
+            {
+                g.fgHasPrev = false; // the previous frame doesn't match any more
+            }
             g.reset = false;
         }
+
+        // inputs for frame interpolation later in this frame
+        g.fgAppliedThisFrame = true;
+        g.fgJitter           = jitterOffset;
+        g.fgDt               = timeDelta;
+        g.fgNear             = nearPlane;
+        g.fgFar              = farPlane;
+        g.fgFovY             = fovVerticalRad;
 
         // 3. copy the result into RTGL1's upscaled framebuffer
         {
@@ -441,6 +534,142 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer                
     }
 
     return FI::FB_IMAGE_INDEX_UPSCALED_PONG;
+}
+
+namespace
+{
+void EncodeCopy( id< MTLCommandBuffer > cb, id< MTLTexture > src, id< MTLTexture > dst, uint32_t w, uint32_t h )
+{
+    id< MTLComputeCommandEncoder > enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:g.fgCopyPipe];
+    [enc setTexture:src atIndex:0];
+    [enc setTexture:dst atIndex:1];
+    [enc dispatchThreads:MTLSizeMake( w, h, 1 ) threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
+    [enc endEncoding];
+}
+}
+
+bool RTGL1::FSR2::IsFrameGenRequested()
+{
+    static int requested = -1;
+    if( requested < 0 )
+    {
+        const char* v = getenv( "RTGL1_FRAMEGEN" );
+        requested     = 0;
+        if( v && v[ 0 ] == '1' )
+        {
+            if( @available( macOS 26.0, * ) )
+            {
+                @autoreleasepool
+                {
+                    id< MTLDevice > dev = MTLCreateSystemDefaultDevice();
+                    requested = ( dev && [MTLFXFrameInterpolatorDescriptor supportsDevice:dev] ) ? 1 : 0;
+                }
+            }
+            if( !requested )
+            {
+                Log( "frame generation was requested, but this Mac doesn't support MetalFX frame interpolation" );
+            }
+        }
+    }
+    return requested == 1;
+}
+
+bool RTGL1::FSR2::FrameGenInterpolate( uint32_t                               frameIndex,
+                                       const std::shared_ptr< Framebuffers >& framebuffers,
+                                       FramebufferImageIndex                  accum )
+{
+    g.fgInterpolatedThisFrame = false;
+    if( !g.fgInterp || !g.fgAppliedThisFrame )
+    {
+        return false;
+    }
+
+    @autoreleasepool
+    {
+        id< MTLTexture > accumTex = TextureOf( framebuffers->GetImage( accum, frameIndex ) );
+        if( !accumTex )
+        {
+            return false;
+        }
+
+        // the frame's Vulkan work may still be in flight (see Apply)
+        vkQueueWaitIdle( queue );
+
+        id< MTLCommandBuffer > cb = [g.queue commandBuffer];
+        cb.label                  = @"RTGL1 MetalFX frame interpolation";
+
+        // keep this frame (before the HUD) for later
+        EncodeCopy( cb, accumTex, g.fgCur, g.outW, g.outH );
+
+        if( g.fgHasPrev )
+        {
+            if( @available( macOS 26.0, * ) )
+            {
+                id< MTLFXFrameInterpolator > fi = g.fgInterp;
+                fi.colorTexture                 = g.fgCur;
+                fi.prevColorTexture             = g.fgPrev;
+                fi.depthTexture                 = g.depthTex;
+                fi.motionTexture                = g.motionTex;
+                fi.outputTexture                = g.fgOut;
+                fi.uiTexture                    = nil; // the HUD is drawn afterwards, on both frames
+                fi.motionVectorScaleX           = static_cast< float >( g.renderW );
+                fi.motionVectorScaleY           = static_cast< float >( g.renderH );
+                fi.jitterOffsetX                = -g.fgJitter.data[ 0 ];
+                fi.jitterOffsetY                = -g.fgJitter.data[ 1 ];
+                fi.deltaTime                    = g.fgDt;
+                fi.nearPlane                    = g.fgNear;
+                fi.farPlane                     = g.fgFar;
+                fi.fieldOfView                  = g.fgFovY * 180.0f / 3.14159265f; // degrees
+                fi.aspectRatio                  = static_cast< float >( g.outW ) / static_cast< float >( g.outH );
+                fi.depthReversed                = NO;
+                fi.shouldResetHistory           = NO;
+                [fi encodeToCommandBuffer:cb];
+
+                // the generated frame goes into 'accum', where the HUD is drawn on top
+                EncodeCopy( cb, g.fgOut, accumTex, g.outW, g.outH );
+                g.fgInterpolatedThisFrame = true;
+            }
+        }
+
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+    return g.fgInterpolatedThisFrame;
+}
+
+void RTGL1::FSR2::FrameGenFinish( uint32_t                               frameIndex,
+                                  const std::shared_ptr< Framebuffers >& framebuffers,
+                                  FramebufferImageIndex                  accum )
+{
+    @autoreleasepool
+    {
+        if( g.fgInterpolatedThisFrame )
+        {
+            id< MTLTexture > accumTex = TextureOf( framebuffers->GetImage( accum, frameIndex ) );
+            if( accumTex )
+            {
+                vkQueueWaitIdle( queue );
+                id< MTLCommandBuffer > cb = [g.queue commandBuffer];
+                cb.label                  = @"RTGL1 MetalFX restore frame";
+                EncodeCopy( cb, g.fgCur, accumTex, g.outW, g.outH );
+                [cb commit];
+                [cb waitUntilCompleted];
+            }
+        }
+
+        if( g.fgInterp && g.fgAppliedThisFrame )
+        {
+            std::swap( g.fgCur, g.fgPrev );
+            g.fgHasPrev = true;
+        }
+        else
+        {
+            g.fgHasPrev = false;
+        }
+        g.fgAppliedThisFrame      = false;
+        g.fgInterpolatedThisFrame = false;
+    }
 }
 
 RgFloat2D RTGL1::FSR2::GetJitter( const ResolutionState& resolutionState, uint32_t frameId )

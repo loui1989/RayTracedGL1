@@ -746,6 +746,10 @@ void VulkanDevice::CreateSyncPrimitives()
         VK_CHECKERROR(r);
         r = vkCreateSemaphore(device, &semaphoreInfo, nullptr, &inFrameSemaphores[i]);
         VK_CHECKERROR(r);
+        r = vkCreateSemaphore(device, &semaphoreInfo, nullptr, &frameGenImageAvailableSemaphores[i]);
+        VK_CHECKERROR(r);
+        r = vkCreateSemaphore(device, &semaphoreInfo, nullptr, &frameGenRenderFinishedSemaphores[i]);
+        VK_CHECKERROR(r);
 
         r = vkCreateFence(device, &fenceInfo, nullptr, &frameFences[i]);
         VK_CHECKERROR(r);
@@ -895,6 +899,8 @@ void VulkanDevice::DestroySyncPrimitives()
         vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
         vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
         vkDestroySemaphore(device, inFrameSemaphores[i], nullptr);
+        vkDestroySemaphore(device, frameGenImageAvailableSemaphores[i], nullptr);
+        vkDestroySemaphore(device, frameGenRenderFinishedSemaphores[i], nullptr);
 
         vkDestroyFence(device, frameFences[i], nullptr);
         vkDestroyFence(device, outOfFrameFences[i], nullptr);

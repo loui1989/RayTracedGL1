@@ -47,7 +47,12 @@ VkCommandBuffer VulkanDevice::BeginFrame(const RgStartFrameInfo &startInfo)
         Utils::WaitAndResetFences(device, frameFences[frameIndex], outOfFrameFences[frameIndex]);
     }
 
+#ifdef __APPLE__
+    // frame generation presents two images per frame and relies on vsync to space them out
+    swapchain->RequestVsync(startInfo.requestVSync || FSR2::IsFrameGenRequested());
+#else
     swapchain->RequestVsync(startInfo.requestVSync);
+#endif
     swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
 
     VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
@@ -790,6 +795,38 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     // macOS (MoltenVK): draw the HUD and present from a fresh command buffer,
     // for the same reason as the path tracer's command buffer splitting
     cmdManager->Submit(cmd);
+
+    // MetalFX frame generation (experimental): show a frame generated between the
+    // previous and this one first, with the HUD drawn on top, then this frame
+    if (renderResolution.IsAmdFsr2Enabled() &&
+        amdFsr2->FrameGenInterpolate(frameIndex, framebuffers, accum))
+    {
+        cmd = cmdManager->StartGraphicsCmd();
+        if (!drawInfo.disableRasterization)
+        {
+            rasterizer->DrawToSwapchain( cmd,
+                                         frameIndex,
+                                         accum,
+                                         textureManager,
+                                         uniform->GetData()->view,
+                                         uniform->GetData()->projection,
+                                         renderResolution.UpscaledWidth(),
+                                         renderResolution.UpscaledHeight() );
+        }
+        framebuffers->PresentToSwapchain(cmd, frameIndex, swapchain, accum, VK_FILTER_NEAREST);
+        cmdManager->Submit(cmd,
+                           currentFrameState.GetSemaphoreForWaitAndRemove(),
+                           VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                           frameGenRenderFinishedSemaphores[frameIndex],
+                           VK_NULL_HANDLE);
+        swapchain->Present(queues, frameGenRenderFinishedSemaphores[frameIndex]);
+
+        // the real frame goes to the next swapchain image
+        swapchain->AcquireImage(frameGenImageAvailableSemaphores[frameIndex]);
+        currentFrameState.SetSemaphore(frameGenImageAvailableSemaphores[frameIndex]);
+    }
+    amdFsr2->FrameGenFinish(frameIndex, framebuffers, accum);
+
     cmd = cmdManager->StartGraphicsCmd();
 #endif
 

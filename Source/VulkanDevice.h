@@ -143,6 +143,9 @@ private:
     VkSemaphore         imageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
     VkSemaphore         renderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
     VkSemaphore         inFrameSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
+    // macOS frame generation: the generated frame's present
+    VkSemaphore         frameGenImageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
+    VkSemaphore         frameGenRenderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
 
     bool                waitForOutOfFrameFence;
     VkFence             outOfFrameFences[MAX_FRAMES_IN_FLIGHT] = {};

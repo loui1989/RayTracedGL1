@@ -55,6 +55,20 @@ namespace RTGL1
         static bool IsFsr2Available();
         // macOS (MetalFX): the queue RTGL1 submits to
         void SetQueue(VkQueue q) { queue = q; }
+#ifdef __APPLE__
+        // MetalFX frame interpolation (experimental, macOS 26+): enabled with
+        // RTGL1_FRAMEGEN=1 and only while the MetalFX upscaler is active.
+        static bool IsFrameGenRequested();
+        // Call after the frame (before the HUD) is in 'accum' and all its Vulkan work is
+        // submitted. Saves the frame and, if possible, replaces 'accum' with a frame
+        // generated between the previous and this one. Returns true if it did.
+        bool FrameGenInterpolate(uint32_t frameIndex, const std::shared_ptr<Framebuffers> &framebuffers,
+                                 FramebufferImageIndex accum);
+        // Call after the generated frame was presented (or when FrameGenInterpolate
+        // returned false): puts the real frame back into 'accum'.
+        void FrameGenFinish(uint32_t frameIndex, const std::shared_ptr<Framebuffers> &framebuffers,
+                            FramebufferImageIndex accum);
+#endif
 
     private:
         VkDevice device;
