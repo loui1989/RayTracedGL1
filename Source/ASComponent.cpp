@@ -64,6 +64,9 @@ void RTGL1::ASComponent::Destroy()
 
     if (as != VK_NULL_HANDLE)
     {
+#ifdef __APPLE__
+        Metal::ForgetAccelerationStructure(as);
+#endif
         svkDestroyAccelerationStructureKHR(device, as, nullptr);
         as = VK_NULL_HANDLE;
     }

@@ -29,7 +29,9 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <atomic>
 #include <cstdarg>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -166,10 +168,11 @@ struct State
     id< MTLSharedEvent >  event;
     VkSemaphore           semaphore = VK_NULL_HANDLE;
     uint64_t              timeline  = 0;
-    id< MTLFence >        fence;
+    id< MTLFence >        blasFence; // bottom level builds -> top level builds
+    id< MTLFence >        fence;     // acceleration structure builds -> path tracing
 
-    id                         residency; // id<MTLResidencySet>, macOS 15+
-    std::unordered_set< void* > resident;
+    id                                    residency; // id<MTLResidencySet>, macOS 15+
+    std::unordered_map< void*, uint32_t > resident;  // reference counts (views can share a texture)
     bool                       residencyDirty = false;
 
     std::unordered_map< VkAccelerationStructureKHR, MtlAS >     as;
@@ -178,11 +181,12 @@ struct State
     std::vector< BlasBuild >                                    pendingBlas;
     std::vector< TlasBuild >                                    pendingTlas;
     id< MTLBuffer >                                             scratch;
+    id< MTLAccelerationStructure >                              dummyBlas;
 
     id< MTLCommandBuffer >         cb;
     id< MTLComputeCommandEncoder > encoder;
     id< MTLCommandBuffer >         lastCb;
-    uint32_t                       loggedErrors = 0;
+    std::atomic< uint32_t >        loggedErrors{ 0 };
     std::unordered_set< std::string > loggedOnce;
 };
 
@@ -210,7 +214,7 @@ void MakeResident( id< MTLResource > r )
         return;
     }
     void* key = ( __bridge void* )r;
-    if( s.resident.insert( key ).second )
+    if( ++s.resident[ key ] == 1 )
     {
         if( @available( macOS 15.0, * ) )
         {
@@ -232,8 +236,14 @@ void RemoveResident( id< MTLResource > r )
     {
         return;
     }
-    if( s.resident.erase( ( __bridge void* )r ) > 0 )
+    auto it = s.resident.find( ( __bridge void* )r );
+    if( it == s.resident.end() )
     {
+        return;
+    }
+    if( --it->second == 0 )
+    {
+        s.resident.erase( it );
         if( @available( macOS 15.0, * ) )
         {
             [( id< MTLResidencySet > )s.residency removeAllocation:( id< MTLAllocation > )r];
@@ -264,9 +274,18 @@ id< MTLTexture > TextureForView( VkImageView view )
     info.pNext                       = &t;
     s.exportFn( s.device, &info );
 
-    id< MTLTexture > tex   = t.mtlTexture;
+    id< MTLTexture > tex = t.mtlTexture;
+    if( !tex )
+    {
+        LogOnce( "couldn't get the Metal texture of an image view" );
+        return nil;
+    }
     s.viewTextures[ view ] = tex;
     MakeResident( tex );
+    if( tex.parentTexture )
+    {
+        MakeResident( tex.parentTexture );
+    }
     return tex;
 }
 
@@ -289,7 +308,12 @@ id< MTLBuffer > BufferForMemory( VkDeviceMemory memory )
     info.pNext                       = &b;
     s.exportFn( s.device, &info );
 
-    id< MTLBuffer > buf       = b.mtlBuffer;
+    id< MTLBuffer > buf = b.mtlBuffer;
+    if( !buf )
+    {
+        LogOnce( "couldn't get the Metal buffer of a memory allocation" );
+        return nil;
+    }
     s.memoryBuffers[ memory ] = buf;
     MakeResident( buf );
     return buf;
@@ -416,10 +440,10 @@ id< MTLSamplerState > SamplerFor( VkSampler sampler )
 
 // ---- argument buffers
 
-void WriteID( uint64_t* dst, uint32_t slot, MTLResourceID id )
+void WriteID( uint64_t* dst, uint32_t slot, MTLResourceID rid )
 {
     static_assert( sizeof( MTLResourceID ) == sizeof( uint64_t ) );
-    memcpy( &dst[ slot ], &id, sizeof( uint64_t ) );
+    memcpy( &dst[ slot ], &rid, sizeof( uint64_t ) );
 }
 
 id< MTLBuffer > EncodeSet( VkDescriptorSet set )
@@ -643,6 +667,11 @@ bool EnsureAS( MtlAS& m, NSUInteger size )
     const NSUInteger alloc = size + size / 4;
     m.as                   = [s.mtlDevice newAccelerationStructureWithSize:alloc];
     m.size                 = m.as ? alloc : 0;
+    if( !m.as )
+    {
+        LogOnce( "couldn't allocate an acceleration structure" );
+        return true;
+    }
     MakeResidentAS( m.as );
     s.asGeneration++;
     return true;
@@ -665,6 +694,42 @@ NSUInteger Align256( NSUInteger x )
     return ( x + 255 ) & ~NSUInteger( 255 );
 }
 
+// A tiny placeholder bottom level structure, so a top level structure can always be built
+// (also with no instances) and the shaders never see a missing one.
+bool EnsureDummyBlas( id< MTLAccelerationStructureCommandEncoder > ae, NSUInteger& scratchOffset )
+{
+    State& s = S();
+    if( s.dummyBlas )
+    {
+        return true;
+    }
+    const float verts[ 9 ] = { 0, -1e6f, 0, 1e-3f, -1e6f, 0, 0, -1e6f, 1e-3f };
+    id< MTLBuffer > vb     = [s.mtlDevice newBufferWithBytes:verts length:sizeof( verts ) options:MTLResourceStorageModeShared];
+
+    MTLAccelerationStructureTriangleGeometryDescriptor* tri =
+        [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+    tri.vertexBuffer  = vb;
+    tri.vertexStride  = 3 * sizeof( float );
+    tri.vertexFormat  = MTLAttributeFormatFloat3;
+    tri.triangleCount = 1;
+    tri.opaque        = YES;
+
+    MTLPrimitiveAccelerationStructureDescriptor* d = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    d.geometryDescriptors                          = @[ tri ];
+
+    const MTLAccelerationStructureSizes sizes = [s.mtlDevice accelerationStructureSizesWithDescriptor:d];
+    s.dummyBlas = [s.mtlDevice newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+    if( !s.dummyBlas )
+    {
+        return false;
+    }
+    MakeResidentAS( s.dummyBlas );
+    EnsureScratch( scratchOffset + Align256( std::max< NSUInteger >( sizes.buildScratchBufferSize, 1 ) ) );
+    [ae buildAccelerationStructure:s.dummyBlas descriptor:d scratchBuffer:s.scratch scratchBufferOffset:scratchOffset];
+    scratchOffset += Align256( std::max< NSUInteger >( sizes.buildScratchBufferSize, 1 ) );
+    return true;
+}
+
 // Encodes the queued builds into s.cb. Returns true if s.fence is updated after them.
 bool EncodeAccelerationStructureBuilds()
 {
@@ -674,10 +739,10 @@ bool EncodeAccelerationStructureBuilds()
         return false;
     }
 
-    bool fenceUpdated = false;
+    bool blasEncoded = false;
 
-    // bottom level
-    if( !s.pendingBlas.empty() )
+    // bottom level (and the placeholder, if the top level needs it)
+    if( !s.pendingBlas.empty() || ( !s.pendingTlas.empty() && !s.dummyBlas ) )
     {
         struct Item
         {
@@ -698,150 +763,175 @@ bool EncodeAccelerationStructureBuilds()
             }
             const MTLAccelerationStructureSizes sizes = [s.mtlDevice accelerationStructureSizesWithDescriptor:d];
 
-            MtlAS&     m        = s.as[ b.dst ];
+            MtlAS&     m         = s.as[ b.dst ];
             const bool recreated = EnsureAS( m, sizes.accelerationStructureSize );
-            const bool refit     = b.update && !recreated && ( d.usage & MTLAccelerationStructureUsageRefit );
+            if( !m.as )
+            {
+                continue;
+            }
+            const bool refit = b.update && !recreated && ( d.usage & MTLAccelerationStructureUsageRefit );
 
             items.push_back( { &b, d, refit, scratchTotal } );
             scratchTotal += Align256( std::max< NSUInteger >(
                 refit ? sizes.refitScratchBufferSize : sizes.buildScratchBufferSize, 1 ) );
         }
 
-        if( !items.empty() )
-        {
-            EnsureScratch( scratchTotal );
+        EnsureScratch( std::max< NSUInteger >( scratchTotal, 1 ) );
 
-            id< MTLAccelerationStructureCommandEncoder > ae = [s.cb accelerationStructureCommandEncoder];
-            ae.label                                        = @"RTGL1 bottom level";
-            for( const Item& it : items )
+        id< MTLAccelerationStructureCommandEncoder > ae = [s.cb accelerationStructureCommandEncoder];
+        ae.label                                        = @"RTGL1 bottom level";
+        for( const Item& it : items )
+        {
+            MtlAS& m = s.as[ it.build->dst ];
+            if( it.refit )
             {
-                MtlAS& m = s.as[ it.build->dst ];
-                if( it.refit )
-                {
-                    [ae refitAccelerationStructure:m.as
-                                        descriptor:it.desc
-                                       destination:nil
-                                     scratchBuffer:s.scratch
-                               scratchBufferOffset:it.scratchOffset];
-                }
-                else
-                {
-                    [ae buildAccelerationStructure:m.as
-                                        descriptor:it.desc
-                                     scratchBuffer:s.scratch
-                               scratchBufferOffset:it.scratchOffset];
-                }
+                [ae refitAccelerationStructure:m.as
+                                    descriptor:it.desc
+                                   destination:nil
+                                 scratchBuffer:s.scratch
+                           scratchBufferOffset:it.scratchOffset];
             }
-            [ae updateFence:s.fence];
-            [ae endEncoding];
-            fenceUpdated = true;
+            else
+            {
+                [ae buildAccelerationStructure:m.as
+                                    descriptor:it.desc
+                                 scratchBuffer:s.scratch
+                           scratchBufferOffset:it.scratchOffset];
+            }
         }
+        if( !s.pendingTlas.empty() )
+        {
+            NSUInteger off = scratchTotal;
+            EnsureDummyBlas( ae, off );
+        }
+        // the top level build waits for these; without one, the path tracing does
+        [ae updateFence:s.pendingTlas.empty() ? s.fence : s.blasFence];
+        [ae endEncoding];
+        blasEncoded = true;
         s.pendingBlas.clear();
     }
 
-    // top level
-    if( !s.pendingTlas.empty() )
+    if( s.pendingTlas.empty() )
     {
-        id< MTLAccelerationStructureCommandEncoder > ae = [s.cb accelerationStructureCommandEncoder];
-        ae.label                                        = @"RTGL1 top level";
-        if( fenceUpdated )
+        return blasEncoded;
+    }
+
+    // top level
+    id< MTLAccelerationStructureCommandEncoder > ae = [s.cb accelerationStructureCommandEncoder];
+    ae.label                                        = @"RTGL1 top level";
+    if( blasEncoded )
+    {
+        [ae waitForFence:s.blasFence];
+    }
+
+    NSUInteger scratchOffset = 0;
+    for( TlasBuild& t : s.pendingTlas )
+    {
+        // the bottom level structures, as Metal references them by index
+        NSMutableArray< id< MTLAccelerationStructure > >* blasList = [NSMutableArray array];
+        std::unordered_map< VkAccelerationStructureKHR, uint32_t > blasIndex;
+
+        // at least one instance, so that there is always a valid structure
+        const NSUInteger count = std::max< NSUInteger >( t.instances.size(), 1 );
+        MtlAS&           m     = s.as[ t.dst ];
+        const NSUInteger instBytes = count * sizeof( MTLAccelerationStructureUserIDInstanceDescriptor );
+        if( !m.instances || m.instances.length < instBytes )
         {
-            [ae waitForFence:s.fence];
+            m.instances       = [s.mtlDevice newBufferWithLength:instBytes options:MTLResourceStorageModeShared];
+            m.instances.label = @"RTGL1 TLAS instances";
+        }
+        auto* dst = static_cast< MTLAccelerationStructureUserIDInstanceDescriptor* >( m.instances.contents );
+
+        // index 0: the placeholder, for instances that are hidden
+        if( s.dummyBlas )
+        {
+            [blasList addObject:s.dummyBlas];
         }
 
-        NSUInteger scratchOffset = 0;
-        for( TlasBuild& t : s.pendingTlas )
+        for( NSUInteger i = 0; i < count; i++ )
         {
-            // the bottom level structures, as Metal references them by index
-            NSMutableArray< id< MTLAccelerationStructure > >* blasList = [NSMutableArray array];
-            std::unordered_map< VkAccelerationStructureKHR, uint32_t > blasIndex;
-
-            const NSUInteger count = t.instances.size();
-            MtlAS&           m     = s.as[ t.dst ];
-            const NSUInteger instBytes =
-                std::max< NSUInteger >( count, 1 ) * sizeof( MTLAccelerationStructureUserIDInstanceDescriptor );
-            if( !m.instances || m.instances.length < instBytes )
+            MTLAccelerationStructureUserIDInstanceDescriptor& d = dst[ i ];
+            d                                                    = {};
+            d.mask                                               = 0;
+            d.accelerationStructureIndex                         = 0;
+            for( int c = 0; c < 4; c++ )
             {
-                m.instances       = [s.mtlDevice newBufferWithLength:instBytes options:MTLResourceStorageModeShared];
-                m.instances.label = @"RTGL1 TLAS instances";
-            }
-            auto* dst = static_cast< MTLAccelerationStructureUserIDInstanceDescriptor* >( m.instances.contents );
-
-            for( NSUInteger i = 0; i < count; i++ )
-            {
-                const VkAccelerationStructureInstanceKHR& src = t.instances[ i ];
-                MTLAccelerationStructureUserIDInstanceDescriptor& d = dst[ i ];
-                d = {};
-
-                for( int c = 0; c < 4; c++ )
+                for( int r = 0; r < 3; r++ )
                 {
-                    d.transformationMatrix.columns[ c ] = MTLPackedFloat3Make( src.transform.matrix[ 0 ][ c ],
-                                                                               src.transform.matrix[ 1 ][ c ],
-                                                                               src.transform.matrix[ 2 ][ c ] );
-                }
-                // VkGeometryInstanceFlagBitsKHR have the values of MTLAccelerationStructureInstanceOptions
-                d.options = MTLAccelerationStructureInstanceOptions( src.flags );
-                d.mask    = src.mask;
-                d.intersectionFunctionTableOffset = 0;
-                d.userID                          = src.instanceCustomIndex;
-
-                id< MTLAccelerationStructure > blas;
-                auto byAddr = s.asByAddress.find( src.accelerationStructureReference );
-                if( byAddr != s.asByAddress.end() )
-                {
-                    auto bm = s.as.find( byAddr->second );
-                    if( bm != s.as.end() && bm->second.as )
-                    {
-                        auto [ bi, added ] = blasIndex.try_emplace( byAddr->second, uint32_t( blasList.count ) );
-                        if( added )
-                        {
-                            [blasList addObject:bm->second.as];
-                        }
-                        d.accelerationStructureIndex = bi->second;
-                        blas                         = bm->second.as;
-                    }
-                }
-                if( !blas )
-                {
-                    // keep the instance index (the shaders index per-instance data by it), but hide it
-                    d.mask                       = 0;
-                    d.accelerationStructureIndex = 0;
-                    LogOnce( "a top level instance references an unknown bottom level structure" );
+                    d.transformationMatrix.columns[ c ].elements[ r ] = ( r == c ) ? 1.0f : 0.0f;
                 }
             }
-
-            if( blasList.count == 0 )
+            if( i >= t.instances.size() )
             {
                 continue;
             }
 
-            MTLInstanceAccelerationStructureDescriptor* d = [MTLInstanceAccelerationStructureDescriptor descriptor];
-            d.instanceDescriptorType         = MTLAccelerationStructureInstanceDescriptorTypeUserID;
-            d.instanceDescriptorBuffer       = m.instances;
-            d.instanceDescriptorBufferOffset = 0;
-            d.instanceDescriptorStride       = sizeof( MTLAccelerationStructureUserIDInstanceDescriptor );
-            d.instanceCount                  = count;
-            d.instancedAccelerationStructures = blasList;
-            d.usage = t.fastTrace ? MTLAccelerationStructureUsageNone : MTLAccelerationStructureUsagePreferFastBuild;
+            const VkAccelerationStructureInstanceKHR& src = t.instances[ i ];
+            for( int c = 0; c < 4; c++ )
+            {
+                for( int r = 0; r < 3; r++ )
+                {
+                    // VkTransformMatrixKHR is row-major 3x4, Metal's matrix is 4 columns of 3
+                    d.transformationMatrix.columns[ c ].elements[ r ] = src.transform.matrix[ r ][ c ];
+                }
+            }
+            // the low VkGeometryInstanceFlagBitsKHR have the values of MTLAccelerationStructureInstanceOptions
+            d.options = MTLAccelerationStructureInstanceOptions( src.flags & 0xF );
+            d.userID  = src.instanceCustomIndex;
 
-            const MTLAccelerationStructureSizes sizes = [s.mtlDevice accelerationStructureSizesWithDescriptor:d];
-            EnsureAS( m, sizes.accelerationStructureSize );
-            EnsureScratch( scratchOffset + Align256( sizes.buildScratchBufferSize ) );
-
-            [ae buildAccelerationStructure:m.as
-                                descriptor:d
-                             scratchBuffer:s.scratch
-                       scratchBufferOffset:scratchOffset];
-            scratchOffset += Align256( std::max< NSUInteger >( sizes.buildScratchBufferSize, 1 ) );
+            auto byAddr = s.asByAddress.find( src.accelerationStructureReference );
+            if( byAddr != s.asByAddress.end() )
+            {
+                auto bm = s.as.find( byAddr->second );
+                if( bm != s.as.end() && bm->second.as )
+                {
+                    auto [ bi, added ] = blasIndex.try_emplace( byAddr->second, uint32_t( blasList.count ) );
+                    if( added )
+                    {
+                        [blasList addObject:bm->second.as];
+                    }
+                    d.accelerationStructureIndex = bi->second;
+                    d.mask                       = src.mask;
+                    continue;
+                }
+            }
+            // keep the instance index (the shaders index per-instance data by it), but hide it
+            LogOnce( "a top level instance references an unknown bottom level structure" );
         }
-        [ae updateFence:s.fence];
-        [ae endEncoding];
-        fenceUpdated = true;
-        s.pendingTlas.clear();
-    }
-    return fenceUpdated;
-}
 
+        if( blasList.count == 0 )
+        {
+            LogOnce( "no placeholder bottom level structure, a top level build was skipped" );
+            continue;
+        }
+
+        MTLInstanceAccelerationStructureDescriptor* d = [MTLInstanceAccelerationStructureDescriptor descriptor];
+        d.instanceDescriptorType          = MTLAccelerationStructureInstanceDescriptorTypeUserID;
+        d.instanceDescriptorBuffer        = m.instances;
+        d.instanceDescriptorBufferOffset  = 0;
+        d.instanceDescriptorStride        = sizeof( MTLAccelerationStructureUserIDInstanceDescriptor );
+        d.instanceCount                   = count;
+        d.instancedAccelerationStructures = blasList;
+        d.usage = t.fastTrace ? MTLAccelerationStructureUsageNone : MTLAccelerationStructureUsagePreferFastBuild;
+
+        const MTLAccelerationStructureSizes sizes = [s.mtlDevice accelerationStructureSizesWithDescriptor:d];
+        EnsureAS( m, sizes.accelerationStructureSize );
+        if( !m.as )
+        {
+            continue;
+        }
+        EnsureScratch( scratchOffset + Align256( std::max< NSUInteger >( sizes.buildScratchBufferSize, 1 ) ) );
+
+        [ae buildAccelerationStructure:m.as
+                            descriptor:d
+                         scratchBuffer:s.scratch
+                   scratchBufferOffset:scratchOffset];
+        scratchOffset += Align256( std::max< NSUInteger >( sizes.buildScratchBufferSize, 1 ) );
+    }
+    [ae updateFence:s.fence];
+    [ae endEncoding];
+    s.pendingTlas.clear();
+    return true;
 }
 
 // ================================================================================================
@@ -1151,6 +1241,10 @@ void RTGL1::Metal::DestroyImageView( VkDevice device, VkImageView view, const Vk
         if( it != S().viewTextures.end() )
         {
             RemoveResident( it->second );
+            if( it->second.parentTexture )
+            {
+                RemoveResident( it->second.parentTexture );
+            }
             S().viewTextures.erase( it );
         }
     }
@@ -1288,7 +1382,8 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
         s.queue.label = @"RTGL1 native";
         s.event       = [s.mtlDevice newSharedEvent];
         s.fence       = [s.mtlDevice newFence];
-        if( !s.queue || !s.event || !s.fence )
+        s.blasFence   = [s.mtlDevice newFence];
+        if( !s.queue || !s.event || !s.fence || !s.blasFence )
         {
             Log( "couldn't create a Metal queue / event / fence" );
             return false;
@@ -1375,6 +1470,8 @@ void RTGL1::Metal::Shutdown()
         s.residency  = nil;
         s.scratch    = nil;
         s.fence      = nil;
+        s.blasFence  = nil;
+        s.dummyBlas  = nil;
         s.event      = nil;
         s.queue      = nil;
         s.mtlDevice  = nil;
@@ -1490,6 +1587,33 @@ void RTGL1::Metal::RegisterAccelerationStructureAddress( VkAccelerationStructure
 {
     std::lock_guard g( S().lock );
     S().asByAddress[ address ] = as;
+}
+
+void RTGL1::Metal::ForgetAccelerationStructure( VkAccelerationStructureKHR as )
+{
+    std::lock_guard g( S().lock );
+    State&          s  = S();
+    auto            it = s.as.find( as );
+    if( it != s.as.end() )
+    {
+        if( it->second.as )
+        {
+            RemoveResident( ( id< MTLResource > )it->second.as );
+        }
+        s.as.erase( it );
+        s.asGeneration++;
+    }
+    for( auto a = s.asByAddress.begin(); a != s.asByAddress.end(); )
+    {
+        a = a->second == as ? s.asByAddress.erase( a ) : std::next( a );
+    }
+    // builds of it that are still queued
+    s.pendingBlas.erase( std::remove_if( s.pendingBlas.begin(), s.pendingBlas.end(),
+                                         [ as ]( const BlasBuild& b ) { return b.dst == as; } ),
+                         s.pendingBlas.end() );
+    s.pendingTlas.erase( std::remove_if( s.pendingTlas.begin(), s.pendingTlas.end(),
+                                         [ as ]( const TlasBuild& t ) { return t.dst == as; } ),
+                         s.pendingTlas.end() );
 }
 
 void RTGL1::Metal::QueueBottomLevelBuilds( uint32_t                                                count,
@@ -1614,9 +1738,8 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
         const uint64_t metalDone = ++s.timeline;
         [s.cb encodeSignalEvent:s.event value:metalDone];
         [s.cb addCompletedHandler:^( id< MTLCommandBuffer > c ) {
-            if( c.status == MTLCommandBufferStatusError && S().loggedErrors < 10 )
+            if( c.status == MTLCommandBufferStatusError && S().loggedErrors.fetch_add( 1 ) < 10 )
             {
-                S().loggedErrors++;
                 Log( "GPU error in the native path tracing: %s",
                      c.error ? c.error.localizedDescription.UTF8String : "?" );
             }

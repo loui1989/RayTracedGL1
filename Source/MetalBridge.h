@@ -83,6 +83,8 @@ bool PreparePipeline( VkPipeline pipeline, const char* debugName );
 
 // Acceleration structures: queued here, built at the start of the next section.
 void RegisterAccelerationStructureAddress( VkAccelerationStructureKHR as, VkDeviceAddress address );
+// call before vkDestroyAccelerationStructureKHR
+void ForgetAccelerationStructure( VkAccelerationStructureKHR as );
 void QueueBottomLevelBuilds( uint32_t                                                count,
                              const VkAccelerationStructureBuildGeometryInfoKHR*      infos,
                              const VkAccelerationStructureBuildRangeInfoKHR* const* ranges );
