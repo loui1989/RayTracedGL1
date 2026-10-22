@@ -225,18 +225,22 @@ void atrous0(
     float indirLimit = 0.0;
     if (globalUniform.denoiserIndirectDeflicker > 0.0)
     {
+        // only neighbours on the same surface (similar depth): e.g. not the weapon in front
         float sum = 0.0;
+        float count = 0.0;
         for (int yy = -1; yy <= 1; yy++)
         {
             for (int xx = -1; xx <= 1; xx++)
             {
-                if (xx != 0 || yy != 0)
+                if ((xx != 0 || yy != 0) &&
+                    abs(GET_ATROUS_DATA(xx, yy).depth - center.depth) < 0.1 * center.depth)
                 {
                     sum += getSHLuminance(texelFetchSH(samplerIndirR, samplerIndirG, samplerIndirB, pix + ivec2(xx, yy)));
+                    count += 1.0;
                 }
             }
         }
-        indirLimit = globalUniform.denoiserIndirectDeflicker * sum / 8.0;
+        indirLimit = count >= 3.0 ? globalUniform.denoiserIndirectDeflicker * sum / count : 0.0;
         outIndirSH = deflickerSH(outIndirSH, indirLimit);
     }
 

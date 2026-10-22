@@ -260,10 +260,18 @@ void main()
             w                = 0.0;
         }
 
-        // average over the active invocations of the subgroup (sky pixels returned above)
-        const float sum   = subgroupAdd( w );
-        const float count = subgroupAdd( 1.0 );
-        const float limit = restirGiFireflyClamp * sum / max( count, 1.0 );
+        // average over the active invocations of the subgroup (sky pixels returned above),
+        // separately for first-person geometry (the weapon) and the world: otherwise the
+        // world pixels around the weapon get a different limit, which leaves a band in the
+        // weapon's shape that trails behind it in the accumulated lighting
+        const bool  isFP     = ( surf.instCustomIndex & INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON ) != 0;
+        const float sumFP    = subgroupAdd( isFP ? w : 0.0 );
+        const float countFP  = subgroupAdd( isFP ? 1.0 : 0.0 );
+        const float sumAll   = subgroupAdd( w );
+        const float countAll = subgroupAdd( 1.0 );
+        const float sum      = isFP ? sumFP : sumAll - sumFP;
+        const float count    = isFP ? countFP : countAll - countFP;
+        const float limit    = restirGiFireflyClamp * sum / max( count, 1.0 );
 
         if( w > limit && limit > 0.0 )
         {
