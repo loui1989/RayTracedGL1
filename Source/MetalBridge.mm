@@ -255,6 +255,7 @@ struct State
     std::map< VkDeviceAddress, VkBuffer >                                               buffersByAddress;
     std::unordered_map< VkDeviceMemory, id< MTLBuffer > >                               memoryBuffers;
     std::unordered_map< VkImageView, id< MTLTexture > >                                 viewTextures;
+    std::unordered_map< VkImage, id< MTLTexture > >                                     imageTextures;
     std::unordered_map< VkShaderModule, std::vector< uint32_t > >                       modules;
     std::unordered_map< VkPipeline, PipelineInfo >                                      pipelines;
 
@@ -297,6 +298,8 @@ struct State
     bool                                                      rasterEnv    = true;
     bool                                                      rasterBroken = false;
     id< MTLComputePipelineState >                             compactIndirect;
+    id< MTLComputePipelineState >                             blitPipeline;
+    id< MTLSamplerState >                                     blitNearest, blitLinear;
     id< MTLBuffer >                                           indirectScratch;
 
     // section encoders: one at a time, ordered with passFence
@@ -387,6 +390,37 @@ void RemoveResident( id< MTLResource > r )
 }
 
 // ---- exports from MoltenVK
+
+id< MTLTexture > TextureForImage( VkImage image )
+{
+    State& s = S();
+    if( image == VK_NULL_HANDLE || !s.exportFn )
+    {
+        return nil;
+    }
+    auto it = s.imageTextures.find( image );
+    if( it != s.imageTextures.end() )
+    {
+        return it->second;
+    }
+
+    VkExportMetalTextureInfoEXT t = { VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT };
+    t.image                       = image;
+    t.plane                       = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    VkExportMetalObjectsInfoEXT info = { VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT };
+    info.pNext                       = &t;
+    s.exportFn( s.device, &info );
+
+    id< MTLTexture > tex = t.mtlTexture;
+    if( !tex )
+    {
+        LogOnce( "couldn't get the Metal texture of an image" );
+        return nil;
+    }
+    s.imageTextures[ image ] = tex;
+    MakeResident( tex );
+    return tex;
+}
 
 id< MTLTexture > TextureForView( VkImageView view )
 {
@@ -1474,6 +1508,20 @@ void RTGL1::Metal::DestroyImageView( VkDevice device, VkImageView view, const Vk
     vkDestroyImageView( device, view, alloc );
 }
 
+void RTGL1::Metal::DestroyImage( VkDevice device, VkImage image, const VkAllocationCallbacks* alloc )
+{
+    {
+        std::lock_guard g( S().lock );
+        auto            it = S().imageTextures.find( image );
+        if( it != S().imageTextures.end() )
+        {
+            RemoveResident( it->second );
+            S().imageTextures.erase( it );
+        }
+    }
+    vkDestroyImage( device, image, alloc );
+}
+
 VkResult RTGL1::Metal::CreateShaderModule( VkDevice                        device,
                                            const VkShaderModuleCreateInfo* ci,
                                            const VkAllocationCallbacks*    alloc,
@@ -1744,7 +1792,7 @@ VkResult RTGL1::Metal::CreateGraphicsPipelines( VkDevice                        
 
 namespace
 {
-void CreateCompactIndirect();
+void CreateHelpers();
 void ShutdownGraphics();
 }
 
@@ -1872,7 +1920,7 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             }
         }
 
-        CreateCompactIndirect();
+        CreateHelpers();
 
         s.enabled = true;
         Log( "native path tracing enabled (RTGL1_METAL_RT=1) on %s%s", s.mtlDevice.name.UTF8String,
@@ -1908,6 +1956,7 @@ void RTGL1::Metal::Shutdown()
         s.pendingBlas.clear();
         s.pendingTlas.clear();
         s.viewTextures.clear();
+        s.imageTextures.clear();
         s.memoryBuffers.clear();
         for( auto& [ smp, si ] : s.samplers )
         {
@@ -3504,18 +3553,127 @@ kernel void rgCompactIndirect( device const uchar* src   [[buffer(0)]],
 }
 )MSL";
 
-// at Init
-void CreateCompactIndirect()
+// vkCmdBlitImage: scaled copy of a region with a sampler (the destination must be writable
+// by shaders, as RTGL1's framebuffer images are)
+const char* BLIT_MSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+// as in Vulkan: destination pixel centers map linearly from dst0..dst1 to src0..src1
+// (a region is flipped when an end is before its start)
+struct BlitParams { int2 dst0; int2 dst1; float2 src0; float2 src1; float2 srcTexSize; };
+kernel void rgBlit( texture2d< float, access::sample > src [[texture(0)]],
+                    texture2d< float, access::write >  dst [[texture(1)]],
+                    sampler                            smp [[sampler(0)]],
+                    constant BlitParams&               p   [[buffer(0)]],
+                    uint2 gid [[thread_position_in_grid]] )
 {
-    State&           s = S();
-    std::string      error;
-    id< MTLLibrary > lib = CompileLibrary( s.mtlDevice, COMPACT_INDIRECT_MSL, false, "compact indirect", error );
-    id< MTLFunction > fn = lib ? [lib newFunctionWithName:@"rgCompactIndirect"] : nil;
+    const int2 lo = min( p.dst0, p.dst1 );
+    const int2 n  = abs( p.dst1 - p.dst0 );
+    if( int( gid.x ) >= n.x || int( gid.y ) >= n.y ) return;
+    const int2   d  = lo + int2( gid );
+    const float2 t  = ( float2( d ) + 0.5 - float2( p.dst0 ) ) / float2( p.dst1 - p.dst0 );
+    const float2 uv = ( p.src0 + t * ( p.src1 - p.src0 ) ) / p.srcTexSize;
+    dst.write( src.sample( smp, uv, level( 0 ) ), uint2( d ) );
+}
+)MSL";
+
+id< MTLComputePipelineState > HelperPipeline( const char* msl, NSString* entry, const char* name )
+{
+    State&            s = S();
+    std::string       error;
+    id< MTLLibrary >  lib = CompileLibrary( s.mtlDevice, msl, false, name, error );
+    id< MTLFunction > fn  = lib ? [lib newFunctionWithName:entry] : nil;
     NSError*          err = nil;
-    s.compactIndirect = fn ? [s.mtlDevice newComputePipelineStateWithFunction:fn error:&err] : nil;
-    if( !s.compactIndirect )
+    id< MTLComputePipelineState > ps = fn ? [s.mtlDevice newComputePipelineStateWithFunction:fn error:&err] : nil;
+    if( !ps )
     {
-        Log( "couldn't create the indirect draw helper: %s", error.empty() && err ? err.localizedDescription.UTF8String : error.c_str() );
+        Log( "couldn't create the %s helper: %s", name,
+             !error.empty() ? error.c_str() : ( err ? err.localizedDescription.UTF8String : "?" ) );
+    }
+    return ps;
+}
+
+// at Init
+void CreateHelpers()
+{
+    State& s          = S();
+    s.compactIndirect = HelperPipeline( COMPACT_INDIRECT_MSL, @"rgCompactIndirect", "indirect draw" );
+    s.blitPipeline    = HelperPipeline( BLIT_MSL, @"rgBlit", "blit" );
+
+    MTLSamplerDescriptor* d = [MTLSamplerDescriptor new];
+    d.sAddressMode          = MTLSamplerAddressModeClampToEdge;
+    d.tAddressMode          = MTLSamplerAddressModeClampToEdge;
+    d.minFilter             = MTLSamplerMinMagFilterNearest;
+    d.magFilter             = MTLSamplerMinMagFilterNearest;
+    s.blitNearest           = [s.mtlDevice newSamplerStateWithDescriptor:d];
+    d.minFilter             = MTLSamplerMinMagFilterLinear;
+    d.magFilter             = MTLSamplerMinMagFilterLinear;
+    s.blitLinear            = [s.mtlDevice newSamplerStateWithDescriptor:d];
+}
+
+void SectionBlitImage( VkImage srcImage, VkImage dstImage, uint32_t count, const VkImageBlit* regions, VkFilter filter )
+{
+    @autoreleasepool
+    {
+        std::lock_guard g( S().lock );
+        State&          s = S();
+        if( !s.cb )
+        {
+            return;
+        }
+        if( s.renderEnc || !s.blitPipeline )
+        {
+            RasterUnsupported( "vkCmdBlitImage" );
+            return;
+        }
+        id< MTLTexture > src = TextureForImage( srcImage );
+        id< MTLTexture > dst = TextureForImage( dstImage );
+        if( !src || !dst )
+        {
+            RasterUnsupported( "vkCmdBlitImage with images without Metal textures" );
+            return;
+        }
+        for( uint32_t i = 0; i < count; i++ )
+        {
+            const VkImageBlit& r = regions[ i ];
+            if( r.srcSubresource.mipLevel != 0 || r.dstSubresource.mipLevel != 0 ||
+                r.srcSubresource.baseArrayLayer != 0 || r.dstSubresource.baseArrayLayer != 0 ||
+                r.srcOffsets[ 1 ].z - r.srcOffsets[ 0 ].z != 1 || r.dstOffsets[ 1 ].z - r.dstOffsets[ 0 ].z != 1 )
+            {
+                RasterUnsupported( "vkCmdBlitImage of mip levels / layers / 3D regions" );
+                return;
+            }
+            struct
+            {
+                int32_t dst0[ 2 ];
+                int32_t dst1[ 2 ];
+                float   src0[ 2 ];
+                float   src1[ 2 ];
+                float   srcTexSize[ 2 ];
+            } p = {
+                { r.dstOffsets[ 0 ].x, r.dstOffsets[ 0 ].y },
+                { r.dstOffsets[ 1 ].x, r.dstOffsets[ 1 ].y },
+                { float( r.srcOffsets[ 0 ].x ), float( r.srcOffsets[ 0 ].y ) },
+                { float( r.srcOffsets[ 1 ].x ), float( r.srcOffsets[ 1 ].y ) },
+                { float( src.width ), float( src.height ) },
+            };
+            const uint32_t w = uint32_t( std::abs( p.dst1[ 0 ] - p.dst0[ 0 ] ) );
+            const uint32_t h = uint32_t( std::abs( p.dst1[ 1 ] - p.dst0[ 1 ] ) );
+            if( w == 0 || h == 0 )
+            {
+                continue;
+            }
+
+            id< MTLComputeCommandEncoder > e = ComputeEnc();
+            [e setComputePipelineState:s.blitPipeline];
+            [e setTexture:src atIndex:0];
+            [e setTexture:dst atIndex:1];
+            [e setSamplerState:filter == VK_FILTER_NEAREST ? s.blitNearest : s.blitLinear atIndex:0];
+            [e setBytes:&p length:sizeof( p ) atIndex:0];
+            [e dispatchThreadgroups:MTLSizeMake( ( w + 7 ) / 8, ( h + 7 ) / 8, 1 )
+                threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
+            [e memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+        }
     }
 }
 
@@ -3523,6 +3681,9 @@ void ShutdownGraphics()
 {
     State& s          = S();
     s.compactIndirect = nil;
+    s.blitPipeline    = nil;
+    s.blitNearest     = nil;
+    s.blitLinear      = nil;
     s.indirectScratch = nil;
     s.renderEnc       = nil;
     s.blitEnc         = nil;
@@ -3982,7 +4143,7 @@ void RgMtl_vkCmdBlitImage( VkCommandBuffer    cmd,
 {
     if( Metal::IsSectionCmd( cmd ) )
     {
-        RasterUnsupported( "vkCmdBlitImage" );
+        SectionBlitImage( src, dst, count, regions, filter );
         return;
     }
     vkCmdBlitImage( cmd, src, srcLayout, dst, dstLayout, count, regions, filter );

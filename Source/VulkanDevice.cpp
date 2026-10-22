@@ -882,14 +882,8 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     }
 
 #ifdef __APPLE__
-    // MetalFX is encoded into the section; without it the section ends here
+    // MetalFX is encoded into the section too, which continues with the post effects
     const bool metalFxInSection = metalRaster && renderResolution.IsAmdFsr2Enabled();
-    if (metalRaster && !metalFxInSection)
-    {
-        PROFILE_GPU(cmd, "bloom prepare");
-        Metal::EndSection(cmd);
-        PROFILE_GPU(cmd, "native Metal section");
-    }
 #endif
 
 
@@ -918,8 +912,6 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
                                    drawInfo.cameraFar,
                                    drawInfo.fovYRadians);
             PROFILE_GPU(cmd, "MetalFX");
-            Metal::EndSection(cmd);
-            PROFILE_GPU(cmd, "native Metal section");
             PROFILE_CPU("MetalFX: wait for GPU + upscale");
         }
 #endif
@@ -1019,6 +1011,12 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     }
 
 #ifdef __APPLE__
+    if (metalRaster)
+    {
+        PROFILE_GPU(cmd, "upscaled post effects");
+        Metal::EndSection(cmd);
+        PROFILE_GPU(cmd, "native Metal section");
+    }
     PROFILE_GPU(cmd, "upscaled post effects");
     // macOS (MoltenVK): draw the HUD and present from a fresh command buffer,
     // for the same reason as the path tracer's command buffer splitting

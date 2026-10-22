@@ -65,6 +65,7 @@ VkResult BindBufferMemory( VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize );
 VkDeviceAddress GetBufferDeviceAddress( VkDevice, const VkBufferDeviceAddressInfo* );
 void     FreeMemory( VkDevice, VkDeviceMemory, const VkAllocationCallbacks* );
 void     DestroyImageView( VkDevice, VkImageView, const VkAllocationCallbacks* );
+void     DestroyImage( VkDevice, VkImage, const VkAllocationCallbacks* );
 VkResult CreateShaderModule( VkDevice, const VkShaderModuleCreateInfo*, const VkAllocationCallbacks*, VkShaderModule* );
 void     DestroyShaderModule( VkDevice, VkShaderModule, const VkAllocationCallbacks* );
 VkResult CreateComputePipelines( VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* );

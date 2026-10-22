@@ -46,6 +46,7 @@
 #define vkGetBufferDeviceAddress(...)      RTGL1::Metal::GetBufferDeviceAddress( __VA_ARGS__ )
 #define vkFreeMemory(...)                  RTGL1::Metal::FreeMemory( __VA_ARGS__ )
 #define vkDestroyImageView(...)            RTGL1::Metal::DestroyImageView( __VA_ARGS__ )
+#define vkDestroyImage(...)                RTGL1::Metal::DestroyImage( __VA_ARGS__ )
 #define vkCreateShaderModule(...)          RTGL1::Metal::CreateShaderModule( __VA_ARGS__ )
 #define vkDestroyShaderModule(...)         RTGL1::Metal::DestroyShaderModule( __VA_ARGS__ )
 #define vkCreateComputePipelines(...)      RTGL1::Metal::CreateComputePipelines( __VA_ARGS__ )
