@@ -228,7 +228,32 @@ if (APPLE)
     target_sources(RayTracedGL1 PRIVATE "Source/FSR2_Metal.mm")
     set_source_files_properties("Source/FSR2_Metal.mm" PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     target_link_libraries(RayTracedGL1 PRIVATE "-framework Foundation" "-framework Metal" "-framework MetalFX")
-    set_target_properties(RayTracedGL1 PROPERTIES INSTALL_NAME_DIR "@rpath")
+    set_target_properties(RayTracedGL1 PROPERTIES INSTALL_NAME_DIR "@rpath" OBJCXX_STANDARD 20)
+
+    # Native Metal path (MetalBridge.mm): Vulkan call shims + path tracing in Metal with
+    # RTGL1_METAL_RT=1. Shaders are translated with SPIRV-Cross: pass its source directory
+    # in RG_SPIRV_CROSS_DIR (without it the native path reports itself unavailable).
+    target_sources(RayTracedGL1 PRIVATE "Source/MetalBridge.mm" "Source/MetalShaderGen.cpp")
+    set_source_files_properties("Source/MetalBridge.mm" PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    set(RG_SPIRV_CROSS_DIR "" CACHE PATH "SPIRV-Cross source directory (macOS native Metal path)")
+    if (RG_SPIRV_CROSS_DIR)
+        set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_SHARED OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_FORCE_PIC ON CACHE BOOL "" FORCE)
+        add_subdirectory("${RG_SPIRV_CROSS_DIR}" spirv-cross EXCLUDE_FROM_ALL)
+        target_link_libraries(RayTracedGL1 PRIVATE spirv-cross-msl spirv-cross-glsl spirv-cross-core)
+        target_compile_definitions(RayTracedGL1 PRIVATE RG_HAS_SPIRV_CROSS)
+        message(STATUS "Native Metal path: SPIRV-Cross from ${RG_SPIRV_CROSS_DIR}")
+    else()
+        message(STATUS "Native Metal path: no RG_SPIRV_CROSS_DIR, shader translation unavailable")
+    endif()
     # libc++ doesn't include standard headers transitively like MSVC's STL does
     target_compile_options(RayTracedGL1 PRIVATE
         "$<$<COMPILE_LANGUAGE:CXX>:-includealgorithm>"

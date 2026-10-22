@@ -54,6 +54,8 @@ public:
               const std::shared_ptr<Framebuffers> &framebuffers,
               const std::shared_ptr<TextureManager> &textureManager);
 
+    bool HasDecals() const { return decalCount > 0; }
+
     void OnShaderReload(const ShaderManager *shaderManager) override;
     void OnFramebuffersSizeChange(const ResolutionState &resolutionState) override;
 

@@ -128,9 +128,20 @@ void ASBuilder::BuildBottomLevel(VkCommandBuffer cmd)
     assert(bottomLBuildInfo.geomInfos.size() == bottomLBuildInfo.rangeInfos.size());
     assert(!bottomLBuildInfo.geomInfos.empty());
 
-    // build bottom level
-    svkCmdBuildAccelerationStructuresKHR(cmd, bottomLBuildInfo.geomInfos.size(), 
-                                        bottomLBuildInfo.geomInfos.data(), bottomLBuildInfo.rangeInfos.data());
+#ifdef __APPLE__
+    if (Metal::IsEnabled())
+    {
+        // built natively at the start of the next Metal section
+        Metal::QueueBottomLevelBuilds((uint32_t)bottomLBuildInfo.geomInfos.size(),
+                                      bottomLBuildInfo.geomInfos.data(), bottomLBuildInfo.rangeInfos.data());
+    }
+    else
+#endif
+    {
+        // build bottom level
+        svkCmdBuildAccelerationStructuresKHR(cmd, bottomLBuildInfo.geomInfos.size(), 
+                                            bottomLBuildInfo.geomInfos.data(), bottomLBuildInfo.rangeInfos.data());
+    }
 
     bottomLBuildInfo.geomInfos.clear();
     bottomLBuildInfo.rangeInfos.clear();

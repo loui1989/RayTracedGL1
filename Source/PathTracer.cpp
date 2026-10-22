@@ -90,6 +90,20 @@ PathTracer::TraceParams PathTracer::Bind( VkCommandBuffer                  cmd,
 
 void PathTracer::TraceRays( VkCommandBuffer cmd, uint32_t passIndex, uint32_t width, uint32_t height, uint32_t depth )
 {
+#ifdef __APPLE__
+    if( metal )
+    {
+        // native Metal: the whole frame's work is ordered, no Vulkan barriers needed
+        Metal::Dispatch( rtPipeline->GetPipeline( passIndex ),
+                         boundSets,
+                         boundSetCount,
+                         Utils::GetWorkGroupCount( width, RayTracingPipeline::GROUP_SIZE_X ),
+                         Utils::GetWorkGroupCount( height, RayTracingPipeline::GROUP_SIZE_Y ),
+                         depth );
+        return;
+    }
+#endif
+
     rtPipeline->BindPass( cmd, passIndex );
     vkCmdBindDescriptorSets( cmd,
                              VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -112,12 +126,12 @@ void PathTracer::TraceRaysSplit(const TraceParams &params, uint32_t passIndex, u
 {
     TraceRays(params.cmd, passIndex, width, height, depth);
 
-    if (passCallback)
+    if (passCallback && !metal)
     {
         passCallback(params.cmd, rtPipeline->GetPassName(passIndex));
     }
 
-    if (splitter)
+    if (splitter && !metal)
     {
         params.cmd = splitter(params.cmd);
     }
@@ -144,7 +158,7 @@ void PathTracer::TracePrimaryRays(const TraceParams &params)
         FI::FB_IMAGE_INDEX_THROUGHPUT,
         FI::FB_IMAGE_INDEX_PRIMARY_TO_REFL_REFR,
     };
-    params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
+    if (!metal) params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
 
 
     TraceRaysSplit(params, SBT_INDEX_RAYGEN_PRIMARY, params.width, params.height);
@@ -169,7 +183,7 @@ void PathTracer::TraceReflectionRefractionRays(const TraceParams &params)
         FI::FB_IMAGE_INDEX_THROUGHPUT,
         FI::FB_IMAGE_INDEX_PRIMARY_TO_REFL_REFR,
     };
-    params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
+    if (!metal) params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
 
 
     TraceRaysSplit(params, SBT_INDEX_RAYGEN_REFL_REFR, params.width, params.height);
@@ -190,7 +204,7 @@ void PathTracer::CalculateInitialReservoirs(const TraceParams& params)
         FI::FB_IMAGE_INDEX_NORMAL_GEOMETRY,
         FI::FB_IMAGE_INDEX_VIEW_DIRECTION,
     };
-    params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
+    if (!metal) params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
 
 
     TraceRaysSplit(params, SBT_INDEX_RAYGEN_INITIAL_RESERVOIRS, params.width, params.height);
@@ -214,7 +228,7 @@ void PathTracer::TraceDirectllumination(const TraceParams &params)
         FI::FB_IMAGE_INDEX_SURFACE_POSITION,
         FI::FB_IMAGE_INDEX_VIEW_DIRECTION,
     };
-    params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
+    if (!metal) params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
 
 
     TraceRaysSplit(params, SBT_INDEX_RAYGEN_DIRECT, params.width, params.height);
@@ -234,7 +248,7 @@ void PathTracer::CalculateGradientsSamples(const TraceParams &params)
         FI::FB_IMAGE_INDEX_RESERVOIRS,
         FI::FB_IMAGE_INDEX_VISIBILITY_BUFFER,
     };
-    params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
+    if (!metal) params.framebuffers->BarrierMultiple(params.cmd, params.frameIndex, fs);
 
 
     uint32_t gradWidth  = (params.width  + COMPUTE_ASVGF_STRATA_SIZE - 1) / COMPUTE_ASVGF_STRATA_SIZE;
@@ -255,7 +269,7 @@ void PathTracer::TraceIndirectllumination(const TraceParams &params)
         {
             FI::FB_IMAGE_INDEX_UNFILTERED_SPECULAR,
         };
-        params.framebuffers->BarrierMultiple( params.cmd, params.frameIndex, fs );
+        if( !metal ) params.framebuffers->BarrierMultiple( params.cmd, params.frameIndex, fs );
 
 
         TraceRaysSplit( params, SBT_INDEX_RAYGEN_INDIRECT_INIT, params.width, params.height );
@@ -264,7 +278,7 @@ void PathTracer::TraceIndirectllumination(const TraceParams &params)
     {
         CmdLabel label( params.cmd, "Indirect illumination - Final" );
 
-        params.restirBuffers->BarrierInitial( params.cmd );
+        if( !metal ) params.restirBuffers->BarrierInitial( params.cmd );
 
 
         TraceRaysSplit( params, SBT_INDEX_RAYGEN_INDIRECT_FINAL, params.width, params.height );

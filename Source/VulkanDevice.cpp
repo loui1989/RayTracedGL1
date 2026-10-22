@@ -715,6 +715,13 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         }
 
 #ifdef __APPLE__
+        // macOS, RTGL1_METAL_RT=1: the path tracing passes run natively in Metal, in a section
+        // between Vulkan submissions (split around the decals, which are drawn with Vulkan)
+        const bool metalPT = Metal::IsEnabled() && rtPipeline->IsMetalReady();
+#else
+        const bool metalPT = false;
+#endif
+#ifdef __APPLE__
         // macOS (MoltenVK): after a vkCmdTraceRaysKHR dispatch, later commands in the same
         // command buffer could read wrong push constants, so each pass was continued in a
         // fresh command buffer. The path tracer now uses ray queries in ordinary compute
@@ -723,7 +730,7 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
             const char* e = getenv( "RTGL1_SPLIT_CMD" );
             return e && e[ 0 ] == '1';
         }();
-        if( splitCmd )
+        if( splitCmd && !metalPT )
         {
             pathTracer->SetCommandBufferSplitter( [ this, &cmd ]( VkCommandBuffer old ) {
                 cmdManager->Submit( old );
@@ -747,24 +754,56 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
                                               portalList.get(),
                                               volumetric.get() );
 
+#ifdef __APPLE__
+        if (metalPT)
+        {
+            pathTracer->SetMetal(true);
+            Metal::BeginSection(cmd);
+            PathTracer::SetCmd(params, VK_NULL_HANDLE);
+        }
+#endif
+
         pathTracer->TracePrimaryRays(params);
 
         // draw decals on top of primary surface
-        decalManager->Draw(cmd, frameIndex, uniform, framebuffers, textureManager);
-        PROFILE_GPU(cmd, "decals");
+#ifdef __APPLE__
+        if (metalPT && decalManager->HasDecals())
+        {
+            Metal::EndSection(cmd);
+            decalManager->Draw(cmd, frameIndex, uniform, framebuffers, textureManager);
+            Metal::BeginSection(cmd);
+        }
+        else if (!metalPT)
+#endif
+        {
+            decalManager->Draw(cmd, frameIndex, uniform, framebuffers, textureManager);
+            PROFILE_GPU(cmd, "decals");
+        }
 
         if (uniform->GetData()->reflectRefractMaxDepth > 0)
         {
             pathTracer->TraceReflectionRefractionRays(params);
         }
 
-        scene->GetLightManager()->BarrierLightGrid(cmd, frameIndex);
+        if (!metalPT)
+        {
+            scene->GetLightManager()->BarrierLightGrid(cmd, frameIndex);
+        }
         pathTracer->CalculateInitialReservoirs(params);
         pathTracer->TraceDirectllumination(params);
         pathTracer->TraceIndirectllumination(params);
         pathTracer->TraceVolumetric(params);
 
         pathTracer->CalculateGradientsSamples(params);
+
+#ifdef __APPLE__
+        if (metalPT)
+        {
+            Metal::EndSection(cmd);
+            pathTracer->SetMetal(false);
+            PROFILE_GPU(cmd, "path tracing (native Metal)");
+        }
+#endif
         pathTracer->SetCommandBufferSplitter( nullptr );
         pathTracer->SetPassCallback( nullptr );
         denoiser->Denoise(cmd, frameIndex, uniform);
@@ -927,13 +966,10 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     if (metalFxWaitSemaphore != VK_NULL_HANDLE)
     {
         // the post effects read MetalFX's output
-        cmdManager->SubmitTimeline(cmd, metalFxWaitSemaphore, metalFxWaitValue, 0);
+        cmdManager->AddTimelineWaitForNextSubmit(metalFxWaitSemaphore, metalFxWaitValue);
         metalFxWaitSemaphore = VK_NULL_HANDLE;
     }
-    else
-    {
-        cmdManager->Submit(cmd);
-    }
+    cmdManager->Submit(cmd);
 
     // MetalFX frame generation (experimental): show a frame generated between the
     // previous and this one first, with the HUD drawn on top, then this frame

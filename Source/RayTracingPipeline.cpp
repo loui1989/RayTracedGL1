@@ -145,6 +145,24 @@ void RayTracingPipeline::CreatePipelines(const ShaderManager *shaderManager)
 
         SET_DEBUG_NAME( device, pipelines[ i ], VK_OBJECT_TYPE_PIPELINE, passes[ i ].pName );
     }
+
+#ifdef __APPLE__
+    // native Metal path tracing: all passes must translate and compile, otherwise it stays off
+    metalReady = false;
+    if( Metal::IsEnabled() )
+    {
+        bool ok = true;
+        for( uint32_t i = 0; i < PASS_COUNT; i++ )
+        {
+            ok = Metal::PreparePipeline( pipelines[ i ], passes[ i ].pName ) && ok;
+        }
+        metalReady = ok;
+        if( !ok )
+        {
+            Metal::Disable( "a path tracing pass couldn't be prepared for Metal" );
+        }
+    }
+#endif
 }
 
 void RayTracingPipeline::DestroyPipelines()

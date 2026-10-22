@@ -87,6 +87,12 @@ public:
     // vkCmdTraceRaysKHR in the experimental MoltenVK ray tracing; optional with ray queries)
     void SetCommandBufferSplitter( std::function< VkCommandBuffer( VkCommandBuffer ) > fn ) { splitter = std::move( fn ); }
 
+    // macOS: dispatch the passes natively in Metal (inside a Metal::BeginSection / EndSection)
+    void SetMetal( bool enable ) { metal = enable; }
+    // the command buffer the passes record Vulkan commands into (none inside a Metal section)
+    static void SetCmd( const TraceParams& params, VkCommandBuffer cmd ) { params.cmd = cmd; }
+    bool IsMetal() const { return metal; }
+
     // if set, called after every path tracing pass (for profiling)
     void SetPassCallback( std::function< void( VkCommandBuffer, const char* ) > fn ) { passCallback = std::move( fn ); }
 
@@ -104,6 +110,7 @@ private:
     std::shared_ptr<RayTracingPipeline> rtPipeline;
     std::function< VkCommandBuffer( VkCommandBuffer ) > splitter;
     std::function< void( VkCommandBuffer, const char* ) > passCallback;
+    bool            metal           = false;
     VkDescriptorSet boundSets[ 16 ] = {};
     uint32_t        boundSetCount   = 0;
 };

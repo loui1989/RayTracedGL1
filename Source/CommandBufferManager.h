@@ -54,6 +54,9 @@ public:
     // timeline semaphore 'timeline': wait for 'waitValue' (if non-zero) before the commands,
     // signal 'signalValue' (if non-zero) after them
     void SubmitTimeline(VkCommandBuffer cmd, VkSemaphore timeline, uint64_t waitValue, uint64_t signalValue);
+    // The next submission (of any kind) also waits for the timeline semaphore to reach
+    // 'value' before its commands start (macOS: work done natively in Metal).
+    void AddTimelineWaitForNextSubmit(VkSemaphore timeline, uint64_t value);
 
 
     void WaitGraphicsIdle();
@@ -71,6 +74,10 @@ private:
 
 private:
     VkCommandBuffer StartCmd(uint32_t frameIndex, AllocatedCmds &cmds, VkQueue queue);
+    void SubmitInternal(VkCommandBuffer cmd,
+                        VkSemaphore binaryWait, VkPipelineStageFlags binaryWaitStages,
+                        VkSemaphore binarySignal, VkFence fence,
+                        VkSemaphore timeline, uint64_t timelineWait, uint64_t timelineSignal);
 
 private:
     VkDevice device;
@@ -86,6 +93,8 @@ private:
 
     std::weak_ptr<Queues> queues;
     rgl::unordered_map<VkCommandBuffer, VkQueue> cmdQueues[MAX_FRAMES_IN_FLIGHT];
+
+    std::vector<std::pair<VkSemaphore, uint64_t>> pendingTimelineWaits;
 };
 
 }

@@ -139,7 +139,14 @@ VkDeviceAddress RTGL1::ASComponent::GetASAddress(VkAccelerationStructureKHR as) 
     addressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
     addressInfo.accelerationStructure = as;
 
-    return svkGetAccelerationStructureDeviceAddressKHR(device, &addressInfo);
+    const VkDeviceAddress address = svkGetAccelerationStructureDeviceAddressKHR(device, &addressInfo);
+#ifdef __APPLE__
+    if (Metal::IsEnabled())
+    {
+        Metal::RegisterAccelerationStructureAddress(as, address);
+    }
+#endif
+    return address;
 }
 
 const char *RTGL1::BLASComponent::GetBufferDebugName() const

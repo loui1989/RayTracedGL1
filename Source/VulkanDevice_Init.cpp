@@ -84,6 +84,11 @@ VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
 
     cmdManager          = std::make_shared<CommandBufferManager>(device, queues);
 
+#ifdef __APPLE__
+    // RTGL1_METAL_RT=1: path tracing natively in Metal
+    Metal::Init(device, cmdManager);
+#endif
+
     uniform             = std::make_shared<GlobalUniform>(device, memAllocator);
 
     swapchain           = std::make_shared<Swapchain>(device, surface, physDevice->Get(), cmdManager);
@@ -331,6 +336,9 @@ VulkanDevice::~VulkanDevice()
     shaderManager.reset();
     rtPipeline.reset();
     pathTracer.reset();
+#ifdef __APPLE__
+    Metal::Shutdown();
+#endif
     rasterizer.reset();
     decalManager.reset();
     portalList.reset();

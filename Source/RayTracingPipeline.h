@@ -67,6 +67,9 @@ public:
     void BindPass( VkCommandBuffer cmd, uint32_t passIndex ) const;
     VkPipelineLayout GetLayout() const;
     const char*      GetPassName( uint32_t passIndex ) const { return passes[ passIndex ].pName; }
+    VkPipeline       GetPipeline( uint32_t passIndex ) const { return pipelines[ passIndex ]; }
+    // macOS: the passes can run natively in Metal (RTGL1_METAL_RT=1)
+    bool             IsMetalReady() const { return metalReady; }
 
     // compute workgroup size of the passes (must match RaygenCommon.h)
     static constexpr uint32_t GROUP_SIZE_X = 8;
@@ -100,6 +103,8 @@ private:
 
     uint32_t primaryRaysMaxAlbedoLayers;
     uint32_t indirectIlluminationMaxAlbedoLayers;
+
+    bool metalReady = false;
 };
 
 }

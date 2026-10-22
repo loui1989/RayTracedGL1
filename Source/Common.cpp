@@ -80,7 +80,7 @@ void RTGL1::AddDebugName(VkDevice device, uint64_t obj, VkObjectType type, const
 
 void RTGL1::BeginCmdLabel(VkCommandBuffer cmd, const char *pName, const float pColor[4])
 {
-    if (svkCmdBeginDebugUtilsLabelEXT == nullptr || pName == nullptr)
+    if (svkCmdBeginDebugUtilsLabelEXT == nullptr || pName == nullptr || cmd == VK_NULL_HANDLE)
     {
         return;
     }
@@ -99,7 +99,7 @@ void RTGL1::BeginCmdLabel(VkCommandBuffer cmd, const char *pName, const float pC
 
 void RTGL1::EndCmdLabel(VkCommandBuffer cmd)
 {
-    if (svkCmdEndDebugUtilsLabelEXT == nullptr)
+    if (svkCmdEndDebugUtilsLabelEXT == nullptr || cmd == VK_NULL_HANDLE)
     {
         return;
     }

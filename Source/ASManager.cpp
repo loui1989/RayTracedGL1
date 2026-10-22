@@ -1011,9 +1011,19 @@ void ASManager::BuildTLAS(VkCommandBuffer cmd, uint32_t frameIndex, const TLASPr
     assert(asBuilder->IsEmpty());
 
     assert(pCurrentTLAS->GetAS() != VK_NULL_HANDLE);
-    asBuilder->AddTLAS(pCurrentTLAS->GetAS(), &instGeom, &range, buildSizes, true, false);
+#ifdef __APPLE__
+    if (Metal::IsEnabled())
+    {
+        // built natively at the start of the path tracing's Metal section
+        Metal::QueueTopLevelBuild(pCurrentTLAS->GetAS(), r.instances, r.instanceCount, true);
+    }
+    else
+#endif
+    {
+        asBuilder->AddTLAS(pCurrentTLAS->GetAS(), &instGeom, &range, buildSizes, true, false);
 
-    asBuilder->BuildTopLevel(cmd);
+        asBuilder->BuildTopLevel(cmd);
+    }
 
 
     // sync AS access

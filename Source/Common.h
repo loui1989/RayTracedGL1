@@ -91,3 +91,6 @@ void BeginCmdLabel(VkCommandBuffer cmd, const char *pName, const float pColor[4]
 void EndCmdLabel(VkCommandBuffer cmd);
 
 }
+
+// macOS: Vulkan call interception for the native Metal path
+#include "MetalShims.h"
