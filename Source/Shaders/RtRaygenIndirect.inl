@@ -324,6 +324,8 @@ void main()
     
 
 
+    bool temporalFound = false;
+
     for( int pixIndex = 0; pixIndex < TEMPORAL_SAMPLES_INDIR; pixIndex++ )
     {
         // TODO: need low discrepancy noise
@@ -357,12 +359,19 @@ void main()
 
         float rnd = rnd16( seed, salt++ );
         updateCombinedReservoirIndirect( combined, temporal, rnd );
+        temporalFound = true;
     }
 
 
 
     {
-        const int spatialCount = int( float( SPATIAL_SAMPLES_INDIR ) * getDiffuseWeight( surf.roughness ) );
+        // Disocclusion boost: a pixel without a previous reservoir (e.g. just uncovered
+        // behind the weapon) reuses twice as many neighbours from a wider area, so it
+        // matches the settled pixels around it right away instead of looking darker (a
+        // shadow-like trail behind anything moving in front of a surface)
+        const float boost = ( temporalFound || globalUniform.restirGiMaxHistory == 0 ) ? 1.0 : 2.0;
+        const float spatialRadius = SPATIAL_RADIUS_INDIR * ( boost > 1.0 ? 1.5 : 1.0 );
+        const int spatialCount = int( min( float( SPATIAL_SAMPLES_INDIR ) * boost, 8.0 ) * getDiffuseWeight( surf.roughness ) );
         uint nobiasM = combined.M; 
 
         for( int pixIndex = 0; pixIndex < spatialCount; pixIndex++ )
@@ -371,7 +380,7 @@ void main()
             ivec2 pp;
             {
                 vec2 rndOffset = rnd8_4( seed, salt++ ).xy * 2.0 - 1.0;
-                pp = pix + ivec2( rndOffset * SPATIAL_RADIUS_INDIR );
+                pp = pix + ivec2( rndOffset * spatialRadius );
             }
 
             {
