@@ -23,6 +23,11 @@
 #include "Generated/ShaderCommonC.h"
 #include "Utils.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+
 using namespace RTGL1;
 
 RayTracingPipeline::RayTracingPipeline( VkDevice                           _device,
@@ -113,12 +118,55 @@ void RayTracingPipeline::CreatePipelineLayout(const VkDescriptorSetLayout *pSetL
     SET_DEBUG_NAME(device, pipelineLayout, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "Path tracer pipeline layout");
 }
 
+namespace
+{
+float EnvFloat( const char* name, float defaultValue )
+{
+    const char* e = getenv( name );
+    if( e == nullptr || e[ 0 ] == '\0' )
+    {
+        return defaultValue;
+    }
+    char*       end = nullptr;
+    const float v   = strtof( e, &end );
+    return end != e ? v : defaultValue;
+}
+}
+
 void RayTracingPipeline::CreatePipelines(const ShaderManager *shaderManager)
 {
+    // settings of the indirect illumination resampling, see RtRaygenIndirect.inl
+    struct SpecData
+    {
+        uint32_t maxAlbedoLayers;
+        uint32_t giMaxHistory;
+        float    giFireflyClamp;
+        float    giSpatialRadius;
+    };
+    SpecData specData = {
+        0,
+        uint32_t( std::clamp( EnvFloat( "RTGL1_GI_HISTORY", 8.0f ), 1.0f, 64.0f ) ),
+        std::clamp( EnvFloat( "RTGL1_GI_FIREFLY_CLAMP", 16.0f ), 0.0f, 1000.0f ),
+        std::clamp( EnvFloat( "RTGL1_GI_SPATIAL_RADIUS", 8.0f ), 1.0f, 32.0f ),
+    };
+    {
+        static bool logged = false;
+        if( !logged )
+        {
+            logged = true;
+            fprintf( stderr,
+                     "[RTGL1] indirect illumination: history %u frames, firefly clamp %.1f, "
+                     "spatial radius %.1f px\n",
+                     specData.giMaxHistory,
+                     double( specData.giFireflyClamp ),
+                     double( specData.giSpatialRadius ) );
+        }
+    }
+
     for( uint32_t i = 0; i < PASS_COUNT; i++ )
     {
-        VkSpecializationMapEntry specEntry = {};
-        VkSpecializationInfo     specInfo  = {};
+        VkSpecializationMapEntry specEntries[ 4 ] = {};
+        VkSpecializationInfo     specInfo         = {};
 
         VkComputePipelineCreateInfo info = {};
         info.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -126,16 +174,22 @@ void RayTracingPipeline::CreatePipelines(const ShaderManager *shaderManager)
         info.layout = pipelineLayout;
         assert( info.stage.stage == VK_SHADER_STAGE_COMPUTE_BIT );
 
-        if( passes[ i ].pSpecConst != nullptr )
         {
-            specEntry.constantID = 0;
-            specEntry.offset     = 0;
-            specEntry.size       = sizeof( uint32_t );
+            uint32_t n = 0;
+            if( passes[ i ].pSpecConst != nullptr )
+            {
+                specData.maxAlbedoLayers = *passes[ i ].pSpecConst;
+                specEntries[ n++ ]       = { 0, uint32_t( offsetof( SpecData, maxAlbedoLayers ) ), sizeof( uint32_t ) };
+            }
+            // only the indirect illumination shaders declare these
+            specEntries[ n++ ] = { 1, uint32_t( offsetof( SpecData, giMaxHistory ) ), sizeof( uint32_t ) };
+            specEntries[ n++ ] = { 2, uint32_t( offsetof( SpecData, giFireflyClamp ) ), sizeof( float ) };
+            specEntries[ n++ ] = { 3, uint32_t( offsetof( SpecData, giSpatialRadius ) ), sizeof( float ) };
 
-            specInfo.mapEntryCount = 1;
-            specInfo.pMapEntries   = &specEntry;
-            specInfo.dataSize      = sizeof( *passes[ i ].pSpecConst );
-            specInfo.pData         = passes[ i ].pSpecConst;
+            specInfo.mapEntryCount = n;
+            specInfo.pMapEntries   = specEntries;
+            specInfo.dataSize      = sizeof( specData );
+            specInfo.pData         = &specData;
 
             info.stage.pSpecializationInfo = &specInfo;
         }

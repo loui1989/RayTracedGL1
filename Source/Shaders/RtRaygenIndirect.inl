@@ -18,8 +18,21 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
 layout (constant_id = 0) const uint maxAlbedoLayerCount = 0;
 #define MATERIAL_MAX_ALBEDO_LAYERS maxAlbedoLayerCount
+
+// Indirect illumination resampling settings (the defaults are the original values,
+// RayTracingPipeline sets them):
+// how many frames of history a reservoir keeps at most (temporal reuse)
+layout (constant_id = 1) const uint restirGiMaxHistory = 20;
+// > 0: an initial sample whose resampling weight is above this multiple of the average
+// in its subgroup is scaled down to it; removes the lone very bright samples that the
+// spatial and temporal reuse would spread into blotches
+layout (constant_id = 2) const float restirGiFireflyClamp = 0.0;
+// radius of the spatial reuse, in pixels
+layout (constant_id = 3) const float restirGiSpatialRadius = 8.0;
 
 #define FORCE_EVALBRDF_GGX_LOOSE
 
@@ -207,7 +220,7 @@ float getDiffuseWeight( float roughness )
 #define TEMPORAL_RADIUS_INDIR_MAX 2.0
 
 #define SPATIAL_SAMPLES_INDIR 4
-#define SPATIAL_RADIUS_INDIR  8.0
+#define SPATIAL_RADIUS_INDIR  restirGiSpatialRadius
 
 #define DEBUG_TRACE_BIAS_CORRECT_RAY 0
 
@@ -232,6 +245,27 @@ void main()
 
     float          oneOverSourcePdf;
     SampleIndirect initial = processIndirect( seed, surf, oneOverSourcePdf );
+
+    if( restirGiFireflyClamp > 0.0 )
+    {
+        // resampling weight of the sample: targetPdf / sourcePdf
+        float w = getLuminance( initial.radiance ) * oneOverSourcePdf;
+        if( isnan( w ) || isinf( w ) )
+        {
+            initial.radiance = vec3( 0.0 );
+            w                = 0.0;
+        }
+
+        // average over the active invocations of the subgroup (sky pixels returned above)
+        const float sum   = subgroupAdd( w );
+        const float count = subgroupAdd( 1.0 );
+        const float limit = restirGiFireflyClamp * sum / max( count, 1.0 );
+
+        if( w > limit && limit > 0.0 )
+        {
+            initial.radiance *= limit / w;
+        }
+    }
 
     restirIndirect_StoreInitialSample( pix, initial, oneOverSourcePdf );
 }
@@ -307,7 +341,7 @@ void main()
 
         ReservoirIndirect temporal = restirIndirect_LoadReservoir_Prev( pp );
         // renormalize to prevent precision problems
-        normalizeReservoirIndirect( temporal, 20 );
+        normalizeReservoirIndirect( temporal, restirGiMaxHistory );
 
         float rnd = rnd16( seed, salt++ );
         updateCombinedReservoirIndirect( combined, temporal, rnd );

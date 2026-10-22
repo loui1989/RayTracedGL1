@@ -213,6 +213,7 @@ struct State
     uint64_t                       sectionDone = 0; // event value the current section signals
     BoundState                     bound;
     bool                           computeEnv    = true;
+    bool                           fastMath      = false; // RTGL1_METAL_FASTMATH=1
     bool                           computeBroken = false;
 
     // RTGL1_PROFILE=1: a section is split into a command buffer per mark
@@ -1494,6 +1495,8 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             s.profile     = p && p[ 0 ] == '1';
             const char* c = getenv( "RTGL1_METAL_COMPUTE" );
             s.computeEnv  = !( c && c[ 0 ] == '0' );
+            const char* f = getenv( "RTGL1_METAL_FASTMATH" );
+            s.fastMath    = f && f[ 0 ] == '1';
         }
 
         s.enabled = true;
@@ -1567,6 +1570,7 @@ struct PrepareJob
     std::vector< MetalGen::SetSlots >       sets;
     std::vector< VkSpecializationMapEntry > specEntries;
     std::vector< uint8_t >                  specData;
+    bool                                    fastMath = false;
 };
 
 struct PrepareResult
@@ -1606,6 +1610,7 @@ bool MakePrepareJob( VkPipeline pipeline, PrepareJob& job, std::string& error )
     }
     job.specEntries = pi.specEntries;
     job.specData    = pi.specData;
+    job.fastMath    = s.fastMath;
     return true;
 }
 
@@ -1627,6 +1632,13 @@ PrepareResult CompilePrepareJob( const PrepareJob& job, id< MTLDevice > device )
         NSError*           err = nil;
         MTLCompileOptions* co  = [MTLCompileOptions new];
         co.languageVersion     = MTLLanguageVersion3_1;
+        if( @available( macOS 15.0, * ) )
+        {
+            // fast math lets the compiler assume no Inf / NaN, so the shaders' isnan / isinf
+            // checks (that keep bad values out of the reservoirs and the denoiser history)
+            // could be removed; relaxed keeps the other optimizations but honors Inf / NaN
+            co.mathMode = job.fastMath ? MTLMathModeFast : MTLMathModeRelaxed;
+        }
         id< MTLLibrary > lib   = [device newLibraryWithSource:[NSString stringWithUTF8String:sh.msl.c_str()]
                                                     options:co
                                                       error:&err];
