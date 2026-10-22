@@ -126,6 +126,10 @@ VkCommandBuffer VulkanDevice::BeginFrame(const RgStartFrameInfo &startInfo)
     if (profiler)
     {
         profiler->BeginFrame(cmd, frameIndex);
+#ifdef __APPLE__
+        // GPU time of the passes of the native Metal sections of previous frames
+        Metal::DrainTimings([this](const char* name, double ms) { profiler->Value(name, ms); });
+#endif
     }
 
 #ifdef __APPLE__
@@ -701,6 +705,18 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     }
 
 
+#ifdef __APPLE__
+    // macOS, RTGL1_METAL_RT=1: the path tracing passes run natively in Metal, in a section
+    // between Vulkan submissions (split around the decals, which are drawn with Vulkan).
+    // The section continues with the denoiser, volumetrics, exposure and checkerboard
+    // passes, if they could be prepared for Metal (metalCompute).
+    const bool metalPT      = Metal::IsEnabled() && rtPipeline->IsMetalReady();
+    const bool metalCompute = metalPT && Metal::IsComputeReady();
+#else
+    const bool metalPT      = false;
+    const bool metalCompute = false;
+#endif
+
     {
         PROFILE_GPU(cmd, "sky raster");
         lightGrid->Build(cmd, frameIndex, uniform, blueNoise, scene->GetLightManager());
@@ -714,13 +730,6 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
             pathTracer->SetPassCallback([this](VkCommandBuffer c, const char* name) { profiler->Gpu(c, name); });
         }
 
-#ifdef __APPLE__
-        // macOS, RTGL1_METAL_RT=1: the path tracing passes run natively in Metal, in a section
-        // between Vulkan submissions (split around the decals, which are drawn with Vulkan)
-        const bool metalPT = Metal::IsEnabled() && rtPipeline->IsMetalReady();
-#else
-        const bool metalPT = false;
-#endif
 #ifdef __APPLE__
         // macOS (MoltenVK): after a vkCmdTraceRaysKHR dispatch, later commands in the same
         // command buffer could read wrong push constants, so each pass was continued in a
@@ -759,7 +768,7 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
         {
             pathTracer->SetMetal(true);
             Metal::BeginSection(cmd);
-            PathTracer::SetCmd(params, VK_NULL_HANDLE);
+            PathTracer::SetCmd(params, cmd);
         }
 #endif
 
@@ -772,6 +781,7 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
             Metal::EndSection(cmd);
             decalManager->Draw(cmd, frameIndex, uniform, framebuffers, textureManager);
             Metal::BeginSection(cmd);
+            PathTracer::SetCmd(params, cmd);
         }
         else if (!metalPT)
 #endif
@@ -799,9 +809,12 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
 #ifdef __APPLE__
         if (metalPT)
         {
-            Metal::EndSection(cmd);
             pathTracer->SetMetal(false);
-            PROFILE_GPU(cmd, "path tracing (native Metal)");
+            if (!metalCompute)
+            {
+                Metal::EndSection(cmd);
+                PROFILE_GPU(cmd, "path tracing (native Metal)");
+            }
         }
 #endif
         pathTracer->SetCommandBufferSplitter( nullptr );
@@ -817,6 +830,15 @@ void VulkanDevice::Render(VkCommandBuffer &cmd, const RgDrawFrameInfo &drawInfo)
     imageComposition->PrepareForRaster( cmd, frameIndex, uniform.get() );
     volumetric->BarrierToReadScattering( cmd, frameIndex );
     volumetric->BarrierToReadIllumination( cmd );
+
+#ifdef __APPLE__
+    if (metalCompute)
+    {
+        PROFILE_GPU(cmd, "checkerboard");
+        Metal::EndSection(cmd);
+        PROFILE_GPU(cmd, "native Metal section");
+    }
+#endif
 
     if (!drawInfo.disableRasterization)
     {

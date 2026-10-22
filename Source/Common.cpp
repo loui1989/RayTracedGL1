@@ -84,6 +84,12 @@ void RTGL1::BeginCmdLabel(VkCommandBuffer cmd, const char *pName, const float pC
     {
         return;
     }
+#ifdef __APPLE__
+    if (Metal::IsSectionCmd(cmd))
+    {
+        return;
+    }
+#endif
 
     VkDebugUtilsLabelEXT labelInfo = {};
     labelInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
@@ -103,6 +109,12 @@ void RTGL1::EndCmdLabel(VkCommandBuffer cmd)
     {
         return;
     }
+#ifdef __APPLE__
+    if (Metal::IsSectionCmd(cmd))
+    {
+        return;
+    }
+#endif
 
     svkCmdEndDebugUtilsLabelEXT(cmd);
 }

@@ -37,6 +37,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -76,7 +77,13 @@ struct Descriptor
     VkAccelerationStructureKHR as      = VK_NULL_HANDLE;
 };
 
-constexpr uint32_t ARG_BUFFER_RING = 4;
+// an encoded descriptor set; reused only when the GPU work that read it has completed
+struct ArgBuffer
+{
+    id< MTLBuffer > buffer;
+    uint64_t        lastUse = 0; // event value signaled when the last section using it is done
+};
+constexpr size_t MAX_ARG_BUFFERS_PER_SET = 32;
 
 struct SetInfo
 {
@@ -85,10 +92,10 @@ struct SetInfo
     std::unordered_map< uint32_t, std::vector< Descriptor > > descs;
     uint64_t                                               version = 1;
 
-    id< MTLBuffer > argBuffers[ ARG_BUFFER_RING ];
-    uint32_t        argBufferCur        = 0;
-    uint64_t        encodedVersion      = 0;
-    uint64_t        encodedASGeneration = 0;
+    std::vector< ArgBuffer > argBuffers;
+    int                      argBufferCur        = -1;
+    uint64_t                 encodedVersion      = 0;
+    uint64_t                 encodedASGeneration = 0;
 };
 
 struct BufferInfo
@@ -116,6 +123,23 @@ struct PipelineInfo
     id< MTLComputePipelineState > mtl;
     MTLSize                       threadsPerGroup = { 1, 1, 1 };
     std::string                   name;
+    bool                          failed = false;
+};
+
+// what vkCmdBind* / vkCmdPushConstants set on SectionCmd()
+constexpr uint32_t MAX_BOUND_SETS = 16;
+struct BoundState
+{
+    VkPipeline      pipeline = VK_NULL_HANDLE;
+    VkDescriptorSet sets[ MAX_BOUND_SETS ] = {};
+    uint8_t         push[ 256 ]            = {};
+    uint32_t        pushSize               = 0;
+};
+
+struct ProfiledCb
+{
+    id< MTLCommandBuffer > cb;
+    const char*            name;
 };
 
 struct MtlAS
@@ -186,6 +210,19 @@ struct State
     id< MTLCommandBuffer >         cb;
     id< MTLComputeCommandEncoder > encoder;
     id< MTLCommandBuffer >         lastCb;
+    uint64_t                       sectionDone = 0; // event value the current section signals
+    BoundState                     bound;
+    bool                           computeEnv    = true;
+    bool                           computeBroken = false;
+
+    // RTGL1_PROFILE=1: a section is split into a command buffer per mark
+    bool                              profile = false;
+    id< MTLFence >                    passFence;
+    id< MTLCommandBuffer >            profWaitCb;
+    std::vector< ProfiledCb >         profCbs;
+    std::unordered_set< std::string > internedNames;
+    std::mutex                        timingLock;
+    std::vector< std::pair< const char*, double > > timings;
     std::atomic< uint32_t >        loggedErrors{ 0 };
     std::unordered_set< std::string > loggedOnce;
 };
@@ -460,15 +497,42 @@ id< MTLBuffer > EncodeSet( VkDescriptorSet set )
 
     const bool upToDate = si.encodedVersion == si.version &&
                           ( !layout.hasAccelerationStructure || si.encodedASGeneration == s.asGeneration );
-    if( upToDate && si.argBuffers[ si.argBufferCur ] )
+    if( upToDate && si.argBufferCur >= 0 )
     {
-        return si.argBuffers[ si.argBufferCur ];
+        ArgBuffer& cur = si.argBuffers[ si.argBufferCur ];
+        cur.lastUse    = s.sectionDone;
+        return cur.buffer;
     }
 
-    // a new buffer of the ring: the previous ones may still be read by the GPU
-    si.argBufferCur        = ( si.argBufferCur + 1 ) % ARG_BUFFER_RING;
+    // re-encode into a buffer that no submitted GPU work reads anymore
+    const uint64_t completed = s.event.signaledValue;
+    int            pick      = -1;
+    for( size_t i = 0; i < si.argBuffers.size(); i++ )
+    {
+        if( si.argBuffers[ i ].lastUse <= completed && int( i ) != si.argBufferCur )
+        {
+            pick = int( i );
+            break;
+        }
+    }
+    if( pick < 0 )
+    {
+        if( si.argBuffers.size() < MAX_ARG_BUFFERS_PER_SET )
+        {
+            si.argBuffers.push_back( {} );
+            pick = int( si.argBuffers.size() - 1 );
+        }
+        else
+        {
+            LogOnce( "a descriptor set changes too often, its Metal copy may be overwritten while in use" );
+            pick = ( si.argBufferCur + 1 ) % int( si.argBuffers.size() );
+        }
+    }
+    si.argBufferCur        = pick;
+    si.argBuffers[ pick ].lastUse = s.sectionDone;
+
     const NSUInteger bytes = std::max< NSUInteger >( 1, layout.slots.totalSlots ) * sizeof( uint64_t );
-    id< MTLBuffer > __strong& ab    = si.argBuffers[ si.argBufferCur ];
+    id< MTLBuffer > __strong& ab    = si.argBuffers[ pick ].buffer;
     if( !ab || ab.length < bytes )
     {
         ab = [s.mtlDevice newBufferWithLength:bytes options:MTLResourceStorageModeShared];
@@ -1385,7 +1449,8 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
         s.event       = [s.mtlDevice newSharedEvent];
         s.fence       = [s.mtlDevice newFence];
         s.blasFence   = [s.mtlDevice newFence];
-        if( !s.queue || !s.event || !s.fence || !s.blasFence )
+        s.passFence   = [s.mtlDevice newFence];
+        if( !s.queue || !s.event || !s.fence || !s.blasFence || !s.passFence )
         {
             Log( "couldn't create a Metal queue / event / fence" );
             return false;
@@ -1424,8 +1489,16 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             s.residency = rs;
         }
 
+        {
+            const char* p = getenv( "RTGL1_PROFILE" );
+            s.profile     = p && p[ 0 ] == '1';
+            const char* c = getenv( "RTGL1_METAL_COMPUTE" );
+            s.computeEnv  = !( c && c[ 0 ] == '0' );
+        }
+
         s.enabled = true;
-        Log( "native path tracing enabled (RTGL1_METAL_RT=1) on %s", s.mtlDevice.name.UTF8String );
+        Log( "native path tracing enabled (RTGL1_METAL_RT=1) on %s%s", s.mtlDevice.name.UTF8String,
+             s.computeEnv ? ", with the denoiser and other compute passes" : "" );
         return true;
     }
 }
@@ -1448,10 +1521,8 @@ void RTGL1::Metal::Shutdown()
         }
         for( auto& [ set, si ] : s.sets )
         {
-            for( auto& b : si.argBuffers )
-            {
-                b = nil;
-            }
+            si.argBuffers.clear();
+            si.argBufferCur   = -1;
             si.encodedVersion = 0;
         }
         s.as.clear();
@@ -1473,6 +1544,9 @@ void RTGL1::Metal::Shutdown()
         s.scratch    = nil;
         s.fence      = nil;
         s.blasFence  = nil;
+        s.passFence  = nil;
+        s.profWaitCb = nil;
+        s.profCbs.clear();
         s.dummyBlas  = nil;
         s.event      = nil;
         s.queue      = nil;
@@ -1482,107 +1556,289 @@ void RTGL1::Metal::Shutdown()
     }
 }
 
-bool RTGL1::Metal::PreparePipeline( VkPipeline pipeline, const char* debugName )
+namespace
+{
+
+struct PrepareJob
+{
+    VkPipeline                              pipeline = VK_NULL_HANDLE;
+    std::string                             name;
+    std::vector< uint32_t >                 spirv;
+    std::vector< MetalGen::SetSlots >       sets;
+    std::vector< VkSpecializationMapEntry > specEntries;
+    std::vector< uint8_t >                  specData;
+};
+
+struct PrepareResult
+{
+    id< MTLComputePipelineState > ps;
+    MTLSize                       threadsPerGroup = { 1, 1, 1 };
+    std::string                   error;
+};
+
+// under the lock
+bool MakePrepareJob( VkPipeline pipeline, PrepareJob& job, std::string& error )
+{
+    State& s   = S();
+    auto   pit = s.pipelines.find( pipeline );
+    if( pit == s.pipelines.end() )
+    {
+        error = "unknown pipeline";
+        return false;
+    }
+    const PipelineInfo& pi = pit->second;
+
+    auto mit = s.modules.find( pi.module );
+    auto lit = s.pipelineLayouts.find( pi.layout );
+    if( mit == s.modules.end() || lit == s.pipelineLayouts.end() )
+    {
+        error = "shader module or pipeline layout unknown";
+        return false;
+    }
+
+    job.pipeline = pipeline;
+    job.name     = pi.name;
+    job.spirv    = mit->second;
+    job.sets.clear();
+    for( const auto& l : lit->second )
+    {
+        job.sets.push_back( l ? l->slots : MetalGen::SetSlots{} );
+    }
+    job.specEntries = pi.specEntries;
+    job.specData    = pi.specData;
+    return true;
+}
+
+// without the lock: can run on several threads at once
+PrepareResult CompilePrepareJob( const PrepareJob& job, id< MTLDevice > device )
 {
     @autoreleasepool
     {
-        std::lock_guard g( S().lock );
-        State&          s = S();
-        if( !s.enabled )
-        {
-            return false;
-        }
-
-        auto pit = s.pipelines.find( pipeline );
-        if( pit == s.pipelines.end() )
-        {
-            Log( "%s: unknown pipeline", debugName );
-            return false;
-        }
-        PipelineInfo& pi = pit->second;
-        pi.name          = debugName ? debugName : "?";
-
-        auto mit = s.modules.find( pi.module );
-        auto lit = s.pipelineLayouts.find( pi.layout );
-        if( mit == s.modules.end() || lit == s.pipelineLayouts.end() )
-        {
-            Log( "%s: shader module or pipeline layout unknown", pi.name.c_str() );
-            return false;
-        }
-
-        std::vector< MetalGen::SetSlots > sets;
-        for( const auto& l : lit->second )
-        {
-            sets.push_back( l ? l->slots : MetalGen::SetSlots{} );
-        }
+        PrepareResult r;
 
         const MetalGen::ComputeShader sh =
-            MetalGen::TranslateCompute( mit->second.data(), mit->second.size(), sets, 30100 );
+            MetalGen::TranslateCompute( job.spirv.data(), job.spirv.size(), job.sets, 30100 );
         if( !sh.ok )
         {
-            Log( "%s: SPIR-V to Metal translation failed: %s", pi.name.c_str(), sh.error.c_str() );
-            return false;
+            r.error = "SPIR-V to Metal translation failed: " + sh.error;
+            return r;
         }
 
         NSError*           err = nil;
         MTLCompileOptions* co  = [MTLCompileOptions new];
         co.languageVersion     = MTLLanguageVersion3_1;
-        id< MTLLibrary > lib   = [s.mtlDevice newLibraryWithSource:[NSString stringWithUTF8String:sh.msl.c_str()]
-                                                         options:co
-                                                           error:&err];
+        id< MTLLibrary > lib   = [device newLibraryWithSource:[NSString stringWithUTF8String:sh.msl.c_str()]
+                                                    options:co
+                                                      error:&err];
         if( !lib )
         {
             NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                                [NSString stringWithFormat:@"rtgl1-%s.metal", pi.name.c_str()]];
+                                [NSString stringWithFormat:@"rtgl1-%s.metal", job.name.c_str()]];
             [[NSString stringWithUTF8String:sh.msl.c_str()] writeToFile:path
                                                              atomically:YES
                                                                encoding:NSUTF8StringEncoding
                                                                   error:nil];
             std::string msg = err ? err.localizedDescription.UTF8String : "?";
-            Log( "%s: Metal compile failed (source saved to %s): %.3000s", pi.name.c_str(), path.UTF8String, msg.c_str() );
-            return false;
+            r.error = "Metal compile failed (source saved to " + std::string( path.UTF8String ) +
+                      "): " + msg.substr( 0, 3000 );
+            return r;
         }
 
-        MTLFunctionConstantValues* fc = [MTLFunctionConstantValues new];
-        for( const VkSpecializationMapEntry& se : pi.specEntries )
+        NSString* entry = [NSString stringWithUTF8String:sh.entryPoint.c_str()];
+
+        // specialization constants -> function constants, by the types the shader declares
+        // (bool, int, uint, float; SPIRV-Cross keeps the constant_id as the index)
+        MTLFunctionConstantValues* fc    = [MTLFunctionConstantValues new];
+        id< MTLFunction >          probe = [lib newFunctionWithName:entry];
+        if( !probe )
         {
-            if( se.size == sizeof( uint32_t ) && se.offset + se.size <= pi.specData.size() )
+            r.error = "entry point '" + sh.entryPoint + "' not found";
+            return r;
+        }
+        for( MTLFunctionConstant* c in probe.functionConstantsDictionary.allValues )
+        {
+            for( const VkSpecializationMapEntry& se : job.specEntries )
             {
-                uint32_t v;
-                memcpy( &v, pi.specData.data() + se.offset, sizeof( v ) );
-                [fc setConstantValue:&v type:MTLDataTypeUInt atIndex:se.constantID];
+                if( se.constantID != c.index || se.offset + se.size > job.specData.size() )
+                {
+                    continue;
+                }
+                const uint8_t* src = job.specData.data() + se.offset;
+                switch( c.type )
+                {
+                    case MTLDataTypeBool: {
+                        uint32_t raw = 0;
+                        memcpy( &raw, src, std::min< size_t >( se.size, sizeof( raw ) ) );
+                        const bool b = raw != 0;
+                        [fc setConstantValue:&b type:MTLDataTypeBool atIndex:c.index];
+                        break;
+                    }
+                    case MTLDataTypeInt:
+                    case MTLDataTypeUInt:
+                    case MTLDataTypeFloat:
+                        if( se.size == 4 )
+                        {
+                            [fc setConstantValue:src type:c.type atIndex:c.index];
+                        }
+                        break;
+                    default: break;
+                }
             }
         }
-        id< MTLFunction > fn = [lib newFunctionWithName:[NSString stringWithUTF8String:sh.entryPoint.c_str()]
-                                         constantValues:fc
-                                                  error:&err];
+
+        id< MTLFunction > fn = [lib newFunctionWithName:entry constantValues:fc error:&err];
         if( !fn )
         {
-            Log( "%s: function '%s' failed: %s", pi.name.c_str(), sh.entryPoint.c_str(),
-                 err ? err.localizedDescription.UTF8String : "?" );
-            return false;
+            r.error = "function '" + sh.entryPoint + "' failed: " +
+                      ( err ? err.localizedDescription.UTF8String : "?" );
+            return r;
         }
 
         MTLComputePipelineDescriptor* pd = [MTLComputePipelineDescriptor new];
         pd.computeFunction               = fn;
-        pd.label                         = [NSString stringWithUTF8String:pi.name.c_str()];
-        id< MTLComputePipelineState > ps = [s.mtlDevice newComputePipelineStateWithDescriptor:pd
-                                                                                      options:MTLPipelineOptionNone
-                                                                                   reflection:nil
-                                                                                        error:&err];
+        pd.label                         = [NSString stringWithUTF8String:job.name.c_str()];
+        id< MTLComputePipelineState > ps = [device newComputePipelineStateWithDescriptor:pd
+                                                                                 options:MTLPipelineOptionNone
+                                                                              reflection:nil
+                                                                                   error:&err];
         const NSUInteger threads = NSUInteger( sh.localSize[ 0 ] ) * sh.localSize[ 1 ] * sh.localSize[ 2 ];
         if( !ps || ps.maxTotalThreadsPerThreadgroup < threads )
         {
-            Log( "%s: pipeline failed: %s", pi.name.c_str(),
-                 ps ? "too many threads per group" : ( err ? err.localizedDescription.UTF8String : "?" ) );
-            return false;
+            r.error = std::string( "pipeline failed: " ) +
+                      ( ps ? "too many threads per group" : ( err ? err.localizedDescription.UTF8String : "?" ) );
+            return r;
         }
 
-        pi.mtl             = ps;
-        pi.threadsPerGroup = MTLSizeMake( sh.localSize[ 0 ], sh.localSize[ 1 ], sh.localSize[ 2 ] );
-        Log( "%s: ready", pi.name.c_str() );
-        return true;
+        r.ps              = ps;
+        r.threadsPerGroup = MTLSizeMake( sh.localSize[ 0 ], sh.localSize[ 1 ], sh.localSize[ 2 ] );
+        return r;
     }
+}
+
+// under the lock
+bool ApplyPrepareResult( const PrepareJob& job, const PrepareResult& r, bool logSuccess )
+{
+    auto pit = S().pipelines.find( job.pipeline );
+    if( pit == S().pipelines.end() )
+    {
+        return false; // destroyed meanwhile
+    }
+    PipelineInfo& pi = pit->second;
+    if( !r.ps )
+    {
+        pi.failed = true;
+        Log( "%s: %s", job.name.c_str(), r.error.c_str() );
+        return false;
+    }
+    pi.mtl             = r.ps;
+    pi.threadsPerGroup = r.threadsPerGroup;
+    pi.failed          = false;
+    if( logSuccess )
+    {
+        Log( "%s: ready", job.name.c_str() );
+    }
+    return true;
+}
+
+std::string DefaultPipelineName( VkPipeline pipeline )
+{
+    char buf[ 48 ];
+    snprintf( buf, sizeof( buf ), "compute pipeline %llx", ( unsigned long long )( uintptr_t )pipeline );
+    return buf;
+}
+
+// under the lock
+bool PreparePipelineLocked( VkPipeline pipeline, bool logSuccess )
+{
+    State& s = S();
+    if( !s.enabled )
+    {
+        return false;
+    }
+    PrepareJob  job;
+    std::string error;
+    if( !MakePrepareJob( pipeline, job, error ) )
+    {
+        Log( "pipeline %p: %s", ( void* )pipeline, error.c_str() );
+        return false;
+    }
+    return ApplyPrepareResult( job, CompilePrepareJob( job, s.mtlDevice ), logSuccess );
+}
+
+}
+
+bool RTGL1::Metal::PreparePipeline( VkPipeline pipeline, const char* debugName )
+{
+    std::lock_guard g( S().lock );
+    auto            pit = S().pipelines.find( pipeline );
+    if( pit != S().pipelines.end() )
+    {
+        pit->second.name = debugName ? debugName : DefaultPipelineName( pipeline );
+    }
+    return PreparePipelineLocked( pipeline, true );
+}
+
+void RTGL1::Metal::PrepareAllPipelines()
+{
+    std::vector< PrepareJob > jobs;
+    id< MTLDevice >           device;
+    {
+        std::lock_guard g( S().lock );
+        State&          s = S();
+        if( !s.enabled || !s.computeEnv )
+        {
+            return;
+        }
+        device = s.mtlDevice;
+        for( auto& [ p, pi ] : s.pipelines )
+        {
+            if( pi.mtl || pi.failed )
+            {
+                continue;
+            }
+            if( pi.name.empty() )
+            {
+                pi.name = DefaultPipelineName( p );
+            }
+            PrepareJob  job;
+            std::string error;
+            if( MakePrepareJob( p, job, error ) )
+            {
+                jobs.push_back( std::move( job ) );
+            }
+        }
+    }
+    if( jobs.empty() )
+    {
+        return;
+    }
+
+    std::vector< PrepareResult > results( jobs.size() );
+    std::atomic< size_t >        next{ 0 };
+    const unsigned               threadCount =
+        std::clamp( std::thread::hardware_concurrency(), 1u, unsigned( std::min< size_t >( jobs.size(), 8 ) ) );
+    std::vector< std::thread > threads;
+    for( unsigned t = 0; t < threadCount; t++ )
+    {
+        threads.emplace_back( [ & ] {
+            for( size_t i = next++; i < jobs.size(); i = next++ )
+            {
+                results[ i ] = CompilePrepareJob( jobs[ i ], device );
+            }
+        } );
+    }
+    for( auto& t : threads )
+    {
+        t.join();
+    }
+
+    std::lock_guard g( S().lock );
+    size_t          ok = 0;
+    for( size_t i = 0; i < jobs.size(); i++ )
+    {
+        ok += ApplyPrepareResult( jobs[ i ], results[ i ], false ) ? 1 : 0;
+    }
+    Log( "%zu compute pipelines prepared for Metal, %zu failed", ok, jobs.size() - ok );
 }
 
 void RTGL1::Metal::RegisterAccelerationStructureAddress( VkAccelerationStructureKHR as, VkDeviceAddress address )
@@ -1653,6 +1909,185 @@ void RTGL1::Metal::QueueTopLevelBuild( VkAccelerationStructureKHR               
     S().pendingTlas.push_back( std::move( t ) );
 }
 
+namespace
+{
+
+const char* Intern( const char* name )
+{
+    std::string full = std::string( "metal: " ) + ( name ? name : "?" );
+    return S().internedNames.insert( std::move( full ) ).first->c_str();
+}
+
+void CommitResidency()
+{
+    State& s = S();
+    if( s.residencyDirty )
+    {
+        if( @available( macOS 15.0, * ) )
+        {
+            [( id< MTLResidencySet > )s.residency commit];
+        }
+        s.residencyDirty = false;
+    }
+}
+
+id< MTLComputeCommandEncoder > NewEncoder( id< MTLCommandBuffer > cb )
+{
+    id< MTLComputeCommandEncoder > e = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+    e.label                          = @"RTGL1 native";
+    return e;
+}
+
+// profiling: ends the current command buffer, so its GPU time is the work since the last mark
+void SplitForProfiling( const char* internedName )
+{
+    State& s = S();
+    [s.encoder updateFence:s.passFence];
+    [s.encoder endEncoding];
+    CommitResidency();
+    [s.cb commit];
+    s.profCbs.push_back( { s.cb, internedName } );
+
+    s.cb       = [s.queue commandBuffer];
+    s.cb.label = @"RTGL1 native (profiled)";
+    s.encoder  = NewEncoder( s.cb );
+    [s.encoder waitForFence:s.passFence];
+}
+
+void EncodeDispatch( PipelineInfo&          pi,
+                     const VkDescriptorSet* sets,
+                     uint32_t               setCount,
+                     const void*            push,
+                     uint32_t               pushSize,
+                     uint32_t               groupsX,
+                     uint32_t               groupsY,
+                     uint32_t               groupsZ )
+{
+    State& s = S();
+    [s.encoder setComputePipelineState:pi.mtl];
+    for( uint32_t i = 0; i < setCount; i++ )
+    {
+        if( sets[ i ] == VK_NULL_HANDLE )
+        {
+            continue;
+        }
+        if( id< MTLBuffer > ab = EncodeSet( sets[ i ] ) )
+        {
+            [s.encoder setBuffer:ab offset:0 atIndex:i];
+        }
+    }
+    if( push && pushSize > 0 )
+    {
+        [s.encoder setBytes:push length:pushSize atIndex:MetalGen::PUSH_CONSTANT_BUFFER_INDEX];
+    }
+    [s.encoder dispatchThreadgroups:MTLSizeMake( groupsX, groupsY, groupsZ )
+              threadsPerThreadgroup:pi.threadsPerGroup];
+    // the next pass reads what this one wrote
+    [s.encoder memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+}
+
+// a command on SectionCmd() that the native path can't do: skipped, and the generic compute
+// passes go back to Vulkan from the next frame on
+void SectionUnsupported( const char* what )
+{
+    std::lock_guard g( S().lock );
+    S().computeBroken = true;
+    LogOnce( std::string( what ) + " was recorded inside a native Metal section: not supported, "
+                                   "the compute passes go back to MoltenVK" );
+}
+
+void SectionBindPipeline( VkPipelineBindPoint bp, VkPipeline pipeline )
+{
+    if( bp != VK_PIPELINE_BIND_POINT_COMPUTE )
+    {
+        SectionUnsupported( "a graphics pipeline bind" );
+        return;
+    }
+    std::lock_guard g( S().lock );
+    S().bound.pipeline = pipeline;
+}
+
+void SectionBindSets( VkPipelineBindPoint bp, uint32_t firstSet, uint32_t count, const VkDescriptorSet* sets )
+{
+    if( bp != VK_PIPELINE_BIND_POINT_COMPUTE )
+    {
+        SectionUnsupported( "a graphics descriptor set bind" );
+        return;
+    }
+    std::lock_guard g( S().lock );
+    for( uint32_t i = 0; i < count && firstSet + i < MAX_BOUND_SETS; i++ )
+    {
+        S().bound.sets[ firstSet + i ] = sets[ i ];
+    }
+}
+
+void SectionPushConstants( uint32_t offset, uint32_t size, const void* data )
+{
+    std::lock_guard g( S().lock );
+    BoundState&     b = S().bound;
+    if( offset + size > sizeof( b.push ) )
+    {
+        LogOnce( "push constants are too large for the native path" );
+        return;
+    }
+    memcpy( b.push + offset, data, size );
+    b.pushSize = std::max( b.pushSize, offset + size );
+}
+
+void SectionDispatch( uint32_t x, uint32_t y, uint32_t z )
+{
+    @autoreleasepool
+    {
+        std::lock_guard g( S().lock );
+        State&          s = S();
+        if( !s.encoder )
+        {
+            LogOnce( "a dispatch on the section command buffer outside of a section" );
+            return;
+        }
+
+        auto pit = s.pipelines.find( s.bound.pipeline );
+        if( pit == s.pipelines.end() )
+        {
+            s.computeBroken = true;
+            LogOnce( "a dispatch without a known compute pipeline in a native Metal section" );
+            return;
+        }
+        if( !pit->second.mtl && !pit->second.failed )
+        {
+            // e.g. created by a shader reload: compiled now (a hitch, once)
+            if( pit->second.name.empty() )
+            {
+                pit->second.name = DefaultPipelineName( pit->first );
+            }
+            PreparePipelineLocked( pit->first, true );
+            pit = s.pipelines.find( s.bound.pipeline );
+        }
+        if( pit == s.pipelines.end() || !pit->second.mtl )
+        {
+            s.computeBroken = true;
+            LogOnce( "a compute pass couldn't be prepared for Metal, the compute passes go back to MoltenVK" );
+            return;
+        }
+
+        uint32_t setCount = 0;
+        auto     lit      = s.pipelineLayouts.find( pit->second.layout );
+        if( lit != s.pipelineLayouts.end() )
+        {
+            setCount = std::min< uint32_t >( uint32_t( lit->second.size() ), MAX_BOUND_SETS );
+        }
+        EncodeDispatch( pit->second, s.bound.sets, setCount, s.bound.push, s.bound.pushSize, x, y, z );
+    }
+}
+
+}
+
+bool RTGL1::Metal::IsComputeReady()
+{
+    const State& s = S();
+    return s.enabled && s.computeEnv && !s.computeBroken;
+}
+
 void RTGL1::Metal::BeginSection( VkCommandBuffer& cmd )
 {
     @autoreleasepool
@@ -1664,20 +2099,33 @@ void RTGL1::Metal::BeginSection( VkCommandBuffer& cmd )
         // the Vulkan work so far signals the event...
         const uint64_t vulkanDone = ++s.timeline;
         s.cmdManager->SubmitTimeline( cmd, s.semaphore, 0, vulkanDone );
-        cmd = VK_NULL_HANDLE;
+        cmd           = SectionCmd();
+        s.sectionDone = vulkanDone + 1;
+        s.bound       = {};
 
         // ...that the Metal work waits for on the GPU
         s.cb       = [s.queue commandBuffer];
-        s.cb.label = @"RTGL1 native path tracing";
+        s.cb.label = @"RTGL1 native";
         [s.cb encodeWaitForEvent:s.event value:vulkanDone];
+        if( s.profile )
+        {
+            // measured separately: the wait for the Vulkan work isn't part of any pass
+            [s.cb commit];
+            s.profWaitCb = s.cb;
+            s.cb         = [s.queue commandBuffer];
+            s.cb.label   = @"RTGL1 native (profiled)";
+        }
 
         const bool built = EncodeAccelerationStructureBuilds();
 
-        s.encoder       = [s.cb computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
-        s.encoder.label = @"RTGL1 path tracer";
+        s.encoder = NewEncoder( s.cb );
         if( built )
         {
             [s.encoder waitForFence:s.fence];
+            if( s.profile )
+            {
+                SplitForProfiling( Intern( "acceleration structure builds" ) );
+            }
         }
     }
 }
@@ -1701,19 +2149,33 @@ void RTGL1::Metal::Dispatch( VkPipeline             pipeline,
             LogOnce( "a dispatch uses a pipeline that isn't prepared for Metal" );
             return;
         }
+        EncodeDispatch( pit->second, sets, setCount, nullptr, 0, groupsX, groupsY, groupsZ );
+    }
+}
 
-        [s.encoder setComputePipelineState:pit->second.mtl];
-        for( uint32_t i = 0; i < setCount; i++ )
+void RTGL1::Metal::Mark( const char* name )
+{
+    std::lock_guard g( S().lock );
+    State&          s = S();
+    if( s.profile && s.cb && s.encoder )
+    {
+        @autoreleasepool
         {
-            if( id< MTLBuffer > ab = EncodeSet( sets[ i ] ) )
-            {
-                [s.encoder setBuffer:ab offset:0 atIndex:i];
-            }
+            SplitForProfiling( Intern( name ) );
         }
-        [s.encoder dispatchThreadgroups:MTLSizeMake( groupsX, groupsY, groupsZ )
-                  threadsPerThreadgroup:pit->second.threadsPerGroup];
-        // the next pass reads what this one wrote
-        [s.encoder memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+    }
+}
+
+void RTGL1::Metal::DrainTimings( const std::function< void( const char*, double ) >& fn )
+{
+    std::vector< std::pair< const char*, double > > t;
+    {
+        std::lock_guard g( S().timingLock );
+        t.swap( S().timings );
+    }
+    for( const auto& [ name, ms ] : t )
+    {
+        fn( name, ms );
     }
 }
 
@@ -1727,25 +2189,48 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
 
         [s.encoder endEncoding];
         s.encoder = nil;
-
-        if( s.residencyDirty )
-        {
-            if( @available( macOS 15.0, * ) )
-            {
-                [( id< MTLResidencySet > )s.residency commit];
-            }
-            s.residencyDirty = false;
-        }
+        CommitResidency();
 
         const uint64_t metalDone = ++s.timeline;
+        assert( metalDone == s.sectionDone );
         [s.cb encodeSignalEvent:s.event value:metalDone];
         [s.cb addCompletedHandler:^( id< MTLCommandBuffer > c ) {
             if( c.status == MTLCommandBufferStatusError && S().loggedErrors.fetch_add( 1 ) < 10 )
             {
-                Log( "GPU error in the native path tracing: %s",
+                Log( "GPU error in the native Metal section: %s",
                      c.error ? c.error.localizedDescription.UTF8String : "?" );
             }
         }];
+
+        if( s.profile )
+        {
+            s.profCbs.push_back( { s.cb, Intern( "(end of section)" ) } );
+            auto                   list   = std::make_shared< std::vector< ProfiledCb > >( std::move( s.profCbs ) );
+            id< MTLCommandBuffer > waitCb = s.profWaitCb;
+            s.profCbs.clear();
+            s.profWaitCb = nil;
+
+            [s.cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
+                std::vector< std::pair< const char*, double > > out;
+                double                                          prevEnd = waitCb.GPUEndTime;
+                for( const ProfiledCb& p : *list )
+                {
+                    if( p.cb.status != MTLCommandBufferStatusCompleted )
+                    {
+                        out.clear();
+                        break;
+                    }
+                    const double start = std::max( double( p.cb.GPUStartTime ), prevEnd );
+                    const double ms    = std::max( 0.0, double( p.cb.GPUEndTime ) - start ) * 1000.0;
+                    prevEnd            = p.cb.GPUEndTime;
+                    out.emplace_back( p.name, ms );
+                }
+                list->clear();
+                std::lock_guard g( S().timingLock );
+                S().timings.insert( S().timings.end(), out.begin(), out.end() );
+            }];
+        }
+
         [s.cb commit];
         s.lastCb = s.cb;
         s.cb     = nil;
@@ -1754,4 +2239,163 @@ void RTGL1::Metal::EndSection( VkCommandBuffer& cmd )
         s.cmdManager->AddTimelineWaitForNextSubmit( s.semaphore, metalDone );
         cmd = s.cmdManager->StartGraphicsCmd();
     }
+}
+
+// ================================================================================================
+// command recording shims
+
+void RgMtl_vkCmdBindPipeline( VkCommandBuffer cmd, VkPipelineBindPoint bp, VkPipeline pipeline )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionBindPipeline( bp, pipeline );
+        return;
+    }
+    vkCmdBindPipeline( cmd, bp, pipeline );
+}
+
+void RgMtl_vkCmdBindDescriptorSets( VkCommandBuffer        cmd,
+                                    VkPipelineBindPoint    bp,
+                                    VkPipelineLayout       layout,
+                                    uint32_t               firstSet,
+                                    uint32_t               count,
+                                    const VkDescriptorSet* sets,
+                                    uint32_t               dynamicOffsetCount,
+                                    const uint32_t*        dynamicOffsets )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        if( dynamicOffsetCount > 0 )
+        {
+            SectionUnsupported( "a descriptor set bind with dynamic offsets" );
+            return;
+        }
+        SectionBindSets( bp, firstSet, count, sets );
+        return;
+    }
+    vkCmdBindDescriptorSets( cmd, bp, layout, firstSet, count, sets, dynamicOffsetCount, dynamicOffsets );
+}
+
+void RgMtl_vkCmdPushConstants( VkCommandBuffer    cmd,
+                               VkPipelineLayout   layout,
+                               VkShaderStageFlags stages,
+                               uint32_t           offset,
+                               uint32_t           size,
+                               const void*        data )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionPushConstants( offset, size, data );
+        return;
+    }
+    vkCmdPushConstants( cmd, layout, stages, offset, size, data );
+}
+
+void RgMtl_vkCmdDispatch( VkCommandBuffer cmd, uint32_t x, uint32_t y, uint32_t z )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionDispatch( x, y, z );
+        return;
+    }
+    vkCmdDispatch( cmd, x, y, z );
+}
+
+void RgMtl_vkCmdPipelineBarrier( VkCommandBuffer              cmd,
+                                 VkPipelineStageFlags         src,
+                                 VkPipelineStageFlags         dst,
+                                 VkDependencyFlags            flags,
+                                 uint32_t                     memCount,
+                                 const VkMemoryBarrier*       mem,
+                                 uint32_t                     bufCount,
+                                 const VkBufferMemoryBarrier* buf,
+                                 uint32_t                     imgCount,
+                                 const VkImageMemoryBarrier*  img )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        return; // the passes of a section run in order
+    }
+    vkCmdPipelineBarrier( cmd, src, dst, flags, memCount, mem, bufCount, buf, imgCount, img );
+}
+
+void RgMtl_svkCmdPipelineBarrier2KHR( VkCommandBuffer cmd, const VkDependencyInfo* info )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        return; // the passes of a section run in order
+    }
+    RTGL1::svkCmdPipelineBarrier2KHR( cmd, info );
+}
+
+void RgMtl_vkCmdCopyBuffer( VkCommandBuffer cmd, VkBuffer src, VkBuffer dst, uint32_t count, const VkBufferCopy* regions )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionUnsupported( "vkCmdCopyBuffer" );
+        return;
+    }
+    vkCmdCopyBuffer( cmd, src, dst, count, regions );
+}
+
+void RgMtl_vkCmdCopyBufferToImage( VkCommandBuffer          cmd,
+                                   VkBuffer                 src,
+                                   VkImage                  dst,
+                                   VkImageLayout            layout,
+                                   uint32_t                 count,
+                                   const VkBufferImageCopy* regions )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionUnsupported( "vkCmdCopyBufferToImage" );
+        return;
+    }
+    vkCmdCopyBufferToImage( cmd, src, dst, layout, count, regions );
+}
+
+void RgMtl_vkCmdBlitImage( VkCommandBuffer    cmd,
+                           VkImage            src,
+                           VkImageLayout      srcLayout,
+                           VkImage            dst,
+                           VkImageLayout      dstLayout,
+                           uint32_t           count,
+                           const VkImageBlit* regions,
+                           VkFilter           filter )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionUnsupported( "vkCmdBlitImage" );
+        return;
+    }
+    vkCmdBlitImage( cmd, src, srcLayout, dst, dstLayout, count, regions, filter );
+}
+
+void RgMtl_vkCmdWriteTimestamp( VkCommandBuffer cmd, VkPipelineStageFlagBits stage, VkQueryPool pool, uint32_t query )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        return; // profiling in a section uses Metal::Mark
+    }
+    vkCmdWriteTimestamp( cmd, stage, pool, query );
+}
+
+void RgMtl_vkCmdResetQueryPool( VkCommandBuffer cmd, VkQueryPool pool, uint32_t first, uint32_t count )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        SectionUnsupported( "vkCmdResetQueryPool" );
+        return;
+    }
+    vkCmdResetQueryPool( cmd, pool, first, count );
+}
+
+void RgMtl_vkCmdBeginRenderPass( VkCommandBuffer cmd, const VkRenderPassBeginInfo* info, VkSubpassContents contents )
+{
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        // can't be skipped safely: the draws that follow would go to Vulkan
+        Log( "vkCmdBeginRenderPass inside a native Metal section" );
+        abort();
+    }
+    vkCmdBeginRenderPass( cmd, info, contents );
 }

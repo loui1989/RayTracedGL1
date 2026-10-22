@@ -152,6 +152,14 @@ void FrameProfiler::Gpu( VkCommandBuffer cmd, const char* name )
     {
         return;
     }
+#ifdef __APPLE__
+    // inside a native Metal section: measured by Metal, reported with Value()
+    if( Metal::IsSectionCmd( cmd ) )
+    {
+        Metal::Mark( name );
+        return;
+    }
+#endif
     auto& m = marks[ curFrameIndex ];
     if( m.count >= MAX_MARKS )
     {

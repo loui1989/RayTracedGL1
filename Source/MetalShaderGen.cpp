@@ -167,6 +167,18 @@ ComputeShader TranslateCompute( const uint32_t*                spirv,
             }
         }
 
+        // push constants: a separate buffer, set with setBytes
+        {
+            spirv_cross::MSLResourceBinding rb;
+            rb.stage      = spv::ExecutionModelGLCompute;
+            rb.basetype   = spirv_cross::SPIRType::Void;
+            rb.desc_set   = spirv_cross::kPushConstDescSet;
+            rb.binding    = spirv_cross::kPushConstBinding;
+            rb.count      = 1;
+            rb.msl_buffer = PUSH_CONSTANT_BUFFER_INDEX;
+            msl.add_msl_resource_binding( rb );
+        }
+
         result.msl = msl.compile();
 
         if( msl.needs_buffer_size_buffer() || msl.needs_swizzle_buffer() ||

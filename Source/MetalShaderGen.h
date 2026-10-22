@@ -36,6 +36,9 @@
 namespace RTGL1::MetalGen
 {
 
+// Metal buffer index of the push constants (argument buffers use indices 0..set count-1)
+constexpr uint32_t PUSH_CONSTANT_BUFFER_INDEX = 27;
+
 struct BindingDesc
 {
     uint32_t         binding;

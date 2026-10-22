@@ -33,6 +33,7 @@
 #ifdef __APPLE__
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include <vulkan/vulkan.h>
@@ -93,13 +94,61 @@ void QueueTopLevelBuild( VkAccelerationStructureKHR                dst,
                          uint32_t                                  instanceCount,
                          bool                                      preferFastTrace );
 
-// A section of native Metal work in the frame: BeginSection submits 'cmd' (and sets it to
-// VK_NULL_HANDLE), EndSection starts a new Vulkan command buffer in 'cmd' that waits for it.
+// Translates and compiles all compute pipelines that aren't prepared yet, in parallel.
+// Pipelines created later (shader reload) are prepared when they're first dispatched.
+void PrepareAllPipelines();
+
+// A section of native Metal work in the frame: BeginSection submits 'cmd' and sets it to
+// SectionCmd(), EndSection starts a new Vulkan command buffer in 'cmd' that waits for it.
+// Inside a section, compute work recorded on SectionCmd() with vkCmdBindPipeline,
+// vkCmdBindDescriptorSets, vkCmdPushConstants and vkCmdDispatch runs in Metal (barriers are
+// not needed: the passes run in order). Other commands aren't supported there.
 void BeginSection( VkCommandBuffer& cmd );
 void Dispatch( VkPipeline pipeline, const VkDescriptorSet* sets, uint32_t setCount, uint32_t groupsX, uint32_t groupsY, uint32_t groupsZ );
 void EndSection( VkCommandBuffer& cmd );
 bool IsInSection();
 
+inline VkCommandBuffer SectionCmd()
+{
+    // never given to Vulkan: the shims below route everything recorded on it to Metal
+    return reinterpret_cast< VkCommandBuffer >( uintptr_t( 0x5EC7104D7A11ull ) );
+}
+inline bool IsSectionCmd( VkCommandBuffer cmd )
+{
+    return cmd == SectionCmd();
+}
+
+// The generic compute passes (denoiser, volumetrics, exposure, ...) can run in a section:
+// native path is on, RTGL1_METAL_COMPUTE isn't 0, and no pass failed so far.
+bool IsComputeReady();
+
+// RTGL1_PROFILE=1: GPU time of the work in the section since the previous mark.
+// 'name' must be a string literal. Results arrive a frame or two later, see DrainTimings.
+void Mark( const char* name );
+void DrainTimings( const std::function< void( const char* name, double ms ) >& fn );
+
+}
+
+// ---- command recording shims (see MetalShims.h): forward to Vulkan, or record into Metal
+// when the command buffer is RTGL1::Metal::SectionCmd()
+
+void RgMtl_vkCmdBindPipeline( VkCommandBuffer, VkPipelineBindPoint, VkPipeline );
+void RgMtl_vkCmdBindDescriptorSets( VkCommandBuffer, VkPipelineBindPoint, VkPipelineLayout, uint32_t, uint32_t, const VkDescriptorSet*, uint32_t, const uint32_t* );
+void RgMtl_vkCmdPushConstants( VkCommandBuffer, VkPipelineLayout, VkShaderStageFlags, uint32_t, uint32_t, const void* );
+void RgMtl_vkCmdDispatch( VkCommandBuffer, uint32_t, uint32_t, uint32_t );
+void RgMtl_vkCmdPipelineBarrier( VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*, uint32_t, const VkImageMemoryBarrier* );
+void RgMtl_svkCmdPipelineBarrier2KHR( VkCommandBuffer, const VkDependencyInfo* );
+void RgMtl_vkCmdCopyBuffer( VkCommandBuffer, VkBuffer, VkBuffer, uint32_t, const VkBufferCopy* );
+void RgMtl_vkCmdCopyBufferToImage( VkCommandBuffer, VkBuffer, VkImage, VkImageLayout, uint32_t, const VkBufferImageCopy* );
+void RgMtl_vkCmdBlitImage( VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageBlit*, VkFilter );
+void RgMtl_vkCmdWriteTimestamp( VkCommandBuffer, VkPipelineStageFlagBits, VkQueryPool, uint32_t );
+void RgMtl_vkCmdResetQueryPool( VkCommandBuffer, VkQueryPool, uint32_t, uint32_t );
+void RgMtl_vkCmdBeginRenderPass( VkCommandBuffer, const VkRenderPassBeginInfo*, VkSubpassContents );
+
+namespace RTGL1
+{
+// some code calls the extension function pointers as RTGL1::svk...
+using ::RgMtl_svkCmdPipelineBarrier2KHR;
 }
 
 #endif // __APPLE__

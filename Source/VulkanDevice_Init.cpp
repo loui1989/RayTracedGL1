@@ -301,6 +301,11 @@ VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
     framebuffers->Subscribe(decalManager);
     framebuffers->Subscribe(amdFsr2);
     framebuffers->Subscribe(restirBuffers);
+
+#ifdef __APPLE__
+    // RTGL1_METAL_RT=1: translate the other compute shaders too (denoiser, volumetrics, ...)
+    Metal::PrepareAllPipelines();
+#endif
 }
 
 VulkanDevice::~VulkanDevice()

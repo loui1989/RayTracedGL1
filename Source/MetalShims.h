@@ -51,4 +51,17 @@
 #define vkCreateComputePipelines(...)      RTGL1::Metal::CreateComputePipelines( __VA_ARGS__ )
 #define vkDestroyPipeline(...)             RTGL1::Metal::DestroyPipeline( __VA_ARGS__ )
 
+#define vkCmdBindPipeline(...)             RgMtl_vkCmdBindPipeline( __VA_ARGS__ )
+#define vkCmdBindDescriptorSets(...)       RgMtl_vkCmdBindDescriptorSets( __VA_ARGS__ )
+#define vkCmdPushConstants(...)            RgMtl_vkCmdPushConstants( __VA_ARGS__ )
+#define vkCmdDispatch(...)                 RgMtl_vkCmdDispatch( __VA_ARGS__ )
+#define vkCmdPipelineBarrier(...)          RgMtl_vkCmdPipelineBarrier( __VA_ARGS__ )
+#define svkCmdPipelineBarrier2KHR(...)     RgMtl_svkCmdPipelineBarrier2KHR( __VA_ARGS__ )
+#define vkCmdCopyBuffer(...)               RgMtl_vkCmdCopyBuffer( __VA_ARGS__ )
+#define vkCmdCopyBufferToImage(...)        RgMtl_vkCmdCopyBufferToImage( __VA_ARGS__ )
+#define vkCmdBlitImage(...)                RgMtl_vkCmdBlitImage( __VA_ARGS__ )
+#define vkCmdWriteTimestamp(...)           RgMtl_vkCmdWriteTimestamp( __VA_ARGS__ )
+#define vkCmdResetQueryPool(...)           RgMtl_vkCmdResetQueryPool( __VA_ARGS__ )
+#define vkCmdBeginRenderPass(...)          RgMtl_vkCmdBeginRenderPass( __VA_ARGS__ )
+
 #endif
