@@ -44,6 +44,47 @@ void main()
     const uint seed = getRandomSeed(pix, globalUniform.frameId);
     const Surface surf = fetchGbufferSurface(pix);
 
+    // rt_debug_restir_m 2: a per-pixel report of what the light selection sees, stored in
+    // place of the reservoir (x: flags, y: the largest target pdf as float bits), for
+    // reading back from a frame dump. Bits: 1 sky, 2 no lights, 4 a light reaches the
+    // surface, 8 a light's target pdf is NaN/Inf, 16 bad normal, 32 bad position, 64 a light
+    // sample is NaN, 128 sun target pdf NaN/Inf, 256 sun reaches the surface, 512 the RIS
+    // weight sum is NaN/Inf, 1024 the reservoir is valid, 2048 bad random numbers.
+    if (globalUniform.debugRestirM == 2)
+    {
+        uint  flags  = 0;
+        float maxPdf = 0.0;
+        if (surf.isSky)                  { flags |= 1u; }
+        if (globalUniform.lightCount == 0) { flags |= 2u; }
+        if (!surf.isSky)
+        {
+            for (uint i = 0; i < min(globalUniform.lightCount, 512u); i++)
+            {
+                const LightSample ls = sampleLight(lightSources[LIGHT_ARRAY_REGULAR_LIGHTS_OFFSET + i], surf.position, vec2(0.5));
+                const float t = targetPdfForLightSample(ls, surf);
+                if (isnan(t) || isinf(t)) { flags |= 8u; } else { maxPdf = max(maxPdf, t); }
+                if (any(isnan(ls.position)) || isnan(ls.dw) || any(isnan(ls.color))) { flags |= 64u; }
+            }
+            if (maxPdf > 0.0) { flags |= 4u; }
+            if (any(isnan(surf.normal)) || abs(dot(surf.normal, surf.normal) - 1.0) > 0.1) { flags |= 16u; }
+            if (any(isnan(surf.position)) || any(isinf(surf.position))) { flags |= 32u; }
+            if (globalUniform.directionalLightExists != 0)
+            {
+                const LightSample ls = sampleLight(lightSources[LIGHT_ARRAY_DIRECTIONAL_LIGHT_OFFSET], surf.position, vec2(0.5));
+                const float t = targetPdfForLightSample(ls, surf);
+                if (isnan(t) || isinf(t)) { flags |= 128u; }
+                if (t > 0.0) { flags |= 256u; }
+            }
+            const vec2 rr = getLightPointRnd(seed);
+            if (any(isnan(rr)) || any(greaterThan(rr, vec2(1.0))) || any(lessThan(rr, vec2(0.0)))) { flags |= 2048u; }
+            const Reservoir full = calcInitialReservoir(seed, RANDOM_SALT_INITIAL_RESERVOIRS_BASE, surf, rr);
+            if (isnan(full.weightSum) || isinf(full.weightSum)) { flags |= 512u; }
+            if (isReservoirValid(full)) { flags |= 1024u; }
+        }
+        imageStore(framebufReservoirsInitial, pix, uvec4(flags, floatBitsToUint(maxPdf), 0, 0));
+        return;
+    }
+
     if (surf.isSky)
     {
         imageStoreReservoirInitial(emptyReservoir(), pix);
