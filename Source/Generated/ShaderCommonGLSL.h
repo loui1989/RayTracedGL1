@@ -309,6 +309,7 @@ struct ShGlobalUniform
     vec4 smokeExtra[32];
     vec4 rippleSources[32];
     vec4 rippleParams[32];
+    vec4 skyLightColor;
 };
 
 struct ShGeometryInstance

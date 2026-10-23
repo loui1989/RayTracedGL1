@@ -876,6 +876,11 @@ typedef struct RgDrawFrameSkyParams
     // If equals to zero, then default value is used.
     // Default: identity matrix.
     RgMatrix3D  skyCubemapRotationTransform;
+    // Color of the light that the sky casts on the scene (not of the visible sky), linear.
+    // The sky's brightness in each direction is kept; skyColorSaturation mixes the sky's
+    // own color back in (0 - only this color, 1 - only the sky's).
+    // If all zero, white: the light is the sky's own color, desaturated by skyColorSaturation.
+    RgFloat3D   skyLightColor;
 } RgDrawFrameSkyParams;
 
 typedef struct RgDrawFrameTexturesParams

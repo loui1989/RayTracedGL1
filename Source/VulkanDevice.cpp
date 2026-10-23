@@ -273,6 +273,23 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             gu->skyColorMultiplier = sp.skyColorMultiplier;
             gu->skyColorSaturation = std::max( sp.skyColorSaturation, 0.0f );
 
+            {
+                // normalized to luminance 1: only the color, the brightness is the sky's
+                const float* c = sp.skyLightColor.data;
+                const float  l = 0.2125f * c[ 0 ] + 0.7154f * c[ 1 ] + 0.0721f * c[ 2 ];
+                if( l > 0.0001f && c[ 0 ] >= 0 && c[ 1 ] >= 0 && c[ 2 ] >= 0 )
+                {
+                    gu->skyLightColor[ 0 ] = c[ 0 ] / l;
+                    gu->skyLightColor[ 1 ] = c[ 1 ] / l;
+                    gu->skyLightColor[ 2 ] = c[ 2 ] / l;
+                }
+                else
+                {
+                    gu->skyLightColor[ 0 ] = gu->skyLightColor[ 1 ] = gu->skyLightColor[ 2 ] = 1.0f;
+                }
+                gu->skyLightColor[ 3 ] = 0.0f;
+            }
+
             gu->skyType = sp.skyType == RG_SKY_TYPE_CUBEMAP ? SKY_TYPE_CUBEMAP :
                           sp.skyType == RG_SKY_TYPE_RASTERIZED_GEOMETRY ? SKY_TYPE_RASTERIZED_GEOMETRY :
                           SKY_TYPE_COLOR;
@@ -289,6 +306,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             gu->skyColorDefault[ 0 ] = gu->skyColorDefault[ 1 ] = gu->skyColorDefault[ 2 ] = gu->skyColorDefault[ 3 ] = 1.0f;
             gu->skyColorMultiplier                                                                                    = 1.0f;
             gu->skyColorSaturation                                                                                    = 1.0f;
+            gu->skyLightColor[ 0 ] = gu->skyLightColor[ 1 ] = gu->skyLightColor[ 2 ] = 1.0f;
+            gu->skyLightColor[ 3 ] = 0.0f;
             gu->skyType                                                                                               = SKY_TYPE_COLOR;
             gu->skyCubemapIndex                                                                                       = RG_EMPTY_CUBEMAP;
         }

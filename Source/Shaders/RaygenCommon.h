@@ -372,7 +372,8 @@ vec3 getSky(vec3 direction)
     vec3 col = getSkyPrimary(direction);
     float l = getLuminance(col);
 
-    return mix(vec3(l), col, globalUniform.skyColorSaturation) * globalUniform.skyColorMultiplier;
+    // the desaturated part takes the color the game gave to the sky's light (white by default)
+    return mix(l * globalUniform.skyLightColor.rgb, col, globalUniform.skyColorSaturation) * globalUniform.skyColorMultiplier;
 }
 #endif
 
