@@ -33,12 +33,18 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <unordered_map>
+#include <mutex>
+#include <string>
+#include <vector>
+#include <sys/stat.h>
+#include <unistd.h>
 
 using namespace RTGL1::MetalNative;
 
@@ -170,6 +176,8 @@ MTLTextureSwizzle SwizzleOf( VkComponentSwizzle s, MTLTextureSwizzle identity )
 }
 
 id< MTLBuffer > EnsureMemoryBuffer( NativeMemory* m );
+void            ForgetDebugName( uint64_t handle );
+void            MaybeDumpFrame();
 }
 
 namespace
@@ -228,6 +236,21 @@ void RTGL1::MetalNative::NoteCommitted( id< MTLCommandBuffer > cb )
     p.erase( std::remove_if( p.begin(),
                              p.end(),
                              []( id< MTLCommandBuffer > c ) {
+                                 if( c.status == MTLCommandBufferStatusError )
+                                 {
+                                     // a failed command buffer leaves its passes' outputs
+                                     // untouched, which shows as missing lighting, not as a
+                                     // crash: say so (the first few, then every 1000th)
+                                     static uint32_t failures = 0;
+                                     if( failures < 8 || failures % 1000 == 0 )
+                                     {
+                                         fprintf( stderr,
+                                                  "[Metal] command buffer '%s' failed: %s\n",
+                                                  c.label ? c.label.UTF8String : "",
+                                                  c.error ? c.error.localizedDescription.UTF8String : "?" );
+                                     }
+                                     failures++;
+                                 }
                                  return c.status == MTLCommandBufferStatusCompleted ||
                                         c.status == MTLCommandBufferStatusError;
                              } ),
@@ -1008,6 +1031,7 @@ VkResult RTGL1::MetalNative::vkAcquireNextImageKHR( VkDevice,
 
 VkResult RTGL1::MetalNative::vkQueuePresentKHR( VkQueue, const VkPresentInfoKHR* pi )
 {
+    MaybeDumpFrame();
     @autoreleasepool
     {
         id< MTLCommandBuffer > cb = [Queue() commandBuffer];
@@ -1227,6 +1251,7 @@ VkResult RTGL1::MetalNative::vkCreateBuffer( VkDevice, const VkBufferCreateInfo*
 
 void RTGL1::MetalNative::vkDestroyBuffer( VkDevice, VkBuffer buffer, const VkAllocationCallbacks* )
 {
+    ForgetDebugName( reinterpret_cast< uint64_t >( buffer ) );
     delete Obj< NativeBuffer >( buffer );
 }
 
@@ -1330,6 +1355,7 @@ VkResult RTGL1::MetalNative::vkCreateImage( VkDevice, const VkImageCreateInfo* c
 void RTGL1::MetalNative::vkDestroyImage( VkDevice, VkImage image, const VkAllocationCallbacks* )
 {
     auto* img = Obj< NativeImage >( image );
+    ForgetDebugName( reinterpret_cast< uint64_t >( image ) );
     if( img && !img->swapchain )
     {
         RTGL1::Metal::ForgetImage( image );
@@ -1702,8 +1728,243 @@ void RTGL1::MetalNative::vkDestroyDebugUtilsMessengerEXT( VkInstance, VkDebugUti
     delete Obj< Dummy >( m );
 }
 
-VkResult RTGL1::MetalNative::vkSetDebugUtilsObjectNameEXT( VkDevice, const VkDebugUtilsObjectNameInfoEXT* )
+// ---- frame dump: a diagnostic for when the picture is wrong and the reason isn't visible
+//
+// Create a file named metal-dump.txt in the current folder (the game's data folder) while the
+// game runs. Its first line is an optional delay in seconds; the following lines, if any, are
+// parts of names to dump (all named images and buffers otherwise). After the delay, the
+// contents of the named images (the framebuffers) and buffers at the end of a frame are written
+// to metal-dump/ with an index.txt, and the file is renamed to metal-dump.done.
+
+namespace
 {
+struct DebugNames
+{
+    std::mutex                                                              lock;
+    std::unordered_map< uint64_t, std::pair< VkObjectType, std::string > > names;
+};
+DebugNames& Names()
+{
+    static DebugNames n;
+    return n;
+}
+
+void ForgetDebugName( uint64_t handle )
+{
+    std::lock_guard g( Names().lock );
+    Names().names.erase( handle );
+}
+
+std::string DumpFileName( const std::string& name, const char* ext )
+{
+    std::string f;
+    for( char c : name )
+    {
+        f += ( isalnum( uint8_t( c ) ) || c == '_' || c == '-' ) ? c : '_';
+    }
+    return f + ext;
+}
+
+bool WriteFile( const std::string& path, const void* data, size_t size )
+{
+    FILE* f = fopen( path.c_str(), "wb" );
+    if( !f )
+    {
+        return false;
+    }
+    const bool ok = fwrite( data, 1, size, f ) == size;
+    fclose( f );
+    return ok;
+}
+
+void DumpFrame( const char* dir, const std::vector< std::string >& filters )
+{
+    using namespace RTGL1::MetalNative;
+    WaitIdle();
+
+    std::vector< std::pair< uint64_t, std::pair< VkObjectType, std::string > > > list;
+    {
+        std::lock_guard g( Names().lock );
+        list.assign( Names().names.begin(), Names().names.end() );
+    }
+    std::sort( list.begin(), list.end(), []( const auto& a, const auto& b ) { return a.second.second < b.second.second; } );
+
+    mkdir( dir, 0755 );
+    FILE* idx = fopen( ( std::string( dir ) + "/index.txt" ).c_str(), "w" );
+    if( !idx )
+    {
+        fprintf( stderr, "[Metal] frame dump: can't write to %s\n", dir );
+        return;
+    }
+    fprintf( idx, "# kind\tname\tvkformat\twidth\theight\tbytesPerRow\tfile  (buffer: kind name size file)\n" );
+
+    constexpr size_t maxBytes = size_t( 256 ) << 20;
+    uint32_t         count    = 0;
+    size_t           total    = 0;
+    for( const auto& [ handle, entry ] : list )
+    {
+        const auto& [ type, name ] = entry;
+        if( !filters.empty() &&
+            std::none_of( filters.begin(), filters.end(), [ & ]( const std::string& f ) {
+                return name.find( f ) != std::string::npos;
+            } ) )
+        {
+            continue;
+        }
+
+        @autoreleasepool
+        {
+            id< MTLCommandBuffer >       cb = [Queue() commandBuffer];
+            id< MTLBlitCommandEncoder >  be = [cb blitCommandEncoder];
+            id< MTLBuffer >              dst;
+            std::string                  line;
+
+            if( type == VK_OBJECT_TYPE_IMAGE )
+            {
+                auto* img = reinterpret_cast< NativeImage* >( handle );
+                if( !img || img->swapchain || !img->texture )
+                {
+                    [be endEncoding];
+                    continue;
+                }
+                const FormatInfo fi = GetFormatInfo( img->format );
+                id< MTLTexture > t  = img->texture;
+                if( fi.compressed || fi.depth || fi.stencil || fi.bytesPerBlock == 0 || t.sampleCount != 1 ||
+                    ( t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray ) )
+                {
+                    [be endEncoding];
+                    continue;
+                }
+                const NSUInteger w = t.width, h = t.height, bpr = w * fi.bytesPerBlock, size = bpr * h;
+                if( size == 0 || size > maxBytes )
+                {
+                    [be endEncoding];
+                    continue;
+                }
+                dst = [Device() newBufferWithLength:size options:MTLResourceStorageModeShared];
+                [be copyFromTexture:t
+                             sourceSlice:0
+                             sourceLevel:0
+                            sourceOrigin:MTLOriginMake( 0, 0, 0 )
+                              sourceSize:MTLSizeMake( w, h, 1 )
+                                toBuffer:dst
+                       destinationOffset:0
+                  destinationBytesPerRow:bpr
+                destinationBytesPerImage:size];
+                char buf[ 512 ];
+                snprintf( buf, sizeof buf, "image\t%s\t%d\t%lu\t%lu\t%lu\t", name.c_str(), int( img->format ),
+                          (unsigned long)w, (unsigned long)h, (unsigned long)bpr );
+                line = buf;
+            }
+            else if( type == VK_OBJECT_TYPE_BUFFER )
+            {
+                auto* b = reinterpret_cast< NativeBuffer* >( handle );
+                if( !b || !b->memory || b->size == 0 )
+                {
+                    [be endEncoding];
+                    continue;
+                }
+                const NSUInteger size = NSUInteger( std::min< VkDeviceSize >( b->size, maxBytes ) );
+                dst = [Device() newBufferWithLength:size options:MTLResourceStorageModeShared];
+                [be copyFromBuffer:EnsureMemoryBuffer( b->memory )
+                      sourceOffset:NSUInteger( b->offset )
+                          toBuffer:dst
+                 destinationOffset:0
+                              size:size];
+                char buf[ 512 ];
+                snprintf( buf, sizeof buf, "buffer\t%s\t%lu\t", name.c_str(), (unsigned long)size );
+                line = buf;
+            }
+            else
+            {
+                [be endEncoding];
+                continue;
+            }
+            [be endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if( cb.status != MTLCommandBufferStatusCompleted )
+            {
+                continue;
+            }
+
+            const std::string file = DumpFileName( name + ( type == VK_OBJECT_TYPE_IMAGE ? "" : "_buf" ), ".raw" );
+            if( WriteFile( std::string( dir ) + "/" + file, dst.contents, dst.length ) )
+            {
+                fprintf( idx, "%s%s\n", line.c_str(), file.c_str() );
+                count++;
+                total += dst.length;
+            }
+        }
+    }
+    fclose( idx );
+    fprintf( stderr, "[Metal] frame dump: %u images and buffers (%zu MB) written to %s\n", count, total >> 20, dir );
+}
+
+void MaybeDumpFrame()
+{
+    static uint32_t frame = 0;
+    static double   due   = -1;
+    if( ++frame % 30 != 0 )
+    {
+        return;
+    }
+    if( access( "metal-dump.txt", F_OK ) != 0 )
+    {
+        due = -1;
+        return;
+    }
+
+    int                        delay = 0;
+    std::vector< std::string > filters;
+    if( FILE* f = fopen( "metal-dump.txt", "r" ) )
+    {
+        char l[ 256 ];
+        bool first = true;
+        while( fgets( l, sizeof l, f ) )
+        {
+            std::string s = l;
+            while( !s.empty() && isspace( uint8_t( s.back() ) ) )
+            {
+                s.pop_back();
+            }
+            if( first )
+            {
+                delay = atoi( s.c_str() );
+                first = false;
+            }
+            else if( !s.empty() )
+            {
+                filters.push_back( s );
+            }
+        }
+        fclose( f );
+    }
+
+    const double now = CFAbsoluteTimeGetCurrent();
+    if( due < 0 )
+    {
+        due = now + std::max( delay, 0 );
+        fprintf( stderr, "[Metal] frame dump in %d s\n", std::max( delay, 0 ) );
+    }
+    if( now < due )
+    {
+        return;
+    }
+    due = -1;
+    rename( "metal-dump.txt", "metal-dump.done" );
+    DumpFrame( "metal-dump", filters );
+}
+}
+
+VkResult RTGL1::MetalNative::vkSetDebugUtilsObjectNameEXT( VkDevice, const VkDebugUtilsObjectNameInfoEXT* info )
+{
+    if( info && info->pObjectName && info->objectHandle &&
+        ( info->objectType == VK_OBJECT_TYPE_IMAGE || info->objectType == VK_OBJECT_TYPE_BUFFER ) )
+    {
+        std::lock_guard g( Names().lock );
+        Names().names[ info->objectHandle ] = { info->objectType, info->pObjectName };
+    }
     return VK_SUCCESS;
 }
 

@@ -83,6 +83,20 @@ bool RTGL1::InitDeviceExtensionFunctions_Win32( VkDevice device )
 
 void RTGL1::AddDebugName( VkDevice device, uint64_t obj, VkObjectType type, const char* pName )
 {
+#ifdef RG_METAL_ONLY
+    // the Metal implementation keeps the names of images and buffers for its frame dump
+    if( pName )
+    {
+        const VkDebugUtilsObjectNameInfoEXT info = {
+            .sType        = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            .objectType   = type,
+            .objectHandle = obj,
+            .pObjectName  = pName,
+        };
+        RTGL1::MetalNative::vkSetDebugUtilsObjectNameEXT( device, &info );
+    }
+    return;
+#endif
     if( svkSetDebugUtilsObjectNameEXT == nullptr || pName == nullptr )
     {
         return;
