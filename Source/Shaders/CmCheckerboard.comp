@@ -40,15 +40,34 @@ bool isRightOutOfBounds(int checkerboardPix_X)
         checkerboardPix_X == int(globalUniform.renderWidth);
 }
 
+// Water / glass pixels alternate between the reflection and the refraction (a checkerboard).
+// Each output is half its own kind and half the other kind, both smoothed over the 3x3
+// neighbourhood: the 4 diagonal neighbours are the same kind as the center, the 4 side
+// neighbours the other. Taking only the center for its own kind (as before) left a visible
+// checkerboard where the reflection and refraction differ, which upscaling magnifies to grain.
 vec3 resolveCheckerboard( sampler2D src, const ivec2 regularPix, const ivec2 checkerboardPix, const vec3 center )
 {
-    vec3 crossColor =
-        0.25 * texelFetch( src, regularPix + ivec2( -1,  0 ), 0 ).rgb * float( !isLeftOutOfBounds( checkerboardPix.x ) ) +
-        0.25 * texelFetch( src, regularPix + ivec2(  1,  0 ), 0 ).rgb * float( !isRightOutOfBounds( checkerboardPix.x ) ) +
-        0.25 * texelFetch( src, regularPix + ivec2(  0,  1 ), 0 ).rgb +
-        0.25 * texelFetch( src, regularPix + ivec2(  0, -1 ), 0 ).rgb;
+    const bool leftOk  = !isLeftOutOfBounds( checkerboardPix.x );
+    const bool rightOk = !isRightOutOfBounds( checkerboardPix.x );
+    const bool upOk    = regularPix.y > 0;
+    const bool downOk  = regularPix.y + 1 < int( globalUniform.renderHeight );
 
-    return mix( center, crossColor, 0.5 );
+    vec3  other  = vec3( 0.0 );
+    float otherW = 0.0;
+    if( leftOk )  { other += texelFetch( src, regularPix + ivec2( -1,  0 ), 0 ).rgb; otherW += 1.0; }
+    if( rightOk ) { other += texelFetch( src, regularPix + ivec2(  1,  0 ), 0 ).rgb; otherW += 1.0; }
+    if( downOk )  { other += texelFetch( src, regularPix + ivec2(  0,  1 ), 0 ).rgb; otherW += 1.0; }
+    if( upOk )    { other += texelFetch( src, regularPix + ivec2(  0, -1 ), 0 ).rgb; otherW += 1.0; }
+
+    vec3  own  = center * 4.0;
+    float ownW = 4.0;
+    if( leftOk && upOk )     { own += texelFetch( src, regularPix + ivec2( -1, -1 ), 0 ).rgb; ownW += 1.0; }
+    if( rightOk && upOk )    { own += texelFetch( src, regularPix + ivec2(  1, -1 ), 0 ).rgb; ownW += 1.0; }
+    if( leftOk && downOk )   { own += texelFetch( src, regularPix + ivec2( -1,  1 ), 0 ).rgb; ownW += 1.0; }
+    if( rightOk && downOk )  { own += texelFetch( src, regularPix + ivec2(  1,  1 ), 0 ).rgb; ownW += 1.0; }
+
+    own /= ownW;
+    return otherW > 0.0 ? 0.5 * own + 0.5 * ( other / otherW ) : center;
 }
 
 void main()
