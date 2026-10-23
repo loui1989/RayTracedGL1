@@ -41,7 +41,9 @@ float getAutoEV100()
 float getCurrentEV100()
 {
     bool manual = false;
-    return manual ? getManualEV100( 1.0 / 16.0, 1.0 / 125.0, 100 ) : getAutoEV100();
+    // a higher EV is a darker image: compensation +1 (one stop brighter) lowers it by 1
+    return ( manual ? getManualEV100( 1.0 / 16.0, 1.0 / 125.0, 100 ) : getAutoEV100() ) -
+           globalUniform.exposureCompensation;
 }
 
 float ev100ToLuminousExposure( float ev100 )

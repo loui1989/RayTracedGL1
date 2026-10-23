@@ -315,6 +315,7 @@ struct ShGlobalUniform
     float rippleSources[128];
     float rippleParams[128];
     float skyLightColor[4];
+    float exposureCompensation;
 };
 
 struct ShGeometryInstance

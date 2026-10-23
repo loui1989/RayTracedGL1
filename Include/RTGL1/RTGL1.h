@@ -858,6 +858,8 @@ typedef struct RgDrawFrameTonemappingParams
     float       minLogLuminance;
     float       maxLogLuminance;
     float       luminanceWhitePoint;
+    // Added to the automatic exposure, in stops: negative - darker. Default: 0
+    float       exposureCompensation;
 } RgDrawFrameTonemappingParams;
 
 typedef struct RgDrawFrameSkyParams

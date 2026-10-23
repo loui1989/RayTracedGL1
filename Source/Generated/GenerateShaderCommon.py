@@ -645,6 +645,8 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_FLOAT32,      4,      "rippleParams",                 CONST["MAX_WATER_RIPPLES"]),
     # rgb - color of the light from the sky (luminance 1), white if not set by the game
     (TYPE_FLOAT32,      4,      "skyLightColor",                1),
+    # exposure offset in stops: negative - darker
+    (TYPE_FLOAT32,      1,      "exposureCompensation",         1),
 ]
 
 GEOM_INSTANCE_STRUCT = [

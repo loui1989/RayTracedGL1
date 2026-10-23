@@ -244,12 +244,15 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             gu->minLogLuminance     = drawInfo.pTonemappingParams->minLogLuminance;
             gu->maxLogLuminance     = drawInfo.pTonemappingParams->maxLogLuminance;
             gu->luminanceWhitePoint = drawInfo.pTonemappingParams->luminanceWhitePoint;
+            gu->exposureCompensation =
+                std::clamp( drawInfo.pTonemappingParams->exposureCompensation, -8.0f, 8.0f );
         }
         else
         {
             gu->minLogLuminance     = -3.9f;
             gu->maxLogLuminance     = -2.8f;
             gu->luminanceWhitePoint = 10.0f;
+            gu->exposureCompensation = 0.0f;
         }
     }
 
