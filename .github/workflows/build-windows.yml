@@ -1,6 +1,7 @@
 name: Windows
 
-on: push
+# run by hand only (the macOS port is built locally with build.command)
+on: workflow_dispatch
 
 env:
   BUILD_TYPE: RelWithDebInfo
