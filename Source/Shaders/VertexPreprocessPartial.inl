@@ -44,64 +44,106 @@
 const int geomIndexOffset = globalUniform.instanceGeomInfoOffset[tlasInstanceIndex / 4][tlasInstanceIndex % 4];
 const int geomCount = globalUniform.instanceGeomCount[tlasInstanceIndex / 4][tlasInstanceIndex % 4];
 
-// All the threads of the group go through the geometries together and split each geometry's
-// triangles between them. (Each thread used to take whole geometries, looping over all their
-// triangles alone: with hundreds of dynamic geometries in one instance, a few large ones made
-// the whole pass slow.) Geometries that don't need generated normals are skipped at once.
+// Flat normals for the geometries that need them. A geometry's triangles share vertices (models),
+// and a vertex takes the normal of its last triangle, so the triangles of one geometry are
+// processed in order by one thread, and the geometries are spread over the group's threads.
+// Only very large geometries (big water / brush batches, which would keep one thread busy
+// for long) are split between all threads. Degenerate triangles don't write a normal (NaN,
+// which made the model black).
+#define VERTPREPROC_PARALLEL_MIN_TRIANGLES 2048
+
+#define VERTPREPROC_TRIANGLE( inst, tri )                                                           \
+    {                                                                                               \
+        uvec3 vertexIndices;                                                                        \
+        if( useIndices )                                                                            \
+        {                                                                                           \
+            const uint i  = inst.baseIndexIndex + ( tri ) * 3;                                      \
+            vertexIndices = uvec3( inst.baseVertexIndex + INDICES[ i + 0 ],                         \
+                                   inst.baseVertexIndex + INDICES[ i + 1 ],                         \
+                                   inst.baseVertexIndex + INDICES[ i + 2 ] );                       \
+        }                                                                                           \
+        else                                                                                        \
+        {                                                                                           \
+            const uint v  = inst.baseVertexIndex + ( tri ) * 3;                                     \
+            vertexIndices = uvec3( v + 0, v + 1, v + 2 );                                           \
+        }                                                                                           \
+        const vec3 p0 = GET_POSITIONS( vertexIndices[ 0 ] );                                        \
+        const vec3 p1 = GET_POSITIONS( vertexIndices[ 1 ] );                                        \
+        const vec3 p2 = GET_POSITIONS( vertexIndices[ 2 ] );                                        \
+        const vec3 c  = cross( p1 - p0, p2 - p0 );                                                  \
+        if( dot( c, c ) > 1e-12 )                                                                   \
+        {                                                                                           \
+            const vec3 localNormal = normalSign * normalize( c );                                   \
+            SET_NORMALS( vertexIndices[ 0 ], localNormal );                                         \
+            SET_NORMALS( vertexIndices[ 1 ], localNormal );                                         \
+            SET_NORMALS( vertexIndices[ 2 ], localNormal );                                         \
+        }                                                                                           \
+    }
+
+// pass 1: the geometries spread over the threads, each processed in order by one thread
+for (uint localGeomIndex = gl_LocalInvocationID.x; localGeomIndex < geomCount; localGeomIndex += gl_WorkGroupSize.x)
+{
+    const ShGeometryInstance inst = geometryInstances[geomIndexOffset + localGeomIndex];
+
+#if defined(VERTEX_PREPROCESS_PARTIAL_STATIC_MOVABLE)
+    if ((inst.flags & GEOM_INST_FLAG_IS_MOVABLE) == 0)
+    {
+        continue;
+    }
+#endif
+    if ((inst.flags & GEOM_INST_FLAG_GENERATE_NORMALS) == 0)
+    {
+        continue;
+    }
+
+    const bool  useIndices = inst.baseIndexIndex != UINT32_MAX;
+    const float normalSign = float((inst.flags & GEOM_INST_FLAG_INVERTED_NORMALS) == 0) * 2.0 - 1.0;
+    const uint  triCount   = useIndices ? inst.indexCount / 3 : inst.vertexCount / 3;
+
+    if (triCount >= VERTPREPROC_PARALLEL_MIN_TRIANGLES)
+    {
+        continue; // in pass 2
+    }
+
+    for (uint tri = 0; tri < triCount; tri++)
+    {
+        VERTPREPROC_TRIANGLE( inst, tri )
+    }
+}
+
+// pass 2: the very large geometries, their triangles split between all threads
 for (uint localGeomIndex = 0; localGeomIndex < geomCount; localGeomIndex++)
 {
     const ShGeometryInstance inst = geometryInstances[geomIndexOffset + localGeomIndex];
 
 #if defined(VERTEX_PREPROCESS_PARTIAL_STATIC_MOVABLE)
-    const bool isMovable = (inst.flags & GEOM_INST_FLAG_IS_MOVABLE) != 0;
-    
-    // ignore non-movable if preprocess mode allows only movable
-    if (!isMovable)
+    if ((inst.flags & GEOM_INST_FLAG_IS_MOVABLE) == 0)
     {
         continue;
     }
 #endif
-
-    const bool genNormals = (inst.flags & GEOM_INST_FLAG_GENERATE_NORMALS) != 0;
-    if (!genNormals)
+    if ((inst.flags & GEOM_INST_FLAG_GENERATE_NORMALS) == 0)
     {
         continue;
     }
 
-    const bool useIndices = inst.baseIndexIndex != UINT32_MAX;
-    // -1 if normals should be inverted
+    const bool  useIndices = inst.baseIndexIndex != UINT32_MAX;
     const float normalSign = float((inst.flags & GEOM_INST_FLAG_INVERTED_NORMALS) == 0) * 2.0 - 1.0;
+    const uint  triCount   = useIndices ? inst.indexCount / 3 : inst.vertexCount / 3;
 
-    const uint triCount = useIndices ? inst.indexCount / 3 : inst.vertexCount / 3;
+    if (triCount < VERTPREPROC_PARALLEL_MIN_TRIANGLES)
+    {
+        continue;
+    }
 
     for (uint tri = gl_LocalInvocationID.x; tri < triCount; tri += gl_WorkGroupSize.x)
     {
-        uvec3 vertexIndices;
-        if (useIndices)
-        {
-            const uint i = inst.baseIndexIndex + tri * 3;
-            vertexIndices = uvec3(
-                inst.baseVertexIndex + INDICES[i + 0],
-                inst.baseVertexIndex + INDICES[i + 1],
-                inst.baseVertexIndex + INDICES[i + 2]);
-        }
-        else
-        {
-            const uint v = inst.baseVertexIndex + tri * 3;
-            vertexIndices = uvec3(v + 0, v + 1, v + 2);
-        }
-
-        const vec3 p0 = GET_POSITIONS(vertexIndices[0]);
-        const vec3 p1 = GET_POSITIONS(vertexIndices[1]);
-        const vec3 p2 = GET_POSITIONS(vertexIndices[2]);
-
-        const vec3 localNormal = normalSign * normalize(cross(p1 - p0, p2 - p0));
-
-        SET_NORMALS(vertexIndices[0], localNormal);
-        SET_NORMALS(vertexIndices[1], localNormal);
-        SET_NORMALS(vertexIndices[2], localNormal);
+        VERTPREPROC_TRIANGLE( inst, tri )
     }
 }
+
+#undef VERTPREPROC_TRIANGLE
+#undef VERTPREPROC_PARALLEL_MIN_TRIANGLES
 
 
 #undef GET_POSITIONS
