@@ -20,6 +20,8 @@
 
 #include "VertexCollector.h"
 
+#include <cstdio>
+
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -236,6 +238,16 @@ uint32_t VertexCollector::AddGeometry( uint32_t                         frameInd
     if( GetGeometryCount( geomFlags ) + 1 >=
         VertexCollectorFilterTypeFlags_GetAmountInGlobalArray( geomFlags ) )
     {
+        // the rest of this group's geometry isn't drawn: say so (once), it's otherwise invisible
+        static bool warned = false;
+        if( !warned )
+        {
+            warned = true;
+            fprintf( stderr,
+                     "[RTGL1] too many geometries (%u) in %s: the rest isn't drawn\n",
+                     VertexCollectorFilterTypeFlags_GetAmountInGlobalArray( geomFlags ),
+                     VertexCollectorFilterTypeFlags_GetNameForBLAS( geomFlags ) );
+        }
         assert( false && "Too many geometries in a group" );
         return UINT32_MAX;
     }
