@@ -1523,7 +1523,13 @@ void VulkanDevice::UploadRasterizedGeometry(const RgRasterizedGeometryUploadInfo
         throw RgException(RG_WRONG_ARGUMENT, "Incorrect render type of rasterized geometry");
     }
 
-    if (pUploadInfo->pVertices == nullptr || pUploadInfo->vertexCount == 0)
+    // nothing to draw (e.g. a string of spaces, an empty polygon from QC): not an error
+    if (pUploadInfo->vertexCount == 0)
+    {
+        return;
+    }
+
+    if (pUploadInfo->pVertices == nullptr)
     {
         throw RgException(RG_WRONG_ARGUMENT, "Vertex data / count is null");
     }
