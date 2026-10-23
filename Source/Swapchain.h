@@ -70,7 +70,7 @@ enum SwapchainType
 };
 // clang-format off
 template< typename T > constexpr size_t enum_size_t() = delete;
-template<>             constexpr size_t enum_size_t< SwapchainType >() { return 5; }
+template<> inline constexpr size_t enum_size_t< SwapchainType >() { return 5; }
 template< typename T > constexpr size_t enum_size = enum_size_t< T >();
 // clang-format on
 
