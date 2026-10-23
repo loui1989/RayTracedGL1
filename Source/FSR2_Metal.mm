@@ -434,7 +434,12 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer               c
 
         const ResolutionState rsCopy = rs;
         // encoded into the frame's Metal command buffer when it's submitted, in order
-        RTGL1::Metal::RecordExternal( cmd, [ = ]( id< MTLCommandBuffer > cb, id< MTLFence > ) {
+        // 'fence' orders this with RTGL1's own passes: they reach their resources through
+        // argument buffers, which Metal doesn't track, so without it the input prep could
+        // read Final before it's written and, worse, the passes after this (the post
+        // effects) could read the upscaled image while the output copy is still writing it
+        // -- the part they read first (the left of the screen) then showed an old frame
+        RTGL1::Metal::RecordExternal( cmd, [ = ]( id< MTLCommandBuffer > cb, id< MTLFence > fence ) {
             const ResolutionState& rs = rsCopy;
 
             // 1. convert inputs into formats MetalFX accepts
@@ -452,6 +457,10 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer               c
 
                 id< MTLRenderCommandEncoder > enc = [cb renderCommandEncoderWithDescriptor:rp];
                 enc.label                         = @"MetalFX input prep";
+                if( fence )
+                {
+                    [enc waitForFence:fence beforeStages:MTLRenderStageFragment];
+                }
                 [enc setRenderPipelineState:g.prepPipe];
                 [enc setDepthStencilState:g.depthAlways];
                 [enc setFragmentTexture:finalTex atIndex:0];
@@ -488,6 +497,10 @@ RTGL1::FramebufferImageIndex RTGL1::FSR2::Apply( VkCommandBuffer               c
                 [enc setBytes:&prm length:sizeof( prm ) atIndex:0];
                 [enc dispatchThreads:MTLSizeMake( rs.upscaledWidth, rs.upscaledHeight, 1 )
                     threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
+                if( fence )
+                {
+                    [enc updateFence:fence];
+                }
                 [enc endEncoding];
             }
         } );
