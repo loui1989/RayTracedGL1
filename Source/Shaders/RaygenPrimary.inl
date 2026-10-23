@@ -139,6 +139,50 @@ uint getNewRayMedia(int i, uint prevMedia, uint geometryInstanceFlags)
     return getMediaTypeFromFlags(geometryInstanceFlags);
 }
 
+// Ripples: rings of waves spreading from points on the water (globalUniform.ripple*).
+// Returns the gradient of the surface's height, in world space, along the surface.
+vec3 getRippleGradient(const vec3 position, const vec3 normalGeom)
+{
+    vec3 grad = vec3(0.0);
+
+    for (uint i = 0; i < min(globalUniform.rippleCount, MAX_WATER_RIPPLES); i++)
+    {
+        const vec4 src = globalUniform.rippleSources[i];
+        const vec4 prm = globalUniform.rippleParams[i];
+
+        vec3 d = position - src.xyz;
+        const float h = dot(d, normalGeom);
+        // only on the surface the ripple is on
+        if (abs(h) > 16.0)
+        {
+            continue;
+        }
+        d -= normalGeom * h;
+
+        const float r      = length(d);
+        const float age    = src.w;
+        const float front  = prm.z * age;
+        // the wave packet broadens as it travels, so more rings appear behind the front
+        const float width  = 0.6 * prm.y + 10.0 * age;
+        const float u      = r - front;
+        if (abs(u) > 3.0 * width || r < 0.001)
+        {
+            continue;
+        }
+
+        const float k      = 2.0 * M_PI / prm.y;
+        const float env    = exp(-(u * u) / (width * width));
+        // calms down over time, and spreads its energy over a growing circle
+        const float amp    = prm.x * exp(-age / prm.w) / sqrt(1.0 + front / 16.0);
+        // height = amp / k * env * cos(k * u)
+        const float dhdr   = amp * (-2.0 * u / (width * width * k) * env * cos(k * u) - env * sin(k * u));
+
+        grad += dhdr * smoothstep(0.0, 2.0, r) * (d / r);
+    }
+
+    return grad;
+}
+
 vec3 getWaterNormal(const RayCone rayCone, const vec3 rayDir, const vec3 normalGeom, const vec3 position, bool wasPortal)
 {
     const mat3 basis = getONB(normalGeom);
@@ -187,7 +231,16 @@ vec3 getWaterNormal(const RayCone rayCone, const vec3 rayDir, const vec3 normalG
 
     const float strength = globalUniform.waterWaveStrength;
 
-    const vec3 n = normalize(vec3(0, 0, 1) + strength * (0.25 * n0 + 0.2 * n1 + 0.1 * n2));
+    vec3 local = vec3(0, 0, 1) + strength * (0.25 * n0 + 0.2 * n1 + 0.1 * n2);
+
+    if (globalUniform.rippleCount > 0)
+    {
+        // a height field's normal is (-dh/dx, -dh/dy, 1)
+        const vec3 grad = getRippleGradient(position, normalGeom);
+        local.xy -= vec2(dot(grad, basis[0]), dot(grad, basis[1]));
+    }
+
+    const vec3 n = normalize(local);
     return basis * n;   
 }
 

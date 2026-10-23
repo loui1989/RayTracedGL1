@@ -1089,6 +1089,25 @@ typedef enum RgMediaType
     RG_MEDIA_TYPE_ACID,
 } RgMediaType;
 
+// Rings of waves spreading over water surfaces from a point (e.g. where something fell in).
+typedef struct RgWaterRipple
+{
+    // On the water's surface.
+    float       position[3];
+    // Seconds since the ripple started.
+    float       age;
+    // Steepness of the waves, around 0.1-0.5.
+    float       strength;
+    // Distance between the rings, in world units.
+    float       wavelength;
+    // How fast the rings spread, in world units per second.
+    float       speed;
+    // Seconds for the waves to calm down to about a third.
+    float       decayTime;
+} RgWaterRipple;
+
+#define RG_MAX_WATER_RIPPLES 32
+
 typedef struct RgDrawFrameReflectRefractParams
 {
     uint32_t    maxReflectRefractDepth;
@@ -1118,6 +1137,9 @@ typedef struct RgDrawFrameReflectRefractParams
     RgBool32    disableBackfaceReflectionsForNoMediaChange;
     // If true, portal normal will be twirled around its 'inPosition'.
     RgBool32    portalNormalTwirl;
+    // Ripples on water surfaces, at most RG_MAX_WATER_RIPPLES; null if none.
+    uint32_t                rippleCount;
+    const RgWaterRipple     *pRipples;
 } RgDrawFrameReflectRefractParams;
 
 typedef enum RgRenderUpscaleTechnique

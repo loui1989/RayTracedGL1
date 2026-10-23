@@ -10,6 +10,7 @@
 #define LOWER_BOTTOM_LEVEL_GEOMETRIES_COUNT (256)
 #define MAX_TOP_LEVEL_INSTANCE_COUNT (45)
 #define MAX_SMOKE_VOLUMES (32)
+#define MAX_WATER_RIPPLES (32)
 #define BINDING_VERTEX_BUFFER_STATIC (0)
 #define BINDING_VERTEX_BUFFER_DYNAMIC (1)
 #define BINDING_INDEX_BUFFER_STATIC (2)
@@ -294,6 +295,10 @@ struct ShGlobalUniform
     float volumeHistory;
     uint smokeCount;
     float smokeAlbedo;
+    uint rippleCount;
+    float _padR0;
+    float _padR1;
+    float _padR2;
     ivec4 instanceGeomInfoOffset[12];
     ivec4 instanceGeomInfoOffsetPrev[12];
     ivec4 instanceGeomCount[12];
@@ -301,6 +306,8 @@ struct ShGlobalUniform
     mat4 skyCubemapRotationTransform;
     vec4 smokeSpheres[32];
     vec4 smokeParams[32];
+    vec4 rippleSources[32];
+    vec4 rippleParams[32];
 };
 
 struct ShGeometryInstance

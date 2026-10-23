@@ -452,6 +452,28 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
         gu->noBackfaceReflForNoMediaChange = !!rr.disableBackfaceReflectionsForNoMediaChange;
 
         gu->twirlPortalNormal = !!rr.portalNormalTwirl;
+
+        gu->rippleCount = 0;
+        if( rr.pRipples )
+        {
+            for( uint32_t i = 0; i < std::min< uint32_t >( rr.rippleCount, MAX_WATER_RIPPLES ); i++ )
+            {
+                const RgWaterRipple& w = rr.pRipples[ i ];
+                if( w.strength <= 0.0f || w.wavelength <= 0.0f || w.decayTime <= 0.0f || w.age < 0.0f )
+                {
+                    continue;
+                }
+                const uint32_t k              = gu->rippleCount++;
+                gu->rippleSources[ k * 4 + 0 ] = w.position[ 0 ];
+                gu->rippleSources[ k * 4 + 1 ] = w.position[ 1 ];
+                gu->rippleSources[ k * 4 + 2 ] = w.position[ 2 ];
+                gu->rippleSources[ k * 4 + 3 ] = w.age;
+                gu->rippleParams[ k * 4 + 0 ]  = w.strength;
+                gu->rippleParams[ k * 4 + 1 ]  = w.wavelength;
+                gu->rippleParams[ k * 4 + 2 ]  = std::max( w.speed, 0.0f );
+                gu->rippleParams[ k * 4 + 3 ]  = w.decayTime;
+            }
+        }
     }
     else
     {
@@ -468,6 +490,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
         gu->acidColorAndDensity[ 3 ] = 10.0f;
 
         gu->forceNoWaterRefraction            = false;
+        gu->rippleCount                       = 0;
         gu->waterWaveSpeed                    = 1.0f;
         gu->waterWaveStrength                 = 1.0f;
         gu->waterTextureDerivativesMultiplier = 1.0f;

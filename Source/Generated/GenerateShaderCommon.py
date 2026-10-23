@@ -236,6 +236,7 @@ CONST = {
     
     "MAX_TOP_LEVEL_INSTANCE_COUNT"          : 45,
     "MAX_SMOKE_VOLUMES"                     : 32,
+    "MAX_WATER_RIPPLES"                     : 32,
     
     "BINDING_VERTEX_BUFFER_STATIC"              : 0,
     "BINDING_VERTEX_BUFFER_DYNAMIC"             : 1,
@@ -616,6 +617,11 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_UINT32,       1,      "smokeCount",                       1),
     (TYPE_FLOAT32,      1,      "smokeAlbedo",                      1),
 
+    (TYPE_UINT32,       1,      "rippleCount",                      1),
+    (TYPE_FLOAT32,      1,      "_padR0",                           1),
+    (TYPE_FLOAT32,      1,      "_padR1",                           1),
+    (TYPE_FLOAT32,      1,      "_padR2",                           1),
+
     #(TYPE_FLOAT32,      1,      "_pad0",                            1),
     #(TYPE_FLOAT32,      1,      "_pad1",                            1),
     #(TYPE_FLOAT32,      1,      "_pad2",                            1),
@@ -631,6 +637,10 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_FLOAT32,      4,      "smokeSpheres",                 CONST["MAX_SMOKE_VOLUMES"]),
     # x - peak extinction, y - age in seconds, z - random seed, w - glow
     (TYPE_FLOAT32,      4,      "smokeParams",                  CONST["MAX_SMOKE_VOLUMES"]),
+    # xyz - center (on the surface), w - age in seconds
+    (TYPE_FLOAT32,      4,      "rippleSources",                CONST["MAX_WATER_RIPPLES"]),
+    # x - max slope, y - wavelength, z - speed, w - decay time
+    (TYPE_FLOAT32,      4,      "rippleParams",                 CONST["MAX_WATER_RIPPLES"]),
 ]
 
 GEOM_INSTANCE_STRUCT = [
