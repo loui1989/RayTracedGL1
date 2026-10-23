@@ -534,13 +534,15 @@ static constexpr auto convert_sv_to( std::string_view sv ) -> std::optional< T >
         }
         return value;
     }
-
-    std::from_chars_result r = std::from_chars( sv.data(), sv.data() + sv.size(), value );
-    if( r.ec != std::errc{} )
+    else
     {
-        return std::nullopt;
+        std::from_chars_result r = std::from_chars( sv.data(), sv.data() + sv.size(), value );
+        if( r.ec != std::errc{} )
+        {
+            return std::nullopt;
+        }
+        return value;
     }
-    return value;
 }
 
 static constexpr auto set_anim_fov_24fps = []( RTGL1::CameraExtraInfo& s,
