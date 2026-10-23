@@ -164,6 +164,36 @@ vec3 applyVolumetrics( const ivec2 pix, const vec3 color )
 #endif
 
         vec4 v = volume_sampleDithered( position, rnd, 2.0 );
+
+        // Water / glass: neighbouring pixels alternate between the reflection and the refraction,
+        // which have very different path lengths, so the fog differed in a checkerboard after the
+        // colours were blended (CmCheckerboard), and the upscaler's jitter turned that into a
+        // visible grid in foggy maps. Half the fog of this pixel's path, half the average of its 4
+        // neighbours' (the other kind), as the colours are blended.
+        if( needResolveCheckerboard( getCheckerboardPix( pix ) ) )
+        {
+            const ivec2 offs[ 4 ] = { ivec2( -1, 0 ), ivec2( 1, 0 ), ivec2( 0, -1 ), ivec2( 0, 1 ) };
+            vec4  other  = vec4( 0.0 );
+            float otherW = 0.0;
+            for( int i = 0; i < 4; i++ )
+            {
+                const ivec2 q = pix + offs[ i ];
+                if( any( lessThan( q, ivec2( 0 ) ) ) ||
+                    any( greaterThanEqual( q, ivec2( globalUniform.renderWidth, globalUniform.renderHeight ) ) ) )
+                {
+                    continue;
+                }
+                const float qdepth = texelFetch( framebufDepthWorld_Sampler, getCheckerboardPix( q ), 0 ).r;
+                const vec3  qdir   = getRayDir( getPixelUVWithJitter( q ) );
+                other += volume_sampleDithered( globalUniform.cameraPosition.xyz + qdir * qdepth, rnd, 2.0 );
+                otherW += 1.0;
+            }
+            if( otherW > 0.0 )
+            {
+                v = 0.5 * v + 0.5 * ( other / otherW );
+            }
+        }
+
         return color * v.a + v.rgb;
     }
     else
