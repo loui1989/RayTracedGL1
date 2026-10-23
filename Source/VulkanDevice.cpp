@@ -641,7 +641,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             dn.indirectHistory       = 8;
             dn.indirectSpatialReuse  = 4;
             dn.indirectSpatialRadius = 8.0f;
-            dn.indirectFireflyClamp  = 64.0f;
+            dn.indirectFireflyClamp  = 16.0f;
             dn.temporalReuseJitter   = 0.0f;
             dn.indirectDenseFilter   = true;
             dn.indirectDeflicker     = 2.0f;

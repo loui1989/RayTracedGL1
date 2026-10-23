@@ -1178,7 +1178,7 @@ typedef struct RgDrawFrameDenoisingParams
     // Indirect light: radius of the spatial reuse in pixels. Default: 8
     float       indirectSpatialRadius;
     // Indirect light: a new sample brighter than this multiple of the local average is
-    // dimmed to it (0 - off). Default: 64
+    // dimmed to it (0 - off). Default: 16
     float       indirectFireflyClamp;
     // Max random offset (in pixels) when reusing the previous frame's light samples
     // (direct and indirect). The original 2 makes bright samples drift between pixels,
