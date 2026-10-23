@@ -138,44 +138,59 @@ void main()
         center += radius * rnd;
     }
 
-// Skipping the cells behind the opaque static surface at the cell's center was only an
-// optimization, but it made the fog inconsistent: where the center is on dynamic geometry
-// (the weapon) nothing was skipped, while pixels seen through water or glass read the fog
-// past the surface (along the reflected / refracted path), so they got a band of extra,
-// whitish fog around the weapon over water. Off.
-#if 0
+// Skip the cells that no pixel looks through: those beyond the whole path of the pixel
+// at the cell's center (its distance along the reflected / refracted path for water and
+// glass, which read the fog past the surface), with a margin of a few cells for the
+// interpolated and dithered sampling. Not behind dynamic geometry (e.g. the weapon), as
+// what's behind it can be seen next to it.
     {
-        ivec2 pix;
-        float depth;
+        const vec4 clip = globalUniform.projection * globalUniform.view * vec4( volume_getCenter( cell ), 1.0 );
+        if( clip.w > 0.0 )
         {
-            vec4 ndc = globalUniform.projection * globalUniform.view * vec4( center, 1.0 );
-            ndc.xyz /= ndc.w;
-            ndc.xy = ndc.xy * 0.5 + 0.5;
+            const vec2  uv  = clip.xy / clip.w * 0.5 + 0.5;
+            const ivec2 pix = ivec2( uv * vec2( globalUniform.renderWidth, globalUniform.renderHeight ) );
 
-            pix = ivec2( ndc.xy * vec2( globalUniform.renderWidth, globalUniform.renderHeight ) );
-            depth = ndc.z;
-        }
+            // the cell covers a patch of pixels: the farthest path in it (center and corners)
+            const ivec2 rsize = ivec2( globalUniform.renderWidth, globalUniform.renderHeight );
+            const ivec2 hcell  = max( rsize / ivec2( VOLUMETRIC_SIZE_X, VOLUMETRIC_SIZE_Y ) / 2, ivec2( 1 ) );
+            const ivec2 offs[ 5 ] = { ivec2( 0, 0 ),
+                                      ivec2( -hcell.x, -hcell.y ),
+                                      ivec2( hcell.x, -hcell.y ),
+                                      ivec2( -hcell.x, hcell.y ),
+                                      ivec2( hcell.x, hcell.y ) };
 
-        {
-            uint instCustomIndex = floatBitsToUint(
-                texelFetch( framebufSurfacePosition_Sampler, getCheckerboardPix( pix ), 0 ).a );
-
-            float surfDepth = texelFetch(framebufDepthNdc_Sampler, pix, 0).r;
-
-            if( ( instCustomIndex & INSTANCE_CUSTOM_INDEX_FLAG_DYNAMIC ) == 0 )
+            float pathLength = 0.0;
+            bool  onScreen   = false;
+            bool  dynamic    = false;
+            for( int i = 0; i < 5; i++ )
             {
-                if( depth > surfDepth )
+                const ivec2 p = pix + offs[ i ];
+                if( any( lessThan( p, ivec2( 0 ) ) ) || any( greaterThanEqual( p, rsize ) ) )
                 {
-                    imageStore( g_volumetric, cell, vec4( 0.0 ) );
-    #if ILLUMINATION_VOLUME
-                    imageStore( g_illuminationVolume, cell, vec4( 0.0 ) );
-    #endif
-                    return;
+                    continue;
                 }
+                const ivec2 chpix = getCheckerboardPix( p );
+                const uint  instCustomIndex =
+                    floatBitsToUint( texelFetch( framebufSurfacePosition_Sampler, chpix, 0 ).a );
+
+                onScreen   = true;
+                dynamic    = dynamic || ( instCustomIndex & INSTANCE_CUSTOM_INDEX_FLAG_DYNAMIC ) != 0;
+                pathLength = max( pathLength, texelFetch( framebufDepthWorld_Sampler, chpix, 0 ).r );
+            }
+
+            const float marginCellDist = length(
+                volume_getCenter( max( cell - ivec3( 0, 0, 3 ), ivec3( 0 ) ) ) - globalUniform.cameraPosition.xyz );
+
+            if( onScreen && !dynamic && marginCellDist > pathLength )
+            {
+                imageStore( g_volumetric, cell, vec4( 0.0 ) );
+#if ILLUMINATION_VOLUME
+                imageStore( g_illuminationVolume, cell, vec4( 0.0 ) );
+#endif
+                return;
             }
         }
     }
-#endif
 
     vec3 lighting = globalUniform.volumeAmbient.rgb;
     vec3 radiance = vec3( 0.0 );
