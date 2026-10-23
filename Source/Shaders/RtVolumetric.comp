@@ -45,6 +45,74 @@ float phaseFunction_Schlick( const vec3 tolight, const vec3 toviewer, float assy
     return ( 1 - square( k ) ) / ( 4 * M_PI * square( 1 + k * costheta ) );
 }
 
+// ---- smoke clouds (globalUniform.smokeSpheres / smokeParams)
+
+float smoke_hash( vec3 p )
+{
+    p = fract( p * 0.1031 );
+    p += dot( p, p.zyx + 31.32 );
+    return fract( ( p.x + p.y ) * p.z );
+}
+
+float smoke_noise( vec3 p )
+{
+    const vec3 i = floor( p );
+    vec3       f = fract( p );
+    f            = f * f * ( 3.0 - 2.0 * f );
+
+    return mix( mix( mix( smoke_hash( i + vec3( 0, 0, 0 ) ), smoke_hash( i + vec3( 1, 0, 0 ) ), f.x ),
+                     mix( smoke_hash( i + vec3( 0, 1, 0 ) ), smoke_hash( i + vec3( 1, 1, 0 ) ), f.x ),
+                     f.y ),
+                mix( mix( smoke_hash( i + vec3( 0, 0, 1 ) ), smoke_hash( i + vec3( 1, 0, 1 ) ), f.x ),
+                     mix( smoke_hash( i + vec3( 0, 1, 1 ) ), smoke_hash( i + vec3( 1, 1, 1 ) ), f.x ),
+                     f.y ),
+                f.z );
+}
+
+// 0..~0.9
+float smoke_fbm( vec3 p )
+{
+    return 0.5 * smoke_noise( p ) + 0.25 * smoke_noise( p * 2.03 + 17.1 ) +
+           0.125 * smoke_noise( p * 4.01 + 31.7 );
+}
+
+// x - extinction, y - glow, at a world position
+vec2 smokeAt( const vec3 pos )
+{
+    float ext  = 0.0;
+    float glow = 0.0;
+
+    for( uint i = 0; i < min( globalUniform.smokeCount, MAX_SMOKE_VOLUMES ); i++ )
+    {
+        const vec4  sp   = globalUniform.smokeSpheres[ i ];
+        const vec4  prm  = globalUniform.smokeParams[ i ];
+        const vec3  d    = pos - sp.xyz;
+        const float dist = length( d );
+
+        if( dist >= sp.w )
+        {
+            continue;
+        }
+
+        const float age = prm.y;
+        // turbulence: drifts upwards and swirls slowly over time (in world z, Quake's up)
+        vec3 q = d / ( sp.w * 0.45 ) + vec3( prm.z, prm.z * 1.7, -age * 0.35 );
+        q.xy += vec2( sin( age * 0.7 + q.z * 1.3 ), cos( age * 0.6 + q.x * 1.1 ) ) * 0.35;
+
+        const float n = smoke_fbm( q );
+        const float x = dist / sp.w;
+
+        // round, with wispy edges and a denser core
+        const float shape = clamp( 1.0 - x * x, 0.0, 1.0 );
+        const float dens  = shape * smoothstep( 0.25, 0.65, n + 0.35 * ( 1.0 - x ) );
+
+        ext += prm.x * dens;
+        glow += prm.w * dens;
+    }
+
+    return vec2( ext, glow );
+}
+
 void main()
 {
     RAYGEN_RETURN_IF_OUTSIDE( VOLUMETRIC_SIZE_X, VOLUMETRIC_SIZE_Y, VOLUMETRIC_SIZE_Z );
@@ -175,9 +243,22 @@ void main()
     float scattering = globalUniform.volumeScattering * 0.001;
     float absorbtion = 0.0;
 
+    // smoke: extinction, part of it scattering the same light as the fog
+    vec3 emission = vec3( 0.0 );
+    if( globalUniform.smokeCount > 0 )
+    {
+        const vec2  sm     = smokeAt( center );
+        const float albedo = clamp( globalUniform.smokeAlbedo, 0.0, 1.0 );
+
+        scattering += sm.x * albedo;
+        absorbtion += sm.x * ( 1.0 - albedo );
+        // a fresh explosion's fireball lights its smoke from inside
+        emission = vec3( 1.0, 0.45, 0.15 ) * sm.y;
+    }
+
 
 #if ILLUMINATION_VOLUME
     imageStore( g_illuminationVolume, cell, vec4( radiance, 0.0 ) );
 #endif
-    imageStore( g_volumetric, cell, vec4( lighting * scattering, scattering + absorbtion ) );
+    imageStore( g_volumetric, cell, vec4( lighting * scattering + emission, scattering + absorbtion ) );
 }

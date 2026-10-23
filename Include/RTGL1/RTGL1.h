@@ -947,6 +947,24 @@ typedef struct RgDrawFrameIlluminationParams
     uint64_t    *lightUniqueIdIgnoreFirstPersonViewerShadows;
 } RgDrawFrameIlluminationParams;
 
+// A cloud of smoke inside the volumetric fog (e.g. left by an explosion).
+// Only visible with volumetric illumination (not useSimpleDepthBased).
+typedef struct RgSmokeVolume
+{
+    float       position[3];
+    float       radius;
+    // Peak extinction per froxel slice in the cloud's center; around 0.1 is thick smoke.
+    float       density;
+    // Seconds since the cloud appeared: animates its turbulence.
+    float       age;
+    // Different per cloud, so they don't look the same.
+    float       seed;
+    // Fiery glow (emission) of a fresh explosion, 0 - none.
+    float       glow;
+} RgSmokeVolume;
+
+#define RG_MAX_SMOKE_VOLUMES 32
+
 typedef struct RgDrawFrameVolumetricParams
 {
     RgBool32    enable;
@@ -966,6 +984,11 @@ typedef struct RgDrawFrameVolumetricParams
     // g parameter [-1..1] for the Henyey–Greenstein phase function.
     // Default: 0.0 (isotropic)
     float       sourceAssymetry;
+    // Smoke clouds, at most RG_MAX_SMOKE_VOLUMES; null if none.
+    uint32_t                smokeCount;
+    const RgSmokeVolume     *pSmokes;
+    // How much light the smoke scatters back (its brightness): 0 - black soot. Default: 0.1
+    float                   smokeAlbedo;
 } RgDrawFrameVolumetricParams;
 
 typedef struct RgDrawFrameBloomParams

@@ -235,6 +235,7 @@ CONST = {
     "LOWER_BOTTOM_LEVEL_GEOMETRIES_COUNT"   : 1 << 8,
     
     "MAX_TOP_LEVEL_INSTANCE_COUNT"          : 45,
+    "MAX_SMOKE_VOLUMES"                     : 32,
     
     "BINDING_VERTEX_BUFFER_STATIC"              : 0,
     "BINDING_VERTEX_BUFFER_DYNAMIC"             : 1,
@@ -612,8 +613,8 @@ GLOBAL_UNIFORM_STRUCT = [
 
     (TYPE_FLOAT32,      1,      "denoiserSpecMaxHistory",           1),
     (TYPE_FLOAT32,      1,      "volumeHistory",                    1),
-    (TYPE_FLOAT32,      1,      "_pad2",                            1),
-    (TYPE_FLOAT32,      1,      "_pad3",                            1),
+    (TYPE_UINT32,       1,      "smokeCount",                       1),
+    (TYPE_FLOAT32,      1,      "smokeAlbedo",                      1),
 
     #(TYPE_FLOAT32,      1,      "_pad0",                            1),
     #(TYPE_FLOAT32,      1,      "_pad1",                            1),
@@ -626,6 +627,10 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_INT32,        4,      "instanceGeomCount",            align4(CONST["MAX_TOP_LEVEL_INSTANCE_COUNT"]) // 4),
     (TYPE_FLOAT32,     44,      "viewProjCubemap",              6),
     (TYPE_FLOAT32,     44,      "skyCubemapRotationTransform",  1),
+    # xyz - center, w - radius
+    (TYPE_FLOAT32,      4,      "smokeSpheres",                 CONST["MAX_SMOKE_VOLUMES"]),
+    # x - peak extinction, y - age in seconds, z - random seed, w - glow
+    (TYPE_FLOAT32,      4,      "smokeParams",                  CONST["MAX_SMOKE_VOLUMES"]),
 ]
 
 GEOM_INSTANCE_STRUCT = [

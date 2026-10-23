@@ -599,6 +599,31 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             RG_SET_VEC3_A( gu->volumeDirToSource, drawInfo.pVolumetricParams->sourceDirection.data );
             Utils::Negate( gu->volumeDirToSource );
             Utils::Normalize( gu->volumeDirToSource );
+
+            // smoke clouds
+            const RgDrawFrameVolumetricParams& vp = *drawInfo.pVolumetricParams;
+            gu->smokeCount  = 0;
+            gu->smokeAlbedo = vp.smokeAlbedo > 0 ? vp.smokeAlbedo : 0.1f;
+            if( vp.pSmokes )
+            {
+                for( uint32_t i = 0; i < std::min< uint32_t >( vp.smokeCount, MAX_SMOKE_VOLUMES ); i++ )
+                {
+                    const RgSmokeVolume& sm = vp.pSmokes[ i ];
+                    if( sm.radius <= 0.0f || ( sm.density <= 0.0f && sm.glow <= 0.0f ) )
+                    {
+                        continue;
+                    }
+                    const uint32_t k             = gu->smokeCount++;
+                    gu->smokeSpheres[ k * 4 + 0 ] = sm.position[ 0 ];
+                    gu->smokeSpheres[ k * 4 + 1 ] = sm.position[ 1 ];
+                    gu->smokeSpheres[ k * 4 + 2 ] = sm.position[ 2 ];
+                    gu->smokeSpheres[ k * 4 + 3 ] = sm.radius;
+                    gu->smokeParams[ k * 4 + 0 ]  = std::max( sm.density, 0.0f );
+                    gu->smokeParams[ k * 4 + 1 ]  = sm.age;
+                    gu->smokeParams[ k * 4 + 2 ]  = sm.seed;
+                    gu->smokeParams[ k * 4 + 3 ]  = std::max( sm.glow, 0.0f );
+                }
+            }
         }
         else
         {
@@ -608,6 +633,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
             RG_SET_VEC3( gu->volumeAmbient, 0.8f, 0.85f, 1.0f );
             RG_SET_VEC3( gu->volumeSourceColor, 0, 0, 0 );
             RG_SET_VEC3( gu->volumeDirToSource, 0, 1, 0 );
+            gu->smokeCount  = 0;
+            gu->smokeAlbedo = 0.1f;
         }
 
         if( gu->volumeEnableType != VOLUME_ENABLE_NONE )

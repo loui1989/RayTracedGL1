@@ -9,6 +9,7 @@
 #define MAX_GEOMETRY_PRIMITIVE_COUNT_POW (20)
 #define LOWER_BOTTOM_LEVEL_GEOMETRIES_COUNT (256)
 #define MAX_TOP_LEVEL_INSTANCE_COUNT (45)
+#define MAX_SMOKE_VOLUMES (32)
 #define BINDING_VERTEX_BUFFER_STATIC (0)
 #define BINDING_VERTEX_BUFFER_DYNAMIC (1)
 #define BINDING_INDEX_BUFFER_STATIC (2)
@@ -291,13 +292,15 @@ struct ShGlobalUniform
     float denoiserMaxHistory;
     float denoiserSpecMaxHistory;
     float volumeHistory;
-    float _pad2;
-    float _pad3;
+    uint smokeCount;
+    float smokeAlbedo;
     ivec4 instanceGeomInfoOffset[12];
     ivec4 instanceGeomInfoOffsetPrev[12];
     ivec4 instanceGeomCount[12];
     mat4 viewProjCubemap[6];
     mat4 skyCubemapRotationTransform;
+    vec4 smokeSpheres[32];
+    vec4 smokeParams[32];
 };
 
 struct ShGeometryInstance

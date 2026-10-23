@@ -16,6 +16,7 @@ namespace RTGL1
 #define MAX_GEOMETRY_PRIMITIVE_COUNT_POW (20)
 #define LOWER_BOTTOM_LEVEL_GEOMETRIES_COUNT (256)
 #define MAX_TOP_LEVEL_INSTANCE_COUNT (45)
+#define MAX_SMOKE_VOLUMES (32)
 #define BINDING_VERTEX_BUFFER_STATIC (0)
 #define BINDING_VERTEX_BUFFER_DYNAMIC (1)
 #define BINDING_INDEX_BUFFER_STATIC (2)
@@ -296,13 +297,15 @@ struct ShGlobalUniform
     float denoiserMaxHistory;
     float denoiserSpecMaxHistory;
     float volumeHistory;
-    float _pad2;
-    float _pad3;
+    uint32_t smokeCount;
+    float smokeAlbedo;
     int32_t instanceGeomInfoOffset[48];
     int32_t instanceGeomInfoOffsetPrev[48];
     int32_t instanceGeomCount[48];
     float viewProjCubemap[96];
     float skyCubemapRotationTransform[16];
+    float smokeSpheres[128];
+    float smokeParams[128];
 };
 
 struct ShGeometryInstance
