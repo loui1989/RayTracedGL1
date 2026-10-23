@@ -25,7 +25,9 @@
 
 #include <deque>
 #include <filesystem>
+#include <atomic>
 #include <future>
+#include <memory>
 
 namespace RTGL1
 {
@@ -63,7 +65,8 @@ private:
 
 private:
     std::future< void > m_asyncChecker;
-    std::stop_source    m_asyncStopSource;
+    // a flag rather than std::stop_source: not in every standard library yet (libc++)
+    std::shared_ptr< std::atomic_bool > m_asyncStop{ std::make_shared< std::atomic_bool >( false ) };
 
     std::mutex                                                  m_mutex;
     std::vector< std::pair< FileType, std::filesystem::path > > m_changedFiles;

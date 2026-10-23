@@ -97,7 +97,8 @@ bool RTGL1::SceneMetaManager::IsReplacementIgnored( std::string_view sceneName,
     }
     assert( iter->first == sceneName );
 
-    return std::ranges::contains( iter->second.ignoredReplacements, meshName );
+    const auto& ignored = iter->second.ignoredReplacements;
+    return std::ranges::find( ignored, meshName ) != ignored.end();
 }
 
 void RTGL1::SceneMetaManager::OnFileChanged( FileType type, const std::filesystem::path& filepath )

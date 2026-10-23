@@ -332,10 +332,14 @@ typedef RgResult( RGAPI_PTR* PFN_rgDestroyInstance )();
 // .exe should export these symbols to find 'D3D12Core.dll', otherwise D3D12 init might fail,
 // because user's Windows might have an older D3D12Core which is incompatible with RTGL.
 // 'pOverrideFolderPath' here should be the same as 'RgInstanceCreateInfo::pOverrideFolderPath'
+#if defined( _WIN32 )
 #define RG_D3D12CORE_HELPER( pOverrideFolderPath )                                  \
     extern "C" __declspec( dllexport ) extern const uint32_t D3D12SDKVersion = 611; \
     extern "C" __declspec( dllexport ) extern const char*    D3D12SDKPath =         \
         ( pOverrideFolderPath "\\bin\\" ); 
+#else
+#define RG_D3D12CORE_HELPER( pOverrideFolderPath )
+#endif
 
 
 
@@ -2390,6 +2394,99 @@ inline RgResult rgDestroyAndUnloadLibrary( RgInterface* pInterface, HMODULE dll 
     memset( pInterface, 0, sizeof( *pInterface ) );
 
     FreeLibrary( dll );
+
+    return RG_RESULT_SUCCESS;
+}
+
+#else // !defined( _WIN32 )
+
+// macOS / Linux: the library is '<pOverrideFolderPath>/bin/libRTGL1.dylib' (or '.so'),
+// 'customBinaryPath' is relative to 'pOverrideFolderPath' too
+#include <dlfcn.h>
+#include <string.h>
+
+typedef void* RgLibraryHandle;
+
+inline RgResult rgLoadLibraryAndCreate( const RgInstanceCreateInfo* pInfo,
+                                        RgBool32                    useDebugBinary,
+                                        const char*                 customBinaryPath,
+                                        RgInterface*                pOutInterface,
+                                        RgLibraryHandle*            pOutDll )
+{
+    if( pOutDll )
+    {
+        *pOutDll = NULL;
+    }
+
+    if( !pInfo || !pInfo->pOverrideFolderPath )
+    {
+        return RG_RESULT_WRONG_FUNCTION_ARGUMENT;
+    }
+
+    if( pInfo->version == NULL || strcmp( pInfo->version, RG_RTGL_VERSION_API ) != 0 )
+    {
+        return RG_RESULT_WRONG_FUNCTION_ARGUMENT;
+    }
+
+    if( pInfo->sizeOfRgInterface != sizeof( RgInterface ) )
+    {
+        return RG_RESULT_WRONG_FUNCTION_ARGUMENT;
+    }
+
+    char rtglLibPath[ 4096 ];
+    {
+    #if defined( __APPLE__ )
+        const char* libPath = customBinaryPath ? customBinaryPath
+                              : useDebugBinary ? "/bin/debug/libRTGL1.dylib"
+                                               : "/bin/libRTGL1.dylib";
+    #else
+        const char* libPath = customBinaryPath ? customBinaryPath
+                              : useDebugBinary ? "/bin/debug/libRTGL1.so"
+                                               : "/bin/libRTGL1.so";
+    #endif
+
+        if( strlen( pInfo->pOverrideFolderPath ) + strlen( libPath ) >= sizeof( rtglLibPath ) - 1 )
+        {
+            return RG_RESULT_WRONG_FUNCTION_ARGUMENT;
+        }
+
+        rtglLibPath[ 0 ] = '\0';
+        strcpy( rtglLibPath, pInfo->pOverrideFolderPath );
+        strcat( rtglLibPath, libPath );
+    }
+
+    void* lib = dlopen( rtglLibPath, RTLD_NOW | RTLD_LOCAL );
+    if( !lib )
+    {
+        return RG_RESULT_CANT_FIND_DYNAMIC_LIBRARY;
+    }
+
+    PFN_rgCreateInstance createFunc = ( PFN_rgCreateInstance )dlsym( lib, "rgCreateInstance" );
+    if( !createFunc )
+    {
+        dlclose( lib );
+        return RG_RESULT_CANT_FIND_ENTRY_FUNCTION_IN_DYNAMIC_LIBRARY;
+    }
+
+    if( pOutDll )
+    {
+        *pOutDll = lib;
+    }
+
+    return createFunc( pInfo, pOutInterface );
+}
+
+inline RgResult rgDestroyAndUnloadLibrary( RgInterface* pInterface, RgLibraryHandle lib )
+{
+    if( !pInterface || !lib )
+    {
+        return RG_RESULT_WRONG_FUNCTION_ARGUMENT;
+    }
+
+    pInterface->rgDestroyInstance();
+    memset( pInterface, 0, sizeof( *pInterface ) );
+
+    dlclose( lib );
 
     return RG_RESULT_SUCCESS;
 }

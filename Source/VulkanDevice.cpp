@@ -24,7 +24,9 @@
 #include "Matrix.h"
 #include "RenderResolutionHelper.h"
 #include "RgException.h"
+#ifdef RG_USE_DX12
 #include "DX12_CopyFramebuf.h"
+#endif
 #include "DX12_Interop.h"
 #include "Utils.h"
 
@@ -2044,6 +2046,7 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
                                          renderResolution.UpscaledHeight(),
                                          swapchain->IsHDREnabled() );
 
+#ifdef RG_USE_DX12
             FramebufferImageIndex todx12[] = { FB_IMAGE_INDEX_HUD_ONLY };
             Framebuf_CopyVkToDX12( cmd,
                                    frameIndex,
@@ -2051,6 +2054,7 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
                                    renderResolution.UpscaledWidth(),
                                    renderResolution.UpscaledHeight(),
                                    todx12 );
+#endif
         }
     }
 

@@ -105,12 +105,12 @@ RTGL1::FolderObserver::FolderObserver( const fs::path& ovrdFolder )
         std::launch::async,
         [ this ](                                                      //
             const std::vector< std::filesystem::path > foldersToCheck, //
-            std::stop_token                            token           //
+            std::shared_ptr< std::atomic_bool >        stop            //
         ) {
             auto s_lastCheck    = std::optional< Clock::time_point >{};
             auto s_prevAllFiles = std::deque< DependentFile >{};
 
-            while( !token.stop_requested() )
+            while( !stop->load() )
             {
                 std::this_thread::sleep_for( CHECK_FREQUENCY );
 
@@ -175,12 +175,12 @@ RTGL1::FolderObserver::FolderObserver( const fs::path& ovrdFolder )
             }
         },
         std::move( folders ),
-        m_asyncStopSource.get_token() );
+        m_asyncStop );
 }
 
 RTGL1::FolderObserver::~FolderObserver()
 {
-    m_asyncStopSource.request_stop();
+    m_asyncStop->store( true );
 }
 
 void RTGL1::FolderObserver::RecheckFiles()

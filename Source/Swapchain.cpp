@@ -24,7 +24,9 @@
 #include <utility>
 
 #include "DLSS3_DX12.h"
+#ifdef RG_USE_DX12
 #include "DX12_CopyFramebuf.h"
+#endif
 #include "FSR3_DX12.h"
 #include "HDR_Platform.h"
 #include "LibraryConfig.h"
