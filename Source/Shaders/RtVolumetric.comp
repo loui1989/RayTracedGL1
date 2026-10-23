@@ -76,36 +76,76 @@ float smoke_fbm( vec3 p )
            0.125 * smoke_noise( p * 4.01 + 31.7 );
 }
 
-// x - extinction, y - glow, z - scattering (extinction times each cloud's albedo), at a world position
-vec3 smokeAt( const vec3 pos )
+// density (0..1) of smoke cloud i at a world position
+float smokeDensity( uint i, const vec3 pos )
+{
+    const vec4  sp   = globalUniform.smokeSpheres[ i ];
+    const vec4  prm  = globalUniform.smokeParams[ i ];
+    const vec3  d    = pos - sp.xyz;
+    const float dist = length( d );
+
+    if( dist >= sp.w )
+    {
+        return 0.0;
+    }
+
+    const float age = prm.y;
+    // turbulence: drifts upwards and swirls slowly over time (in world z, Quake's up)
+    vec3 q = d / ( sp.w * 0.45 ) + vec3( prm.z, prm.z * 1.7, -age * 0.35 );
+    q.xy += vec2( sin( age * 0.7 + q.z * 1.3 ), cos( age * 0.6 + q.x * 1.1 ) ) * 0.35;
+
+    const float n = smoke_fbm( q );
+    const float x = dist / sp.w;
+
+    // round, with wispy edges and a denser core
+    const float shape = clamp( 1.0 - x * x, 0.0, 1.0 );
+    return shape * smoothstep( 0.25, 0.65, n + 0.35 * ( 1.0 - x ) );
+}
+
+// Average over the segment a..b (a froxel's depth along the view ray) of: x - extinction,
+// y - glow, z - scattering (extinction times each cloud's albedo). The slices are much deeper
+// than a small cloud (gun smoke), so the part of the segment inside each cloud is sampled at a
+// few points, rather than the cell at one point: otherwise small clouds are blocky and flicker.
+vec3 smokeOverSegment( const vec3 a, const vec3 b, const float jitter01 )
 {
     float ext  = 0.0;
     float glow = 0.0;
     float scat = 0.0;
 
+    const vec3 ab = b - a;
+    const float abLen2 = max( dot( ab, ab ), 1e-6 );
+
     for( uint i = 0; i < min( globalUniform.smokeCount, MAX_SMOKE_VOLUMES ); i++ )
     {
-        const vec4  sp   = globalUniform.smokeSpheres[ i ];
-        const vec4  prm  = globalUniform.smokeParams[ i ];
-        const vec3  d    = pos - sp.xyz;
-        const float dist = length( d );
+        const vec4 sp  = globalUniform.smokeSpheres[ i ];
+        const vec4 prm = globalUniform.smokeParams[ i ];
 
-        if( dist >= sp.w )
+        // the part of the segment inside the cloud's sphere, t in 0..1
+        const vec3  oc   = a - sp.xyz;
+        const float hb   = dot( oc, ab ) / abLen2;
+        const float c    = ( dot( oc, oc ) - sp.w * sp.w ) / abLen2;
+        const float disc = hb * hb - c;
+        if( disc <= 0.0 )
+        {
+            continue;
+        }
+        const float sq = sqrt( disc );
+        const float t0 = max( -hb - sq, 0.0 );
+        const float t1 = min( -hb + sq, 1.0 );
+        if( t1 <= t0 )
         {
             continue;
         }
 
-        const float age = prm.y;
-        // turbulence: drifts upwards and swirls slowly over time (in world z, Quake's up)
-        vec3 q = d / ( sp.w * 0.45 ) + vec3( prm.z, prm.z * 1.7, -age * 0.35 );
-        q.xy += vec2( sin( age * 0.7 + q.z * 1.3 ), cos( age * 0.6 + q.x * 1.1 ) ) * 0.35;
-
-        const float n = smoke_fbm( q );
-        const float x = dist / sp.w;
-
-        // round, with wispy edges and a denser core
-        const float shape = clamp( 1.0 - x * x, 0.0, 1.0 );
-        const float dens  = shape * smoothstep( 0.25, 0.65, n + 0.35 * ( 1.0 - x ) );
+        #define SMOKE_SEGMENT_SAMPLES 4
+        float dens = 0.0;
+        for( int k = 0; k < SMOKE_SEGMENT_SAMPLES; k++ )
+        {
+            const float t = mix( t0, t1, ( float( k ) + jitter01 ) / float( SMOKE_SEGMENT_SAMPLES ) );
+            dens += smokeDensity( i, a + ab * t );
+        }
+        // averaged over the whole segment
+        dens *= ( t1 - t0 ) / float( SMOKE_SEGMENT_SAMPLES );
 
         ext += prm.x * dens;
         glow += prm.w * dens;
@@ -264,7 +304,12 @@ void main()
     vec3 emission = vec3( 0.0 );
     if( globalUniform.smokeCount > 0 )
     {
-        const vec3 sm = smokeAt( center );
+        // the cell's whole depth along the view ray
+        const vec3 cellCenter = volume_getCenter( cell );
+        const vec3 halfDepth  = ( volume_getCenter( cell + ivec3( 0, 0, 1 ) ) - cellCenter ) * 0.5;
+        const vec3 sm         = smokeOverSegment( cellCenter - halfDepth,
+                                          cellCenter + halfDepth,
+                                          rndBlueNoise8( getRandomSeed( cell.xy + ivec2( 0, 7 * cell.z ), globalUniform.frameId ), 1 ).x );
 
         scattering += sm.z;
         absorbtion += max( sm.x - sm.z, 0.0 );
