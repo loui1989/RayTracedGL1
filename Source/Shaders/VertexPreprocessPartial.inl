@@ -44,7 +44,11 @@
 const int geomIndexOffset = globalUniform.instanceGeomInfoOffset[tlasInstanceIndex / 4][tlasInstanceIndex % 4];
 const int geomCount = globalUniform.instanceGeomCount[tlasInstanceIndex / 4][tlasInstanceIndex % 4];
 
-for (uint localGeomIndex = gl_LocalInvocationID.x; localGeomIndex < geomCount; localGeomIndex += gl_WorkGroupSize.x)
+// All the threads of the group go through the geometries together and split each geometry's
+// triangles between them. (Each thread used to take whole geometries, looping over all their
+// triangles alone: with hundreds of dynamic geometries in one instance, a few large ones made
+// the whole pass slow.) Geometries that don't need generated normals are skipped at once.
+for (uint localGeomIndex = 0; localGeomIndex < geomCount; localGeomIndex++)
 {
     const ShGeometryInstance inst = geometryInstances[geomIndexOffset + localGeomIndex];
 
@@ -58,74 +62,44 @@ for (uint localGeomIndex = gl_LocalInvocationID.x; localGeomIndex < geomCount; l
     }
 #endif
 
-    const bool useIndices = inst.baseIndexIndex != UINT32_MAX;
     const bool genNormals = (inst.flags & GEOM_INST_FLAG_GENERATE_NORMALS) != 0;
+    if (!genNormals)
+    {
+        continue;
+    }
+
+    const bool useIndices = inst.baseIndexIndex != UINT32_MAX;
     // -1 if normals should be inverted
     const float normalSign = float((inst.flags & GEOM_INST_FLAG_INVERTED_NORMALS) == 0) * 2.0 - 1.0;
 
-    const mat4 model = inst.model;
-    const mat3 model3 = mat3(model);
+    const uint triCount = useIndices ? inst.indexCount / 3 : inst.vertexCount / 3;
 
-
-    if (useIndices)
+    for (uint tri = gl_LocalInvocationID.x; tri < triCount; tri += gl_WorkGroupSize.x)
     {
-        for (uint tri = 0; tri < inst.indexCount / 3; tri++)
+        uvec3 vertexIndices;
+        if (useIndices)
         {
             const uint i = inst.baseIndexIndex + tri * 3;
-
-            const uvec3 vertexIndices = uvec3(
+            vertexIndices = uvec3(
                 inst.baseVertexIndex + INDICES[i + 0],
                 inst.baseVertexIndex + INDICES[i + 1],
                 inst.baseVertexIndex + INDICES[i + 2]);
-
-            const vec3 localPos[] = 
-            {
-                GET_POSITIONS(vertexIndices[0]),
-                GET_POSITIONS(vertexIndices[1]),
-                GET_POSITIONS(vertexIndices[2])
-            };
-
-            vec3 localNormal;
-            
-            if (genNormals)
-            {
-                localNormal = normalSign * normalize(cross(localPos[1] - localPos[0], localPos[2] - localPos[0]));
-                
-                SET_NORMALS(vertexIndices[0], localNormal);
-                SET_NORMALS(vertexIndices[1], localNormal);
-                SET_NORMALS(vertexIndices[2], localNormal);
-            }
         }
-    }
-    else
-    {
-        for (uint tri = 0; tri < inst.vertexCount / 3; tri++)
+        else
         {
             const uint v = inst.baseVertexIndex + tri * 3;
+            vertexIndices = uvec3(v + 0, v + 1, v + 2);
+        }
 
-            const uvec3 vertexIndices = uvec3(
-                v + 0,
-                v + 1,
-                v + 2);
+        const vec3 p0 = GET_POSITIONS(vertexIndices[0]);
+        const vec3 p1 = GET_POSITIONS(vertexIndices[1]);
+        const vec3 p2 = GET_POSITIONS(vertexIndices[2]);
 
-            const vec3 localPos[] = 
-            {
-                GET_POSITIONS(vertexIndices[0]),
-                GET_POSITIONS(vertexIndices[1]),
-                GET_POSITIONS(vertexIndices[2])
-            };
+        const vec3 localNormal = normalSign * normalize(cross(p1 - p0, p2 - p0));
 
-            vec3 localNormal;
-
-            if (genNormals)
-            {
-                localNormal = normalSign * normalize(cross(localPos[1] - localPos[0], localPos[2] - localPos[0]));
-
-                SET_NORMALS(vertexIndices[0], localNormal);
-                SET_NORMALS(vertexIndices[1], localNormal);
-                SET_NORMALS(vertexIndices[2], localNormal);
-            }
-        } 
+        SET_NORMALS(vertexIndices[0], localNormal);
+        SET_NORMALS(vertexIndices[1], localNormal);
+        SET_NORMALS(vertexIndices[2], localNormal);
     }
 }
 
