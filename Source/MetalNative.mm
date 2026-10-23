@@ -177,6 +177,7 @@ MTLTextureSwizzle SwizzleOf( VkComponentSwizzle s, MTLTextureSwizzle identity )
 
 id< MTLBuffer > EnsureMemoryBuffer( NativeMemory* m );
 void            ForgetDebugName( uint64_t handle );
+void            NoteImageCreated( uint64_t handle );
 void            MaybeDumpFrame();
 }
 
@@ -1348,6 +1349,7 @@ VkResult RTGL1::MetalNative::vkCreateImage( VkDevice, const VkImageCreateInfo* c
             return VK_ERROR_OUT_OF_DEVICE_MEMORY;
         }
         *out = ToHandle< VkImage >( img );
+        NoteImageCreated( reinterpret_cast< uint64_t >( *out ) );
         return VK_SUCCESS;
     }
 }
@@ -1742,6 +1744,8 @@ struct DebugNames
 {
     std::mutex                                                              lock;
     std::unordered_map< uint64_t, std::pair< VkObjectType, std::string > > names;
+    std::unordered_map< uint64_t, uint32_t >                               images; // all live, in creation order
+    uint32_t                                                               created = 0;
 };
 DebugNames& Names()
 {
@@ -1753,6 +1757,13 @@ void ForgetDebugName( uint64_t handle )
 {
     std::lock_guard g( Names().lock );
     Names().names.erase( handle );
+    Names().images.erase( handle );
+}
+
+void NoteImageCreated( uint64_t handle )
+{
+    std::lock_guard g( Names().lock );
+    Names().images[ handle ] = Names().created++;
 }
 
 std::string DumpFileName( const std::string& name, const char* ext )
@@ -1786,6 +1797,18 @@ void DumpFrame( const char* dir, const std::vector< std::string >& filters )
     {
         std::lock_guard g( Names().lock );
         list.assign( Names().names.begin(), Names().names.end() );
+        // images nobody named: by format, size and creation order (big ones only)
+        for( const auto& [ handle, order ] : Names().images )
+        {
+            auto* img = reinterpret_cast< NativeImage* >( handle );
+            if( Names().names.contains( handle ) || !img || img->swapchain || img->extent.width < 512 )
+            {
+                continue;
+            }
+            char n[ 96 ];
+            snprintf( n, sizeof n, "unnamed_%04u_fmt%d_%ux%u", order, int( img->format ), img->extent.width, img->extent.height );
+            list.push_back( { handle, { VK_OBJECT_TYPE_IMAGE, n } } );
+        }
     }
     std::sort( list.begin(), list.end(), []( const auto& a, const auto& b ) { return a.second.second < b.second.second; } );
 
@@ -1799,11 +1822,15 @@ void DumpFrame( const char* dir, const std::vector< std::string >& filters )
     fprintf( idx, "# kind\tname\tvkformat\twidth\theight\tbytesPerRow\tfile  (buffer: kind name size file)\n" );
 
     constexpr size_t maxBytes = size_t( 256 ) << 20;
-    uint32_t         count    = 0;
-    size_t           total    = 0;
+    uint32_t         count = 0, named = 0, skipped = 0, failed = 0;
+    size_t           total = 0;
     for( const auto& [ handle, entry ] : list )
     {
         const auto& [ type, name ] = entry;
+        if( type == VK_OBJECT_TYPE_IMAGE )
+        {
+            named++;
+        }
         if( !filters.empty() &&
             std::none_of( filters.begin(), filters.end(), [ & ]( const std::string& f ) {
                 return name.find( f ) != std::string::npos;
@@ -1814,34 +1841,46 @@ void DumpFrame( const char* dir, const std::vector< std::string >& filters )
 
         @autoreleasepool
         {
-            id< MTLCommandBuffer >       cb = [Queue() commandBuffer];
-            id< MTLBlitCommandEncoder >  be = [cb blitCommandEncoder];
-            id< MTLBuffer >              dst;
-            std::string                  line;
+            id< MTLBuffer > dst;
+            std::string     line;
+            NSUInteger      rowBytes = 0, packedRow = 0, rows = 1;
 
+            id< MTLCommandBuffer > cb = [Queue() commandBuffer];
             if( type == VK_OBJECT_TYPE_IMAGE )
             {
-                auto* img = reinterpret_cast< NativeImage* >( handle );
-                if( !img || img->swapchain || !img->texture )
+                auto*            img = reinterpret_cast< NativeImage* >( handle );
+                const FormatInfo fi  = img ? GetFormatInfo( img->format ) : FormatInfo{};
+                id< MTLTexture > t   = img && !img->swapchain ? img->texture : nil;
+                const char*      why = nullptr;
+                if( !t )
                 {
-                    [be endEncoding];
+                    why = "no texture";
+                }
+                else if( fi.compressed || fi.depth || fi.stencil || fi.bytesPerBlock == 0 )
+                {
+                    why = "format";
+                }
+                else if( t.sampleCount != 1 ||
+                         ( t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray ) )
+                {
+                    why = "texture type";
+                }
+                const NSUInteger w = t ? t.width : 0, h = t ? t.height : 0;
+                packedRow          = w * fi.bytesPerBlock;
+                rowBytes           = ( packedRow + 255 ) & ~NSUInteger( 255 );
+                rows               = h;
+                if( !why && ( rowBytes * h == 0 || rowBytes * h > maxBytes ) )
+                {
+                    why = "size";
+                }
+                if( why )
+                {
+                    fprintf( stderr, "[Metal] frame dump: skipped %s (%s)\n", name.c_str(), why );
+                    skipped++;
                     continue;
                 }
-                const FormatInfo fi = GetFormatInfo( img->format );
-                id< MTLTexture > t  = img->texture;
-                if( fi.compressed || fi.depth || fi.stencil || fi.bytesPerBlock == 0 || t.sampleCount != 1 ||
-                    ( t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray ) )
-                {
-                    [be endEncoding];
-                    continue;
-                }
-                const NSUInteger w = t.width, h = t.height, bpr = w * fi.bytesPerBlock, size = bpr * h;
-                if( size == 0 || size > maxBytes )
-                {
-                    [be endEncoding];
-                    continue;
-                }
-                dst = [Device() newBufferWithLength:size options:MTLResourceStorageModeShared];
+                dst = [Device() newBufferWithLength:rowBytes * h options:MTLResourceStorageModeShared];
+                id< MTLBlitCommandEncoder > be = [cb blitCommandEncoder];
                 [be copyFromTexture:t
                              sourceSlice:0
                              sourceLevel:0
@@ -1849,11 +1888,12 @@ void DumpFrame( const char* dir, const std::vector< std::string >& filters )
                               sourceSize:MTLSizeMake( w, h, 1 )
                                 toBuffer:dst
                        destinationOffset:0
-                  destinationBytesPerRow:bpr
-                destinationBytesPerImage:size];
+                  destinationBytesPerRow:rowBytes
+                destinationBytesPerImage:0];
+                [be endEncoding];
                 char buf[ 512 ];
                 snprintf( buf, sizeof buf, "image\t%s\t%d\t%lu\t%lu\t%lu\t", name.c_str(), int( img->format ),
-                          (unsigned long)w, (unsigned long)h, (unsigned long)bpr );
+                          (unsigned long)w, (unsigned long)h, (unsigned long)packedRow );
                 line = buf;
             }
             else if( type == VK_OBJECT_TYPE_BUFFER )
@@ -1861,42 +1901,57 @@ void DumpFrame( const char* dir, const std::vector< std::string >& filters )
                 auto* b = reinterpret_cast< NativeBuffer* >( handle );
                 if( !b || !b->memory || b->size == 0 )
                 {
-                    [be endEncoding];
+                    skipped++;
                     continue;
                 }
-                const NSUInteger size = NSUInteger( std::min< VkDeviceSize >( b->size, maxBytes ) );
-                dst = [Device() newBufferWithLength:size options:MTLResourceStorageModeShared];
+                packedRow = rowBytes = NSUInteger( std::min< VkDeviceSize >( b->size, maxBytes ) );
+                dst = [Device() newBufferWithLength:rowBytes options:MTLResourceStorageModeShared];
+                id< MTLBlitCommandEncoder > be = [cb blitCommandEncoder];
                 [be copyFromBuffer:EnsureMemoryBuffer( b->memory )
                       sourceOffset:NSUInteger( b->offset )
                           toBuffer:dst
                  destinationOffset:0
-                              size:size];
+                              size:rowBytes];
+                [be endEncoding];
                 char buf[ 512 ];
-                snprintf( buf, sizeof buf, "buffer\t%s\t%lu\t", name.c_str(), (unsigned long)size );
+                snprintf( buf, sizeof buf, "buffer\t%s\t%lu\t", name.c_str(), (unsigned long)rowBytes );
                 line = buf;
             }
             else
             {
-                [be endEncoding];
                 continue;
             }
-            [be endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
             if( cb.status != MTLCommandBufferStatusCompleted )
             {
+                fprintf( stderr, "[Metal] frame dump: copying %s failed: %s\n", name.c_str(),
+                         cb.error ? cb.error.localizedDescription.UTF8String : "?" );
+                failed++;
                 continue;
             }
 
+            // rows without the alignment padding
+            std::vector< uint8_t > packed( packedRow * rows );
+            for( NSUInteger r = 0; r < rows; r++ )
+            {
+                memcpy( packed.data() + r * packedRow, static_cast< const uint8_t* >( dst.contents ) + r * rowBytes, packedRow );
+            }
             const std::string file = DumpFileName( name + ( type == VK_OBJECT_TYPE_IMAGE ? "" : "_buf" ), ".raw" );
-            if( WriteFile( std::string( dir ) + "/" + file, dst.contents, dst.length ) )
+            if( WriteFile( std::string( dir ) + "/" + file, packed.data(), packed.size() ) )
             {
                 fprintf( idx, "%s%s\n", line.c_str(), file.c_str() );
                 count++;
-                total += dst.length;
+                total += packed.size();
+            }
+            else
+            {
+                fprintf( stderr, "[Metal] frame dump: can't write %s\n", file.c_str() );
+                failed++;
             }
         }
     }
+    fprintf( stderr, "[Metal] frame dump: %u named images in all, %u skipped, %u failed\n", named, skipped, failed );
     fclose( idx );
     fprintf( stderr, "[Metal] frame dump: %u images and buffers (%zu MB) written to %s\n", count, total >> 20, dir );
 }
