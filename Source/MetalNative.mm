@@ -35,6 +35,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1956,11 +1957,85 @@ void DumpFrame( const char* dir, const std::vector< std::string >& filters )
     fprintf( stderr, "[Metal] frame dump: %u images and buffers (%zu MB) written to %s\n", count, total >> 20, dir );
 }
 
+// ---- profiling: while a file named metal-profile.txt exists in the current folder, the GPU
+// time of each labelled part of the frame is measured and, every 2 seconds, written to
+// metal-profile.log (average milliseconds per frame) and to the log
+
+void ProfileFrame()
+{
+    static uint32_t                                frame = 0, frames = 0;
+    static bool                                    on    = false;
+    static std::unordered_map< std::string, double > sums;
+    static double                                  lastReport = 0, cpuStart = 0;
+
+    if( ++frame % 30 == 0 )
+    {
+        const bool want = access( "metal-profile.txt", F_OK ) == 0;
+        if( want != on )
+        {
+            on = want;
+            RTGL1::Metal::SetProfiling( on );
+            sums.clear();
+            frames     = 0;
+            lastReport = cpuStart = CFAbsoluteTimeGetCurrent();
+            fprintf( stderr, "[Metal] profiling %s\n", on ? "on (metal-profile.log)" : "off" );
+        }
+    }
+    if( !on )
+    {
+        return;
+    }
+
+    RTGL1::Metal::DrainTimings( [ & ]( const char* name, double ms ) { sums[ name ] += ms; } );
+    frames++;
+
+    const double now = CFAbsoluteTimeGetCurrent();
+    if( now - lastReport < 2.0 || frames < 10 )
+    {
+        return;
+    }
+    std::vector< std::pair< double, std::string > > rows;
+    double                                          total = 0;
+    for( const auto& [ name, ms ] : sums )
+    {
+        rows.emplace_back( ms / frames, name );
+        total += ms / frames;
+    }
+    std::sort( rows.rbegin(), rows.rend() );
+    const double frameMs = ( now - cpuStart ) * 1000.0 / frames;
+
+    std::string report;
+    char        line[ 256 ];
+    snprintf( line, sizeof line, "frames %u: %.2f ms per frame (%.1f fps), GPU %.2f ms in the measured parts\n",
+              frames, frameMs, 1000.0 / std::max( frameMs, 0.001 ), total );
+    report += line;
+    for( const auto& [ ms, name ] : rows )
+    {
+        if( ms < 0.05 )
+        {
+            break;
+        }
+        snprintf( line, sizeof line, "  %7.2f ms  %s\n", ms, name.c_str() );
+        report += line;
+    }
+    if( FILE* f = fopen( "metal-profile.log", "w" ) )
+    {
+        fputs( report.c_str(), f );
+        fclose( f );
+    }
+    fprintf( stderr, "[Metal] profile\n%s", report.c_str() );
+
+    sums.clear();
+    frames     = 0;
+    lastReport = cpuStart = now;
+}
+
 void MaybeDumpFrame()
 {
+    ProfileFrame();
     static uint32_t frame = 0;
     static double   due   = -1;
-    if( ++frame % 30 != 0 )
+    if( ++frame % 10 != 0 )
     {
         return;
     }
@@ -2008,7 +2083,10 @@ void MaybeDumpFrame()
     }
     due = -1;
     rename( "metal-dump.txt", "metal-dump.done" );
-    DumpFrame( "metal-dump", filters );
+    char       dir[ 64 ];
+    const auto t = time( nullptr );
+    strftime( dir, sizeof dir, "metal-dump-%Y%m%d-%H%M%S", localtime( &t ) );
+    DumpFrame( dir, filters );
 }
 }
 

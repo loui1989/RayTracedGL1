@@ -320,6 +320,7 @@ struct State
 
     // RTGL1_PROFILE=1: a section is split into a command buffer per mark
     bool                              profile = false;
+    bool                              profileEnv = false; // RTGL1_PROFILE=1
     id< MTLFence >                    passFence;
     id< MTLCommandBuffer >            profWaitCb;
     std::vector< ProfiledCb >         profCbs;
@@ -952,6 +953,12 @@ bool EnsureDummyBlas( id< MTLAccelerationStructureCommandEncoder > ae, NSUIntege
 
 void        CommitResidency();
 const char* Intern( const char* name );
+
+std::atomic< bool >& ProfilingWanted()
+{
+    static std::atomic< bool > wanted{ false };
+    return wanted;
+}
 
 // Encodes the queued builds into s.cb. Returns true if s.fence is updated after them.
 bool EncodeAccelerationStructureBuilds()
@@ -1961,6 +1968,7 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
         {
             const char* p = getenv( "RTGL1_PROFILE" );
             s.profile     = p && p[ 0 ] == '1';
+            s.profileEnv  = s.profile;
             const char* c = getenv( "RTGL1_METAL_COMPUTE" );
             s.computeEnv  = MetalNative::Enabled() || !( c && c[ 0 ] == '0' );
             const char* f = getenv( "RTGL1_METAL_FASTMATH" );
@@ -4430,6 +4438,11 @@ void RTGL1::Metal::Mark( const char* name )
     }
 }
 
+void RTGL1::Metal::SetProfiling( bool on )
+{
+    ProfilingWanted().store( on );
+}
+
 void RTGL1::Metal::DrainTimings( const std::function< void( const char*, double ) >& fn )
 {
     std::vector< std::pair< const char*, double > > t;
@@ -4759,6 +4772,8 @@ VkResult RTGL1::MetalNative::vkQueueSubmit( VkQueue, uint32_t count, const VkSub
                 }
             }
 
+            // profiling can be switched at run time (Metal::SetProfiling), between submits
+            s.profile     = s.profileEnv || ProfilingWanted().load();
             s.cb          = [s.queue commandBuffer];
             s.cb.label    = @"RTGL1";
             s.sectionDone = ++s.timeline;

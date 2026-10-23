@@ -21,6 +21,10 @@
 #include "Common.h"
 
 #include <numeric>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
 
 
 namespace RTGL1
@@ -113,8 +117,37 @@ void RTGL1::AddDebugName( VkDevice device, uint64_t obj, VkObjectType type, cons
     VK_CHECKERROR( r );
 }
 
+#ifdef RG_METAL_ONLY
+namespace
+{
+// profiling (Metal::SetProfiling): the GPU time between two marks is reported under the
+// label that was open in between
+std::vector< const char* >& OpenLabels()
+{
+    thread_local std::vector< const char* > open;
+    return open;
+}
+const char* StableName( const char* name )
+{
+    static std::mutex                lock;
+    static std::set< std::string >   names;
+    std::lock_guard                  g( lock );
+    return names.insert( name ? name : "?" ).first->c_str();
+}
+}
+#endif
+
 void RTGL1::BeginCmdLabel( VkCommandBuffer cmd, const char* pName, const float pColor[ 4 ] )
 {
+#ifdef RG_METAL_ONLY
+    if( cmd != VK_NULL_HANDLE )
+    {
+        auto& open = OpenLabels();
+        RTGL1::Metal::RecordMark( cmd, open.empty() ? "(outside of labels)" : open.back() );
+        open.push_back( StableName( pName ) );
+    }
+    return;
+#endif
     if( svkCmdBeginDebugUtilsLabelEXT == nullptr || pName == nullptr || cmd == VK_NULL_HANDLE )
     {
         return;
@@ -135,6 +168,18 @@ void RTGL1::BeginCmdLabel( VkCommandBuffer cmd, const char* pName, const float p
 
 void RTGL1::EndCmdLabel( VkCommandBuffer cmd )
 {
+#ifdef RG_METAL_ONLY
+    if( cmd != VK_NULL_HANDLE )
+    {
+        auto& open = OpenLabels();
+        if( !open.empty() )
+        {
+            RTGL1::Metal::RecordMark( cmd, open.back() );
+            open.pop_back();
+        }
+    }
+    return;
+#endif
     if( svkCmdEndDebugUtilsLabelEXT == nullptr || cmd == VK_NULL_HANDLE )
     {
         return;

@@ -157,6 +157,8 @@ void RecordMark( VkCommandBuffer cmd, const char* name );
 // 'name' must be a string literal. Results arrive a frame or two later, see DrainTimings.
 void Mark( const char* name );
 void DrainTimings( const std::function< void( const char* name, double ms ) >& fn );
+// profiling without RTGL1_PROFILE=1 (from the next submitted command buffer)
+void SetProfiling( bool on );
 
 }
 
