@@ -842,7 +842,7 @@ struct GltfTextures
             }
         }
 
-        auto findGltfSampler = [ this ]( const RTGL1::TextureManager::ExportResult& r ) {
+        auto findGltfSampler = [ this, makeSampler ]( const RTGL1::TextureManager::ExportResult& r ) {
             cgltf_sampler target = makeSampler( r.addressModeU, r.addressModeV, r.filter );
             for( cgltf_sampler& found : allocSamplers )
             {
@@ -1580,18 +1580,18 @@ bool CreateJunction( const std::filesystem::path& junction_aspath,
     }
     assert( std::filesystem::equivalent( target, junction ) );
 #else
+    // POSIX: a symbolic link to the folder
+    if( std::filesystem::exists( junction_aspath ) )
+    {
+        return true;
+    }
     std::error_code ec;
-    create_directories( junction_aspath, ec );
-    if( ec && forceEmpty )
+    create_directories( junction_aspath.parent_path(), ec );
+    std::filesystem::create_directory_symlink( target, junction, ec );
+    if( ec || !is_directory( junction_aspath ) )
     {
         RTGL1::debug::Warning(
-            "std::filesystem::create_directories error: {} - {}", ec.message(), junction );
-        return false;
-    }
-
-    if( !is_directory( junction_aspath ) )
-    {
-        RTGL1::debug::Warning( "Expected \'{}\' to be a directory", junction );
+            "Couldn't link \'{}\' to \'{}\': {}", junction, target, ec.message() );
         return false;
     }
 #endif
@@ -1621,7 +1621,7 @@ bool PrepareFolder( const std::filesystem::path& gltfPath,
             return false;
         }
 #else
-        debug::Warning( "Folder already exists, overwrite disabled: {}", folder.string() );
+        RTGL1::debug::Warning( "Folder already exists, overwrite disabled: {}", folder.string() );
         return false;
 #endif // RG_USE_SURFACE_WIN32
     }

@@ -22,6 +22,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+// POSIX math.h defines M_PI as a macro, which would break Utils::M_PI
+#ifdef M_PI
+    #undef M_PI
+#endif
 #include <optional>
 #include <filesystem>
 

@@ -22,6 +22,7 @@
 #define RTGL1_H_
 
 #include <stdint.h>
+#include <stddef.h>
 
 #if defined( _WIN32 )
     #define RGAPI_CALL __stdcall

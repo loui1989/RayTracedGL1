@@ -30,7 +30,9 @@ SOFTWARE.
 #include <expected>
 #include <optional>
 
+#ifdef RG_USE_DX12
 #include "d3d12.h"
+#endif
 
 // forward declare
 struct ID3D12Device;
@@ -50,6 +52,16 @@ using VkImage          = struct VkImage_T*;
 using VkDeviceMemory   = struct VkDeviceMemory_T*;
 using VkSemaphore      = struct VkSemaphore_T*;
 using HANDLE           = void*;
+
+#ifndef RG_USE_DX12
+// without DX12, only so that the (never taken) frame generation paths compile
+struct ID3D12CommandList
+{
+};
+struct ID3D12GraphicsCommandList : ID3D12CommandList
+{
+};
+#endif
 
 namespace RTGL1
 {

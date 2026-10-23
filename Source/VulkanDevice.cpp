@@ -32,8 +32,10 @@
 
 #include <algorithm>
 #include <cstring>
+#ifdef RG_USE_DX12
 #include <d3d12.h>
 #include <d3dx12.h>
+#endif
 
 namespace RTGL1
 {
@@ -1689,6 +1691,7 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
             {
                 return nullptr;
             }
+#ifdef RG_USE_DX12
             technique.CopyVkInputsToDX12( vkcmd, //
                                           frameIndex,
                                           *framebuffers,
@@ -1717,6 +1720,9 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
             assert( SUCCEEDED( hr ) );
 
             return dxgi::CreateD3D12CommandList( frameIndex );
+#else
+            return nullptr;
+#endif
         };
         auto l_tovk = [ this, frameIndex ]( ID3D12GraphicsCommandList* dx12cmd,
                                             auto& technique ) -> VkCommandBuffer {
@@ -1725,6 +1731,7 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
                 currentFrameState.SetSemaphore( nullptr );
                 return cmdManager->StartGraphicsCmd();
             }
+#ifdef RG_USE_DX12
             HRESULT hr = dx12cmd->Close();
             assert( SUCCEEDED( hr ) );
 
@@ -1752,6 +1759,9 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
                                           *framebuffers,
                                           renderResolution.GetResolutionState() );
             return vkcmd;
+#else
+            return VK_NULL_HANDLE;
+#endif
         };
 
         // upscale finalized image
@@ -2180,6 +2190,7 @@ void RTGL1::VulkanDevice::EndFrame( VkCommandBuffer cmd, FramebufferImageIndex r
     if( swapchain->WithDXGI() )
     {
         [ & ] {
+#ifdef RG_USE_DX12
             ID3D12CommandQueue* dx12queue = dxgi::GetD3D12CommandQueue();
             if( !dx12queue )
             {
@@ -2263,6 +2274,7 @@ void RTGL1::VulkanDevice::EndFrame( VkCommandBuffer cmd, FramebufferImageIndex r
 
                 dxgi::Present( present->d3d12fence, timelineFrame );
             }
+#endif // RG_USE_DX12
         }();
     }
     else

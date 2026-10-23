@@ -148,6 +148,13 @@ VkCommandBuffer RTGL1::CommandBufferManager::StartTransferCmd()
 
 void RTGL1::CommandBufferManager::Submit( VkCommandBuffer cmd, VkFence fence )
 {
+#ifdef __APPLE__
+    if( !pendingTimelineWaits.empty() )
+    {
+        Submit_TimelineInternal( cmd, {}, {}, VK_NULL_HANDLE, 0, fence );
+        return;
+    }
+#endif
     VkResult r = vkEndCommandBuffer( cmd );
     VK_CHECKERROR( r );
 
@@ -215,6 +222,20 @@ void RTGL1::CommandBufferManager::Submit_TimelineInternal( VkCommandBuffer      
     VkResult r = vkEndCommandBuffer( cmd );
     VK_CHECKERROR( r );
 
+#ifdef __APPLE__
+    std::vector< VkSemaphore > allWaits( waitSemaphores.begin(), waitSemaphores.end() );
+    std::vector< uint64_t >    allValues( waitValues.begin(), waitValues.end() );
+    allValues.resize( allWaits.size(), 0 );
+    for( const auto& [ sem, value ] : pendingTimelineWaits )
+    {
+        allWaits.push_back( sem );
+        allValues.push_back( value );
+    }
+    pendingTimelineWaits.clear();
+    waitSemaphores = allWaits;
+    waitValues     = allValues;
+#endif
+
     assert( waitSemaphores.size() <= std::size( DefaultStages ) );
     assert( waitSemaphores.size() == waitValues.size() || waitValues.empty() );
     
@@ -242,6 +263,29 @@ void RTGL1::CommandBufferManager::Submit_TimelineInternal( VkCommandBuffer      
     r = vkQueueSubmit( PopQueueOfCmd( cmd ), 1, &submitInfo, fence );
     VK_CHECKERROR( r );
 }
+
+#ifdef __APPLE__
+void RTGL1::CommandBufferManager::SubmitTimeline( VkCommandBuffer cmd,
+                                                  VkSemaphore     timeline,
+                                                  uint64_t        waitValue,
+                                                  uint64_t        signalValue )
+{
+    VkSemaphore waits[ 1 ]  = { timeline };
+    uint64_t    values[ 1 ] = { waitValue };
+    const size_t n          = waitValue != 0 ? 1 : 0;
+    Submit_TimelineInternal( cmd,
+                             std::span{ waits, n },
+                             std::span{ values, n },
+                             signalValue != 0 ? timeline : VK_NULL_HANDLE,
+                             signalValue,
+                             VK_NULL_HANDLE );
+}
+
+void RTGL1::CommandBufferManager::AddTimelineWaitForNextSubmit( VkSemaphore timeline, uint64_t value )
+{
+    pendingTimelineWaits.emplace_back( timeline, value );
+}
+#endif
 
 void RTGL1::CommandBufferManager::WaitGraphicsIdle()
 {

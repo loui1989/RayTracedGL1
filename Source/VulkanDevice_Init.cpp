@@ -32,7 +32,9 @@
 
 #include "Generated/ShaderCommonC.h"
 
+#ifdef RG_USE_DX12
 #include <d3d12.h>
+#endif
 
 namespace
 {
@@ -241,10 +243,12 @@ RTGL1::VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
 
     // create VkSurfaceKHR using user's function
     surface = GetSurfaceFromUser( instance, *info );
+#ifdef RG_USE_SURFACE_WIN32
     if( info->pWin32SurfaceInfo && info->pWin32SurfaceInfo->hwnd )
     {
         dxgi::SetHwnd( info->pWin32SurfaceInfo->hwnd );
     }
+#endif
 
 
     // create selected physical device
@@ -269,6 +273,14 @@ RTGL1::VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
         device, 
         queues );
 
+#ifdef __APPLE__
+    // the Metal renderer behind the Vulkan calls (MetalBridge.mm / MetalNative.mm)
+    if( !Metal::Init( device, cmdManager ) && MetalNative::Enabled() )
+    {
+        throw RgException( RG_RESULT_GRAPHICS_API_ERROR, "Couldn't start the Metal renderer" );
+    }
+#endif
+
     uniform = std::make_shared< GlobalUniform >( 
         device, 
         memAllocator );
@@ -291,7 +303,12 @@ RTGL1::VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
         amdFsr3dx12,
         physDevice->GetLUID() );
     
+#ifdef RG_USE_IMGUI
     if( LibConfig().developerMode && LibConfig().debugWindows )
+#else
+    // built without the ImGui debug windows (macOS): no developer UI
+    if( false )
+#endif
     {
         debugWindows = std::make_shared< DebugWindows >( 
             instance,
@@ -565,6 +582,11 @@ RTGL1::VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
         observer->Subscribe( sceneMetaManager );
         observer->Subscribe( sceneImportExport );
     }
+
+#ifdef __APPLE__
+    // translate every compute shader to Metal now, not at the first frame
+    Metal::PrepareAllPipelines();
+#endif
 }
 
 RTGL1::VulkanDevice::~VulkanDevice()
@@ -627,6 +649,9 @@ RTGL1::VulkanDevice::~VulkanDevice()
     shaderManager.reset();
     rtPipeline.reset();
     pathTracer.reset();
+#ifdef __APPLE__
+    Metal::Shutdown();
+#endif
     rasterizer.reset();
     portalList.reset();
     lightManager.reset();
@@ -920,18 +945,24 @@ void RTGL1::VulkanDevice::CreateDevice()
     };
 
 
+    // The path tracer casts its rays with ray queries from compute shaders (the model Metal
+    // uses), so ray queries are required. Position fetch is optional: the fluid particles no
+    // longer need it (the hit's normal comes from extra rays), so they only need ray queries.
+    bool supportsPositionFetch = false;
     m_supportsRayQueryAndPositionFetch = false;
     {
-        if( physDevice->SupportsRayQuery() && physDevice->SupportsPositionFetch() )
+        if( physDevice->SupportsRayQuery() && l_supported( VK_KHR_RAY_QUERY_EXTENSION_NAME ) )
         {
-            if( l_supported( VK_KHR_RAY_QUERY_EXTENSION_NAME ) &&
+            m_supportsRayQueryAndPositionFetch = true;
+
+            if( physDevice->SupportsPositionFetch() &&
                 l_supported( VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME ) )
             {
-                m_supportsRayQueryAndPositionFetch = true;
+                supportsPositionFetch = true;
             }
         }
     }
-    g_supportsPositionFetch = m_supportsRayQueryAndPositionFetch;
+    g_supportsPositionFetch = supportsPositionFetch;
 
 
     VkPhysicalDeviceFeatures features = {
@@ -1074,13 +1105,13 @@ void RTGL1::VulkanDevice::CreateDevice()
 
     auto rtQueryFeatures = VkPhysicalDeviceRayQueryFeaturesKHR{
         .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
-        .pNext    = &positionFetchFeatures,
+        .pNext    = selectPtr( supportsPositionFetch, &positionFetchFeatures, &asFeatures ),
         .rayQuery = 1,
     };
 
     auto physicalDeviceFeatures2 = VkPhysicalDeviceFeatures2{
         .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext    = selectPtr( m_supportsRayQueryAndPositionFetch, &rtQueryFeatures, &asFeatures ),
+        .pNext    = &rtQueryFeatures,
         .features = features,
     };
 
@@ -1104,9 +1135,10 @@ void RTGL1::VulkanDevice::CreateDevice()
 #endif // RG_USE_DX12
     };
 
-    if( m_supportsRayQueryAndPositionFetch )
+    // required: the path tracer's passes use ray queries (checked below like the others)
+    deviceExtensions.push_back( VK_KHR_RAY_QUERY_EXTENSION_NAME );
+    if( supportsPositionFetch )
     {
-        deviceExtensions.push_back( VK_KHR_RAY_QUERY_EXTENSION_NAME );
         deviceExtensions.push_back( VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME );
     }
 

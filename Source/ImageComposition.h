@@ -21,6 +21,8 @@
 #pragma once
 
 #include "Common.h"
+
+#include <cfloat>
 #include "ShaderManager.h"
 #include "Framebuffers.h"
 #include "GlobalUniform.h"

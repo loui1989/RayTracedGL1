@@ -79,6 +79,15 @@ public:
     void Submit_Timeline(
         VkCommandBuffer cmd, VkFence fence, ToWait towait0, ToWait towait1, ToSignal tosignal );
 
+#ifdef __APPLE__
+    // timeline semaphore 'timeline': wait for 'waitValue' (if non-zero) before the commands,
+    // signal 'signalValue' (if non-zero) after them
+    void SubmitTimeline( VkCommandBuffer cmd, VkSemaphore timeline, uint64_t waitValue, uint64_t signalValue );
+    // the next Submit / Submit_Timeline also waits for the timeline semaphore to reach
+    // 'value' (macOS: work done in a native Metal section)
+    void AddTimelineWaitForNextSubmit( VkSemaphore timeline, uint64_t value );
+#endif
+
     void                  WaitGraphicsIdle();
     void                  WaitComputeIdle();
     void                  WaitTransferIdle();
@@ -111,6 +120,10 @@ private:
 
     std::shared_ptr< Queues >                      queues;
     rgl::unordered_map< VkCommandBuffer, VkQueue > cmdQueues[ MAX_FRAMES_IN_FLIGHT ];
+
+#ifdef __APPLE__
+    std::vector< std::pair< VkSemaphore, uint64_t > > pendingTimelineWaits;
+#endif
 };
 
 inline void CommandBufferManager::Submit_Timeline( VkCommandBuffer cmd,
@@ -142,8 +155,8 @@ inline void CommandBufferManager::Submit_Timeline(
 {
     size_t wait_count = 0;
 
-    VkSemaphore wait_semaphores[ 1 ];
-    uint64_t    wait_values[ 1 ];
+    VkSemaphore wait_semaphores[ 2 ];
+    uint64_t    wait_values[ 2 ];
     if( towait0.semaphore != nullptr )
     {
         wait_semaphores[ wait_count ] = towait0.semaphore;

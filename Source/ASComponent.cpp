@@ -31,7 +31,15 @@ VkDeviceAddress FetchASAddress( VkDevice device, VkAccelerationStructureKHR as )
         .sType                 = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
         .accelerationStructure = as,
     };
-    return RTGL1::svkGetAccelerationStructureDeviceAddressKHR( device, &addressInfo );
+    const VkDeviceAddress address = RTGL1::svkGetAccelerationStructureDeviceAddressKHR( device, &addressInfo );
+#ifdef __APPLE__
+    // Metal: top level instances reference bottom level structures by this address
+    if( RTGL1::Metal::IsEnabled() )
+    {
+        RTGL1::Metal::RegisterAccelerationStructureAddress( as, address );
+    }
+#endif
+    return address;
 }
 }
 
@@ -77,6 +85,9 @@ void RTGL1::ASComponent::DestroyAS()
 {
     if( as != VK_NULL_HANDLE )
     {
+#ifdef __APPLE__
+        Metal::ForgetAccelerationStructure( as );
+#endif
         svkDestroyAccelerationStructureKHR( device, as, nullptr );
         as = VK_NULL_HANDLE;
     }

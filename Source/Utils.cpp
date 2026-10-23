@@ -21,8 +21,12 @@
 #include "Utils.h"
 
 #include <cmath>
+#include <cstring>
 
-#ifdef __linux__
+#if defined( __APPLE__ )
+    #include <dlfcn.h>
+    #include <climits>
+#elif defined( __linux__ )
     #include <dlfcn.h>
     #include <unistd.h>
     #include <linux/limits.h>
@@ -35,6 +39,14 @@ auto Utils::FindBinFolder() -> std::filesystem::path
 #if defined( _WIN32 )
     wchar_t rtglDllPath[ MAX_PATH ]{};
     GetModuleFileNameW( GetModuleHandle( RG_LIBRARY_NAME ), rtglDllPath, MAX_PATH );
+#elif defined( __APPLE__ )
+    // the folder of the dylib (or of the executable it's linked into)
+    char    rtglDllPath[ PATH_MAX ]{};
+    Dl_info dl_info{};
+    if( dladdr( reinterpret_cast< void* >( &Utils::FindBinFolder ), &dl_info ) && dl_info.dli_fname )
+    {
+        std::strncpy( rtglDllPath, dl_info.dli_fname, PATH_MAX - 1 );
+    }
 #elif defined( __linux__ )
     wchar_t rtglDllPath[ PATH_MAX ]{};
     Dl_info dl_info{};

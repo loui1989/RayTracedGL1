@@ -237,8 +237,9 @@ auto RTGL1::FindPresentModes( VkPhysicalDevice physDevice, VkSurfaceKHR surface 
     }
     if( !b )
     {
-        debug::Error( "Can't find VK_PRESENT_MODE_FIFO_RELAXED_KHR. Supported: {}",
-                      JoinAsString( supported ) );
+        // FIFO is always supported (e.g. macOS: only FIFO and IMMEDIATE)
+        debug::Info( "No VK_PRESENT_MODE_FIFO_RELAXED_KHR, vsync uses FIFO. Supported: {}",
+                     JoinAsString( supported ) );
     }
 
     return result;

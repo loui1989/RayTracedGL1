@@ -61,10 +61,15 @@ constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
     VK_EXTENSION_FUNCTION( vkCmdBeginDebugUtilsLabelEXT ) \
     VK_EXTENSION_FUNCTION( vkCmdEndDebugUtilsLabelEXT )
 
+#ifdef VK_USE_PLATFORM_WIN32_KHR
 #define VK_DEVICE_WIN32_FUNCTION_LIST                     \
     VK_EXTENSION_FUNCTION( vkGetMemoryWin32HandleKHR )    \
     VK_EXTENSION_FUNCTION( vkGetSemaphoreWin32HandleKHR ) \
-    VK_EXTENSION_FUNCTION( vkGetMemoryWin32HandlePropertiesKHR )        
+    VK_EXTENSION_FUNCTION( vkGetMemoryWin32HandlePropertiesKHR )
+#else
+// DX12 interop only (Windows)
+#define VK_DEVICE_WIN32_FUNCTION_LIST
+#endif
 
 // extension functions' declarations
 #define VK_EXTENSION_FUNCTION( fname ) extern PFN_##fname s##fname;
@@ -123,3 +128,6 @@ struct ImportExportParams
 constexpr VkFormat RASTER_PASS_DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
 
 }
+
+// macOS: Vulkan is implemented on Metal (MetalNative.h); the calls are routed there
+#include "MetalShims.h"

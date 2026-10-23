@@ -147,12 +147,25 @@ bool ASBuilder::BuildBottomLevel( VkCommandBuffer cmd )
         return false;
     }
 
-    // build bottom level
-    svkCmdBuildAccelerationStructuresKHR(
-        cmd,
-        static_cast< uint32_t >( bottomLBuildInfo.geomInfos.size() ),
-        bottomLBuildInfo.geomInfos.data(),
-        bottomLBuildInfo.rangeInfos.data() );
+#ifdef __APPLE__
+    if( Metal::IsEnabled() )
+    {
+        // built natively in Metal, at this point of the command buffer
+        Metal::QueueBottomLevelBuilds( static_cast< uint32_t >( bottomLBuildInfo.geomInfos.size() ),
+                                       bottomLBuildInfo.geomInfos.data(),
+                                       bottomLBuildInfo.rangeInfos.data() );
+        Metal::RecordQueuedBuilds( cmd );
+    }
+    else
+#endif
+    {
+        // build bottom level
+        svkCmdBuildAccelerationStructuresKHR(
+            cmd,
+            static_cast< uint32_t >( bottomLBuildInfo.geomInfos.size() ),
+            bottomLBuildInfo.geomInfos.data(),
+            bottomLBuildInfo.rangeInfos.data() );
+    }
 
     bottomLBuildInfo.geomInfos.clear();
     bottomLBuildInfo.rangeInfos.clear();

@@ -38,6 +38,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #endif
 
+#include <cfloat>
 #include <format>
 #include <span>
 
@@ -779,7 +780,7 @@ namespace
 #if 1
         // SHIPPING_HACK: if original game texture referenced in gltf, 
         bool trackOriginalTexture = false;
-        if( fullPaths[ TEXTURE_ALBEDO_ALPHA_INDEX ].native().find( TEXTURES_FOLDER_JUNCTION_W ) !=
+        if( fullPaths[ TEXTURE_ALBEDO_ALPHA_INDEX ].wstring().find( TEXTURES_FOLDER_JUNCTION_W ) !=
             std::wstring::npos )
         {
             {
@@ -1671,7 +1672,7 @@ void RTGL1::GltfImporter::ParseFile( cgltf_data*               data,
                     l_insert_cutframe( result.animcamera.quaternion, cutframe_timekey );
                     l_insert_cutframe( result.animcamera.fovYRadians, cutframe_timekey );
 #ifndef NDEBUG
-                    static_assert( sizeof( AnimationData ) == 96,
+                    static_assert( sizeof( AnimationData ) == 3 * sizeof( AnimationChannel< float > ),
                                    "if adding a new AnimationChannel, add it also here" );
 #endif
                 }

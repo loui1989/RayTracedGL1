@@ -21,6 +21,7 @@
 #include "FolderObserver.h"
 
 #include <future>
+#include <optional>
 
 #include "Const.h"
 

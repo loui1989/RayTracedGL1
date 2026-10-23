@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 project(RayTracedGL1 CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
+if (NOT WIN32)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 string(TOUPPER "${CMAKE_BUILD_TYPE}" BUILD_TYPE )
 
@@ -142,6 +145,42 @@ option(RG_WITH_NRD              "Build RTGL1 with the NVIDIA NRD denoiser lane (
 
 option(RG_WITH_EXAMPLES         "Build with examples executable"            ON)
 
+if (APPLE)
+    # macOS: Vulkan is implemented on Metal inside the library (Source/MetalNative.mm,
+    # MetalBridge.mm), without a Vulkan loader or MoltenVK. No DX12 / DLSS / NRD; the
+    # MetalFX temporal upscaler fills the FSR2 slot (Source/FSR2_Metal.mm).
+    message(STATUS "macOS: Vulkan on Metal (RG_METAL_ONLY)")
+    set(RG_WITH_SURFACE_METAL ON  CACHE BOOL "" FORCE)
+    set(RG_WITH_SURFACE_WIN32 OFF CACHE BOOL "" FORCE)
+    set(RG_WITH_DX12          OFF CACHE BOOL "" FORCE)
+    set(RG_WITH_IMGUI         OFF CACHE BOOL "" FORCE)
+    set(RG_WITH_NATIVE_DLSS   OFF CACHE BOOL "" FORCE)
+    set(RG_WITH_NRD           OFF CACHE BOOL "" FORCE)
+    set(RG_WITH_EXAMPLES      OFF CACHE BOOL "" FORCE)
+    enable_language(OBJCXX)
+endif()
+
+if (NOT RG_WITH_DX12)
+    # stubs that report DXGI / FSR3 / DLSS3 frame generation unavailable
+    list(REMOVE_ITEM Sources
+        "Source/FSR3_DX12.cpp"
+        "Source/DLSS3_DX12.cpp"
+        "Source/DX12_Swapchain.cpp"
+        "Source/DX12_Vulkan.cpp")
+    list(APPEND Sources "Source/NoDX12.cpp")
+endif()
+if (APPLE)
+    list(REMOVE_ITEM Sources "Source/FSR2.cpp")
+    list(APPEND Sources
+        "Source/FSR2_Metal.mm"
+        "Source/MetalBridge.mm"
+        "Source/MetalNative.mm"
+        "Source/MetalShaderGen.cpp")
+    set_source_files_properties(
+        "Source/FSR2_Metal.mm" "Source/MetalBridge.mm" "Source/MetalNative.mm"
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+endif()
+
 
 # for KTX-Software
 add_definitions(-DKHRONOS_STATIC -DLIBKTX)
@@ -186,7 +225,14 @@ set(VulkanSdkDir "Source/VulkanSDK/1.3.280.0")
 message(STATUS "Adding Vulkan from ${VulkanSdkDir}")
 add_library(Vulkan INTERFACE)
 target_include_directories(Vulkan INTERFACE "${VulkanSdkDir}/Include")
-target_link_libraries(Vulkan INTERFACE "${CMAKE_SOURCE_DIR}/${VulkanSdkDir}/Lib/vulkan-1.lib")
+if (APPLE)
+    # no loader: the library implements the Vulkan functions it uses (MetalNative.mm)
+    target_compile_definitions(Vulkan INTERFACE RG_METAL_ONLY)
+elseif (WIN32)
+    target_link_libraries(Vulkan INTERFACE "${CMAKE_SOURCE_DIR}/${VulkanSdkDir}/Lib/vulkan-1.lib")
+else()
+    target_link_libraries(Vulkan INTERFACE vulkan)
+endif()
 
 
 # DirectX 12
@@ -226,6 +272,18 @@ if (RG_WITH_IMGUI)
     add_subdirectory(Source/glfw)
     target_link_libraries(ImGui PRIVATE glfw)
     target_include_directories(ImGui PRIVATE glfw)
+else()
+    # the developer UI code (VulkanDevice_Dev.cpp) still compiles against ImGui's core;
+    # without the debug windows it never runs
+    set(ImGuiSourceFolder Source/imgui)
+    add_library(ImGui STATIC
+        ${ImGuiSourceFolder}/imgui_draw.cpp
+        ${ImGuiSourceFolder}/imgui_tables.cpp
+        ${ImGuiSourceFolder}/imgui_widgets.cpp
+        ${ImGuiSourceFolder}/imgui.cpp
+    )
+    target_include_directories(ImGui PUBLIC ${ImGuiSourceFolder})
+    set_target_properties(ImGui PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 
@@ -411,6 +469,50 @@ if (RG_WITH_IMGUI)
     target_include_directories(RayTracedGL1 PRIVATE ImGui)
     target_link_libraries(RayTracedGL1 PRIVATE glfw)
     target_include_directories(RayTracedGL1 PRIVATE glfw)
+else()
+    target_link_libraries(RayTracedGL1 PRIVATE ImGui)
+endif()
+
+# macOS: Metal
+if (APPLE)
+    target_link_libraries(RayTracedGL1 PRIVATE
+        "-framework Foundation" "-framework Metal" "-framework MetalFX"
+        "-framework QuartzCore" "-framework CoreGraphics")
+    set_target_properties(RayTracedGL1 PROPERTIES
+        INSTALL_NAME_DIR "@rpath"
+        OBJCXX_STANDARD 23
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/Build/bin")
+
+    # shaders are translated from SPIR-V to Metal at startup with SPIRV-Cross
+    set(RG_SPIRV_CROSS_DIR "" CACHE PATH "SPIRV-Cross source directory (required on macOS)")
+    if (NOT RG_SPIRV_CROSS_DIR)
+        message(FATAL_ERROR "macOS: set RG_SPIRV_CROSS_DIR to a SPIRV-Cross source checkout")
+    endif()
+    set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SHARED OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_FORCE_PIC ON CACHE BOOL "" FORCE)
+    add_subdirectory("${RG_SPIRV_CROSS_DIR}" spirv-cross EXCLUDE_FROM_ALL)
+    target_link_libraries(RayTracedGL1 PRIVATE spirv-cross-msl spirv-cross-glsl spirv-cross-core)
+    target_compile_definitions(RayTracedGL1 PRIVATE RG_HAS_SPIRV_CROSS)
+
+    # libc++ doesn't include standard headers transitively like MSVC's STL does
+    target_compile_options(RayTracedGL1 PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includealgorithm>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includecstring>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includecstdio>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includecfloat>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includelimits>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includememory>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includestring>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includefunctional>"
+        "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wno-nullability-completeness>")
 endif()
 
 # Json parser - glaze

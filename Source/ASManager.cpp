@@ -1272,8 +1272,23 @@ void RTGL1::ASManager::BuildTLAS( VkCommandBuffer cmd,
 
         // ASBuilder requires 'instGeom', 'range' to be alive
         assert( asBuilder->IsEmpty() );
-        asBuilder->AddTLAS( curTlas->GetAS(), &instGeom, &range, buildSizes, fastTrace, false );
-        asBuilder->BuildTopLevel( cmd );
+#ifdef __APPLE__
+        if( Metal::IsEnabled() )
+        {
+            // built natively in Metal from the instances on the CPU, at this point of the
+            // command buffer
+            Metal::QueueTopLevelBuild( curTlas->GetAS(),
+                                       allVkTlas.data(),
+                                       static_cast< uint32_t >( allVkTlas.size() ),
+                                       fastTrace );
+            Metal::RecordQueuedBuilds( cmd );
+        }
+        else
+#endif
+        {
+            asBuilder->AddTLAS( curTlas->GetAS(), &instGeom, &range, buildSizes, fastTrace, false );
+            asBuilder->BuildTopLevel( cmd );
+        }
     }
 
 

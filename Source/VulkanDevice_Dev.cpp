@@ -453,12 +453,10 @@ void RTGL1::VulkanDevice::Dev_Draw() const
                 imgui_ShowAlwaysOnCheckbox< "Prefer DXGI for Present" >();
             }
 
-            static_assert(
-                std::same_as< int, std::underlying_type_t< RgRenderUpscaleTechnique > > );
-            static_assert(
-                std::same_as< int, std::underlying_type_t< RgRenderSharpenTechnique > > );
-            static_assert( std::same_as< int, std::underlying_type_t< RgRenderResolutionMode > > );
-            static_assert( std::same_as< int, std::underlying_type_t< RgFrameGenerationMode > > );
+            static_assert( sizeof( RgRenderUpscaleTechnique ) == sizeof( int ) ); // edited as int
+            static_assert( sizeof( RgRenderSharpenTechnique ) == sizeof( int ) ); // edited as int
+            static_assert( sizeof( RgRenderResolutionMode ) == sizeof( int ) ); // edited as int
+            static_assert( sizeof( RgFrameGenerationMode ) == sizeof( int ) ); // edited as int
 
             {
                 ImGui::Spacing();
@@ -1165,7 +1163,7 @@ void RTGL1::VulkanDevice::Dev_Draw() const
                         {
                             const ImGuiTableColumnSortSpecs* srt = &sortspecs->Specs[ n ];
 
-                            std::strong_ordering ord{ 0 };
+                            std::strong_ordering ord = std::strong_ordering::equal;
                             switch( srt->ColumnIndex )
                             {
                                 case 0: ord = ( a.callIndex <=> b.callIndex ); break;
@@ -1557,7 +1555,7 @@ void RTGL1::VulkanDevice::Dev_Draw() const
                         {
                             const ImGuiTableColumnSortSpecs* srt = &sortspecs->Specs[ n ];
 
-                            std::strong_ordering ord{ 0 };
+                            std::strong_ordering ord = std::strong_ordering::equal;
                             switch( srt->ColumnIndex )
                             {
                                 case ColumnTextureIndex0:

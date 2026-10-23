@@ -275,8 +275,12 @@ public:
 
     bool IsCASInsideFSR2() const
     {
+#ifdef __APPLE__
+        return false; // MetalFX fills the FSR2 slot and has no built-in sharpening
+#else
         return upscaleTechnique == RG_RENDER_UPSCALE_TECHNIQUE_AMD_FSR2 &&
                sharpenTechnique == RG_RENDER_SHARPEN_TECHNIQUE_AMD_CAS;
+#endif
     }
 
     // For the additional sharpening pass

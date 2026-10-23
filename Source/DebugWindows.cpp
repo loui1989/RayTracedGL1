@@ -483,4 +483,41 @@ uint32_t RTGL1::DebugWindows::GetSwapchainCurrentImageIndex() const
     return customSwapchain->GetCurrentImageIndex();
 }
 
+#else // !RG_USE_IMGUI
+
+// built without the debug windows: never created (see VulkanDevice_Init.cpp)
+
+#include "RgException.h"
+
+RTGL1::DebugWindows::DebugWindows( VkInstance,
+                                   VkPhysicalDevice,
+                                   VkDevice                                 _device,
+                                   uint32_t,
+                                   VkQueue,
+                                   std::shared_ptr< CommandBufferManager >& )
+    : device( _device )
+    , customWindow( nullptr )
+    , customSurface( VK_NULL_HANDLE )
+    , swapchainImageAvailable{}
+    , descPool( VK_NULL_HANDLE )
+    , renderPass( VK_NULL_HANDLE )
+    , alwaysOnTop( false )
+    , isMinimized( true )
+{
+    throw RgException( RG_RESULT_INTERNAL_ERROR,
+                       "Built without the ImGui debug windows" );
+}
+RTGL1::DebugWindows::~DebugWindows() = default;
+void RTGL1::DebugWindows::Init( const std::shared_ptr< DebugWindows >& ) {}
+bool RTGL1::DebugWindows::PrepareForFrame( uint32_t, bool ) { return false; }
+void RTGL1::DebugWindows::SubmitForFrame( VkCommandBuffer, uint32_t ) {}
+void RTGL1::DebugWindows::OnQueuePresent( VkResult ) {}
+void RTGL1::DebugWindows::OnSwapchainCreate( const DebugWindows_Swapchain* ) {}
+void RTGL1::DebugWindows::OnSwapchainDestroy() {}
+VkSwapchainKHR RTGL1::DebugWindows::GetSwapchainHandle() const { return VK_NULL_HANDLE; }
+uint32_t       RTGL1::DebugWindows::GetSwapchainCurrentImageIndex() const { return 0; }
+VkSemaphore    RTGL1::DebugWindows::GetSwapchainImageAvailableSemaphore_Binary( uint32_t ) const { return VK_NULL_HANDLE; }
+void           RTGL1::DebugWindows::SetAlwaysOnTop( bool ) {}
+void           RTGL1::DebugWindows::SetIniFilename( const std::filesystem::path& ) {}
+
 #endif // RG_USE_IMGUI

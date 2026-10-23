@@ -44,6 +44,39 @@ RTGL1::MemoryAllocator::MemoryAllocator( VkInstance                        _inst
         .vulkanApiVersion = VK_API_VERSION_1_2,
     };
 
+#ifdef __APPLE__
+    // macOS: Vulkan is implemented on Metal; VMA calls the native functions directly
+    VmaVulkanFunctions nativeFunctions = {};
+    {
+        using namespace MetalNative;
+        nativeFunctions.vkGetInstanceProcAddr                   = &MetalNative::vkGetInstanceProcAddr;
+        nativeFunctions.vkGetDeviceProcAddr                     = &MetalNative::vkGetDeviceProcAddr;
+        nativeFunctions.vkGetPhysicalDeviceProperties           = &MetalNative::vkGetPhysicalDeviceProperties;
+        nativeFunctions.vkGetPhysicalDeviceMemoryProperties     = &MetalNative::vkGetPhysicalDeviceMemoryProperties;
+        nativeFunctions.vkAllocateMemory                        = &MetalNative::vkAllocateMemory;
+        nativeFunctions.vkFreeMemory                            = &MetalNative::vkFreeMemory;
+        nativeFunctions.vkMapMemory                             = &MetalNative::vkMapMemory;
+        nativeFunctions.vkUnmapMemory                           = &MetalNative::vkUnmapMemory;
+        nativeFunctions.vkFlushMappedMemoryRanges               = &MetalNative::vkFlushMappedMemoryRanges;
+        nativeFunctions.vkInvalidateMappedMemoryRanges          = &MetalNative::vkInvalidateMappedMemoryRanges;
+        nativeFunctions.vkBindBufferMemory                      = &MetalNative::vkBindBufferMemory;
+        nativeFunctions.vkBindImageMemory                       = &MetalNative::vkBindImageMemory;
+        nativeFunctions.vkGetBufferMemoryRequirements           = &MetalNative::vkGetBufferMemoryRequirements;
+        nativeFunctions.vkGetImageMemoryRequirements            = &MetalNative::vkGetImageMemoryRequirements;
+        nativeFunctions.vkCreateBuffer                          = &MetalNative::vkCreateBuffer;
+        nativeFunctions.vkDestroyBuffer                         = &MetalNative::vkDestroyBuffer;
+        nativeFunctions.vkCreateImage                           = &MetalNative::vkCreateImage;
+        nativeFunctions.vkDestroyImage                          = &MetalNative::vkDestroyImage;
+        nativeFunctions.vkCmdCopyBuffer                         = &MetalNative::vkCmdCopyBuffer;
+        nativeFunctions.vkGetBufferMemoryRequirements2KHR       = &MetalNative::vkGetBufferMemoryRequirements2;
+        nativeFunctions.vkGetImageMemoryRequirements2KHR        = &MetalNative::vkGetImageMemoryRequirements2;
+        nativeFunctions.vkBindBufferMemory2KHR                  = &MetalNative::vkBindBufferMemory2;
+        nativeFunctions.vkBindImageMemory2KHR                   = &MetalNative::vkBindImageMemory2;
+        nativeFunctions.vkGetPhysicalDeviceMemoryProperties2KHR = &MetalNative::vkGetPhysicalDeviceMemoryProperties2;
+    }
+    allocatorInfo.pVulkanFunctions = &nativeFunctions;
+#endif
+
     VkResult r = vmaCreateAllocator( &allocatorInfo, &allocator );
     VK_CHECKERROR( r );
 
@@ -163,6 +196,10 @@ void RTGL1::MemoryAllocator::DestroyTextureImage( VkImage image )
         return;
     }
 
+#ifdef __APPLE__
+    // the Metal layer's cache of the image's texture
+    Metal::ForgetImage( image );
+#endif
     vmaDestroyImage( allocator, image, vmaAllocation->second );
     imgAllocs.erase( image );
 }

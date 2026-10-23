@@ -829,8 +829,8 @@ uint32_t TextureManager::PrepareTexture( VkCommandBuffer                        
 
     // SHIPPING_HACK begin: dont make mipmaps for voxel models 
     {
-        const auto& fs = filepath.native();
-        if( fs.length() >= 3 && fs.contains( L"vx_" ) )
+        const auto fs = filepath.generic_string();
+        if( fs.length() >= 3 && fs.contains( "vx_" ) )
         {
             useMipmaps = false;
         }
