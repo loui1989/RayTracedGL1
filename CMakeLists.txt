@@ -480,8 +480,7 @@ if (APPLE)
         "-framework QuartzCore" "-framework CoreGraphics")
     set_target_properties(RayTracedGL1 PROPERTIES
         INSTALL_NAME_DIR "@rpath"
-        OBJCXX_STANDARD 23
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/Build/bin")
+        OBJCXX_STANDARD 23)
 
     # shaders are translated from SPIR-V to Metal at startup with SPIRV-Cross
     set(RG_SPIRV_CROSS_DIR "" CACHE PATH "SPIRV-Cross source directory (required on macOS)")
