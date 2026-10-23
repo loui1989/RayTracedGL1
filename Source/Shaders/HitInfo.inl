@@ -362,6 +362,10 @@ ShHitInfo getHitInfoBounce(
         h.emission  = tr.geomEmission;
     }
     
+    // global adjustments (e.g. to try a glossier look)
+    h.roughness = clamp( h.roughness * globalUniform.roughnessMultiplier, 0.0, 1.0 );
+    h.metallic  = clamp( h.metallic + globalUniform.metallicityAdd, 0.0, 1.0 );
+
     h.roughness = globalUniform.squareInputRoughness == 0 ? h.roughness : square( h.roughness );
     h.roughness = max( h.roughness, max( globalUniform.minRoughness, MIN_GGX_ROUGHNESS ) );
 

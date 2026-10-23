@@ -311,6 +311,8 @@ struct ShGlobalUniform
     vec4 rippleParams[32];
     vec4 skyLightColor;
     float exposureCompensation;
+    float roughnessMultiplier;
+    float metallicityAdd;
 };
 
 struct ShGeometryInstance

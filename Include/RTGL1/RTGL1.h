@@ -900,6 +900,12 @@ typedef struct RgDrawFrameTexturesParams
     RgBool32        squareInputRoughness;
     // Default: 0.0
     float           minRoughness;
+    // Every surface's roughness (from its material or the default) is multiplied by this,
+    // before squareInputRoughness: below 1 - glossier. 0 is taken as 1 (the default).
+    float           roughnessMultiplier;
+    // Added to every surface's metallicity (clamped to 1): more of the light is reflected,
+    // tinted by the surface's color. Default: 0
+    float           metallicityAdd;
 } RgDrawFrameTexturesParams;
 
 typedef enum RgDebugDrawFlagBits

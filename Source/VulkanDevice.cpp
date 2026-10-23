@@ -381,6 +381,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
         gu->emissionMaxScreenColor = std::max( drawInfo.pTexturesParams->emissionMaxScreenColor, 0.0f );
         gu->squareInputRoughness   = !!drawInfo.pTexturesParams->squareInputRoughness;
         gu->minRoughness           = std::clamp( drawInfo.pTexturesParams->minRoughness, 0.0f, 1.0f );
+        gu->roughnessMultiplier    = drawInfo.pTexturesParams->roughnessMultiplier > 0.0f
+                                         ? std::min( drawInfo.pTexturesParams->roughnessMultiplier, 4.0f )
+                                         : 1.0f;
+        gu->metallicityAdd         = std::clamp( drawInfo.pTexturesParams->metallicityAdd, 0.0f, 1.0f );
     }
     else
     {
@@ -389,6 +393,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
         gu->emissionMaxScreenColor = 1.5f;
         gu->squareInputRoughness   = 1;
         gu->minRoughness           = 0.0f;
+        gu->roughnessMultiplier    = 1.0f;
+        gu->metallicityAdd         = 0.0f;
     }
 
     if( drawInfo.pIlluminationParams != nullptr )

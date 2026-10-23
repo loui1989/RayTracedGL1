@@ -647,6 +647,8 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_FLOAT32,      4,      "skyLightColor",                1),
     # exposure offset in stops: negative - darker
     (TYPE_FLOAT32,      1,      "exposureCompensation",         1),
+    (TYPE_FLOAT32,      1,      "roughnessMultiplier",          1),
+    (TYPE_FLOAT32,      1,      "metallicityAdd",               1),
 ]
 
 GEOM_INSTANCE_STRUCT = [
