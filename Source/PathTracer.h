@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "Common.h"
 #include "RayTracingPipeline.h"
 #include "GlobalUniform.h"
@@ -121,6 +123,10 @@ private:
 
 private:
     std::shared_ptr< RayTracingPipeline > rtPipeline;
+    // the sets of the last BindDescSet: the passes are compute pipelines, so a compute pass
+    // of another layout recorded between them (e.g. the decals' g-buffer copy) replaces
+    // these bindings, and TraceRays binds them again
+    std::vector< VkDescriptorSet > boundSets;
 };
 
 }

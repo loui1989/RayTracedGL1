@@ -80,6 +80,7 @@ void PathTracer::BindDescSet( VkPipelineBindPoint   bindPoint,
                              sets,
                              0,
                              nullptr );
+    boundSets.assign( std::begin( sets ), std::end( sets ) );
 }
 
 PathTracer::TraceParams PathTracer::BindRayTracing( VkCommandBuffer                  cmd,
@@ -130,6 +131,17 @@ void PathTracer::TraceRays(
 {
     // a compute dispatch over the former launch size; the shaders return outside of it
     rtPipeline->BindPass( cmd, sbtRayGenIndex );
+    if( !boundSets.empty() )
+    {
+        vkCmdBindDescriptorSets( cmd,
+                                 VK_PIPELINE_BIND_POINT_COMPUTE,
+                                 rtPipeline->GetLayout(),
+                                 0,
+                                 uint32_t( boundSets.size() ),
+                                 boundSets.data(),
+                                 0,
+                                 nullptr );
+    }
     vkCmdDispatch( cmd,
                    Utils::GetWorkGroupCount( width, RayTracingPipeline::GROUP_SIZE_X ),
                    Utils::GetWorkGroupCount( height, RayTracingPipeline::GROUP_SIZE_Y ),
