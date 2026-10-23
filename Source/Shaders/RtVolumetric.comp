@@ -211,13 +211,20 @@ void main()
                 {
                     continue;
                 }
-                const ivec2 chpix = getCheckerboardPix( p );
-                const uint  instCustomIndex =
-                    floatBitsToUint( texelFetch( framebufSurfacePosition_Sampler, chpix, 0 ).a );
+                // the pixel and its horizontal pair: on water / glass they're one reflection and
+                // one refraction pixel, with very different paths. Reading only one of them, a
+                // cell could see only the short paths and drop the fog the long ones need, in a
+                // grid pattern that follows how the cells fall on the pixels
+                for( int k = 0; k < 2; k++ )
+                {
+                    const ivec2 chpix = getCheckerboardPix( ivec2( p.x ^ k, p.y ) );
+                    const uint  instCustomIndex =
+                        floatBitsToUint( texelFetch( framebufSurfacePosition_Sampler, chpix, 0 ).a );
 
-                onScreen   = true;
-                dynamic    = dynamic || ( instCustomIndex & INSTANCE_CUSTOM_INDEX_FLAG_DYNAMIC ) != 0;
-                pathLength = max( pathLength, texelFetch( framebufDepthWorld_Sampler, chpix, 0 ).r );
+                    dynamic    = dynamic || ( instCustomIndex & INSTANCE_CUSTOM_INDEX_FLAG_DYNAMIC ) != 0;
+                    pathLength = max( pathLength, texelFetch( framebufDepthWorld_Sampler, chpix, 0 ).r );
+                }
+                onScreen = true;
             }
 
             const float marginCellDist = length(
