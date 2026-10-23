@@ -1,4 +1,4 @@
-// Copyright (c) 2021 Sultim Tsyrendashiev
+// Copyright (c) 2022 Sultim Tsyrendashiev
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,45 +19,37 @@
 // SOFTWARE.
 
 #version 460
-#extension GL_EXT_ray_tracing : require
 
-// don't need "processAlbedo" function
+// don't need albedo for direct illumination
 #define MATERIAL_MAX_ALBEDO_LAYERS 0
 #define MATERIAL_LIGHTMAP_LAYER_INDEX -1
 
-// use getTriangleTexInfo instead of getTriangle
-#define ONLY_LAYER0_TEXCOLOR
-
+#define DESC_SET_TLAS 0
+#define DESC_SET_FRAMEBUFFERS 1
 #define DESC_SET_GLOBAL_UNIFORM 2
 #define DESC_SET_VERTEX_DATA 3
 #define DESC_SET_TEXTURES 4
-#include "ShaderCommonGLSLFunc.h"
-
-hitAttributeEXT vec2 inBaryCoords;
-
-
-#define ALPHA_THRESHOLD 0.5
-
+#define DESC_SET_RANDOM 5
+// Doom64-RT: the volumetric set (cloud map), for cloudSunAttenuation in Light.h.
+#define DESC_SET_VOLUMETRIC 11
+#define DESC_SET_LIGHT_SOURCES 6
+#define LIGHT_SAMPLE_METHOD (LIGHT_SAMPLE_METHOD_INITIAL)
+#include "RaygenCommon.h"
 
 void main()
 {
-	const ShTriangleTexInfo tr = getTriangleTexInfo(gl_InstanceID, gl_InstanceCustomIndexEXT, gl_GeometryIndexEXT, gl_PrimitiveID);
+    RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
 
-	const vec3 baryCoords = vec3(1.0f - inBaryCoords.x - inBaryCoords.y, inBaryCoords.x, inBaryCoords.y);
-    const vec2 texCoord = tr.layerTexCoord_0 * baryCoords;
+    const ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
+    const uint seed = getRandomSeed(pix, globalUniform.frameId);
+    const Surface surf = fetchGbufferSurface(pix);
 
-    // check only first material's albedo
-    const vec4 color =
-        getTextureSample( tr.layerColorTextures_0, texCoord ) *
-        unpackUintColor( tr.layerColors_0 );
+    if (surf.isSky)
+    {
+        imageStoreReservoirInitial(emptyReservoir(), pix);
+        return;
+    }
 
-    // if must be discarded
-	if ((color.r + color.g + color.b) / 3 * color.a + color.a < ALPHA_THRESHOLD)
-	{
-		// then ignore this intersection, so it won't be the closest hit
-		ignoreIntersectionEXT;
-	}
-
-	// otherwise, do nothing, as this intersection 
-	// can or can't be the closest hit
+    Reservoir normalizedInitial = calcInitialReservoir(seed, RANDOM_SALT_INITIAL_RESERVOIRS_BASE, surf, getLightPointRnd(seed));
+    imageStoreReservoirInitial(normalizedInitial, pix);
 }

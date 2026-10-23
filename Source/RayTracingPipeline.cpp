@@ -23,6 +23,7 @@
 #include "Generated/ShaderCommonC.h"
 #include "Utils.h"
 
+#include <cstddef>
 #include <cstring>
 
 namespace RTGL1
@@ -69,20 +70,8 @@ RTGL1::RayTracingPipeline::RayTracingPipeline( VkDevice                         
                                                const PortalList&                  _portalList,
                                                const Volumetric&                  _volumetric,
                                                const RgInstanceCreateInfo&        _rgInfo )
-    : device( _device )
-    , physDevice( std::move( _physDevice ) )
-    , rtPipelineLayout( VK_NULL_HANDLE )
-    , rtPipeline( VK_NULL_HANDLE )
-    , copySBTFromStaging( false )
-    , groupBaseAlignment( 0 )
-    , handleSize( 0 )
-    , alignedHandleSize( 0 )
-    , raygenShaderCount( 0 )
-    , hitGroupCount( 0 )
-    , missShaderCount( 0 )
+    : device( _device ), physDevice( std::move( _physDevice ) )
 {
-    shaderBindingTable = std::make_shared< AutoBuffer >( std::move( _allocator ) );
-
     // all set layouts to be used
     VkDescriptorSetLayout setLayouts[] = {
         // ray tracing acceleration structures
@@ -124,86 +113,28 @@ RTGL1::RayTracingPipeline::RayTracingPipeline( VkDevice                         
             : 0xFF;
 
     // clang-format off
-    // shader modules in the pipeline will have the exact order
-    shaderStageInfos = {
-        ShaderStageInfo{ "RGenPrimary",         SpecConst{ _rgInfo.primaryRaysMaxAlbedoLayers, lightmapLayerIndex } },
-        ShaderStageInfo{ "RGenReflRefr",        SpecConst{ _rgInfo.primaryRaysMaxAlbedoLayers, lightmapLayerIndex } },
-        ShaderStageInfo{ "RGenDirect",          {} },
-        ShaderStageInfo{ "RGenIndirectInit",    SpecConst{ _rgInfo.indirectIlluminationMaxAlbedoLayers, lightmapLayerIndex } },
-    //  ShaderStageInfo{ "RGenIndirectFinal",   SpecConst{ _rgInfo.indirectIlluminationMaxAlbedoLayers, lightmapLayerIndex } },
-        ShaderStageInfo{ "RGenGradients",       {} },
-        ShaderStageInfo{ "RInitialReservoirs",  {} },
-        ShaderStageInfo{ "RVolumetric",         {} },
-        ShaderStageInfo{ "RMiss",               {} },
-        ShaderStageInfo{ "RMissShadow",         {} },
-        ShaderStageInfo{ "RClsOpaque",          {} },
-        ShaderStageInfo{ "RAlphaTest",          {} },
-    };
+    // indexed by the former shader binding table indices
+    passes[ SBT_INDEX_RAYGEN_PRIMARY ]            = { "RGenPrimary",        SpecConst{ _rgInfo.primaryRaysMaxAlbedoLayers, lightmapLayerIndex } };
+    passes[ SBT_INDEX_RAYGEN_REFL_REFR ]          = { "RGenReflRefr",       SpecConst{ _rgInfo.primaryRaysMaxAlbedoLayers, lightmapLayerIndex } };
+    passes[ SBT_INDEX_RAYGEN_DIRECT ]             = { "RGenDirect",         {} };
+    passes[ SBT_INDEX_RAYGEN_INDIRECT_INIT ]      = { "RGenIndirectInit",   SpecConst{ _rgInfo.indirectIlluminationMaxAlbedoLayers, lightmapLayerIndex } };
+    passes[ SBT_INDEX_RAYGEN_GRADIENTS ]          = { "RGenGradients",      {} };
+    passes[ SBT_INDEX_RAYGEN_INITIAL_RESERVOIRS ] = { "RInitialReservoirs", {} };
+    passes[ SBT_INDEX_RAYGEN_VOLUMETRIC ]         = { "RVolumetric",        {} };
     // clang-format on
 
-#pragma region Utilities
-    // simple lambda to get index in "stages" by name
-    auto toIndex = [ this ]( std::string_view shaderName ) {
-        for( uint32_t i = 0; i < shaderStageInfos.size(); i++ )
-        {
-            if( shaderStageInfos[ i ].name == shaderName )
-            {
-                return i;
-            }
-        }
-
-        assert( 0 );
-        return UINT32_MAX;
-    };
-#pragma endregion
-
-
-    // set shader binding table structure the same as defined with SBT_INDEX_*
-
-    AddRayGenGroup( toIndex( "RGenPrimary" ) );         assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_PRIMARY );
-    AddRayGenGroup( toIndex( "RGenReflRefr" ) );        assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_REFL_REFR );
-    AddRayGenGroup( toIndex( "RGenDirect" ) );          assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_DIRECT );
-    AddRayGenGroup( toIndex( "RGenIndirectInit" ) );    assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_INDIRECT_INIT );
-//  AddRayGenGroup( toIndex( "RGenIndirectFinal" ) );   assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_INDIRECT_FINAL );
-    AddRayGenGroup( toIndex( "RGenGradients" ) );       assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_GRADIENTS );
-    AddRayGenGroup( toIndex( "RInitialReservoirs" ) );  assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_INITIAL_RESERVOIRS );
-    AddRayGenGroup( toIndex( "RVolumetric" ) );         assert( raygenShaderCount - 1 == SBT_INDEX_RAYGEN_VOLUMETRIC );
-
-    AddMissGroup( toIndex( "RMiss" ) );                 assert( missShaderCount - 1 == SBT_INDEX_MISS_DEFAULT );
-    AddMissGroup( toIndex( "RMissShadow" ) );           assert( missShaderCount - 1 == SBT_INDEX_MISS_SHADOW );
-
-    // only opaque
-    AddHitGroup( toIndex( "RClsOpaque" ) );             assert( hitGroupCount - 1 == SBT_INDEX_HITGROUP_FULLY_OPAQUE );
-    // alpha tested and then opaque
-    AddHitGroup( toIndex( "RClsOpaque" ), toIndex( "RAlphaTest" ) ); assert( hitGroupCount - 1 == SBT_INDEX_HITGROUP_ALPHA_TESTED );
-    // Doom64-RT: the MEDIA half of the table, selected by the RAY adding
-    // SBT_RAY_OFFSET_MEDIA to its sbtRecordOffset while instances keep their
-    // 0/1 offsets. Same layout as the pair above; the alpha-tested group's
-    // any-hit additionally discards sprites, so volumetric shadow rays ignore
-    // billboards while alpha-tested walls still cut their shafts.
-    AddHitGroup( toIndex( "RClsOpaque" ) );             assert( hitGroupCount - 1 == SBT_INDEX_HITGROUP_MEDIA_FULLY_OPAQUE );
-    AddHitGroup( toIndex( "RClsOpaque" ), toIndex( "RAlphaTestMedia" ) ); assert( hitGroupCount - 1 == SBT_INDEX_HITGROUP_MEDIA_ALPHA_TESTED );
-
-    CreatePipeline( &_shaderManager );
-    CreateSBT();
+    CreatePipelines( &_shaderManager );
 }
 
 RTGL1::RayTracingPipeline::~RayTracingPipeline()
 {
-    DestroyPipeline();
+    DestroyPipelines();
     vkDestroyPipelineLayout( device, rtPipelineLayout, nullptr );
 }
 
-void RTGL1::RayTracingPipeline::CreatePipeline( const ShaderManager* shaderManager )
+void RTGL1::RayTracingPipeline::CreatePipelines( const ShaderManager* shaderManager )
 {
-    std::vector< VkPipelineShaderStageCreateInfo > stages;
-    for( const auto& s : shaderStageInfos )
-    {
-        stages.push_back( shaderManager->GetStageInfo( s.name ) );
-    }
-
-
-    constexpr VkSpecializationMapEntry specEntryCommonDef[ SpecConst::MemberCount ] = {
+    constexpr VkSpecializationMapEntry specEntries[ SpecConst::MemberCount ] = {
         {
             .constantID = 0,
             .offset     = offsetof( SpecConst, maxAlbedoLayers ),
@@ -216,75 +147,35 @@ void RTGL1::RayTracingPipeline::CreatePipeline( const ShaderManager* shaderManag
         },
     };
     static_assert( SpecConst::MemberCount == 2 );
-    static_assert( specEntryCommonDef[ 0 ].size + specEntryCommonDef[ 1 ].size ==
-                   sizeof( SpecConst ) );
 
-
-    std::vector< VkSpecializationInfo > specInfos;
-    for( const auto& s : shaderStageInfos )
+    for( uint32_t i = 0; i < PASS_COUNT; i++ )
     {
-        VkSpecializationInfo specInfo;
+        assert( passes[ i ].name );
 
-        if( s.specConst )
+        VkComputePipelineCreateInfo info = {
+            .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage  = shaderManager->GetStageInfo( passes[ i ].name ),
+            .layout = rtPipelineLayout,
+        };
+        assert( info.stage.stage == VK_SHADER_STAGE_COMPUTE_BIT );
+
+        VkSpecializationInfo specInfo = {};
+        if( passes[ i ].specConst )
         {
             specInfo = {
-                .mapEntryCount = std::size( specEntryCommonDef ),
-                .pMapEntries   = specEntryCommonDef,
-                .dataSize      = sizeof( s.specConst.value() ),
-                // need to be careful with addresses
-                .pData = &( s.specConst.value() ),
+                .mapEntryCount = std::size( specEntries ),
+                .pMapEntries   = specEntries,
+                .dataSize      = sizeof( SpecConst ),
+                .pData         = &( passes[ i ].specConst.value() ),
             };
-        }
-        else
-        {
-            specInfo = {};
+            info.stage.pSpecializationInfo = &specInfo;
         }
 
-        specInfos.push_back( specInfo );
-    }
-    assert( stages.size() == specInfos.size() );
-
-
-    for( uint32_t i = 0; i < shaderStageInfos.size(); i++ )
-    {
-        if( shaderStageInfos[ i ].specConst )
-        {
-            // need to be careful with addresses
-            stages[ i ].pSpecializationInfo = &specInfos[ i ];
-        }
+        VkResult r = vkCreateComputePipelines( device, VK_NULL_HANDLE, 1, &info, nullptr, &pipelines[ i ] );
+        VK_CHECKERROR( r );
+        SET_DEBUG_NAME( device, pipelines[ i ], VK_OBJECT_TYPE_PIPELINE, passes[ i ].name );
     }
 
-    VkPipelineLibraryCreateInfoKHR libInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
-    };
-
-    VkRayTracingPipelineCreateInfoKHR pipelineInfo = {
-        .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
-        .stageCount                   = static_cast< uint32_t >( stages.size() ),
-        .pStages                      = stages.data(),
-        .groupCount                   = static_cast< uint32_t >( shaderGroups.size() ),
-        .pGroups                      = shaderGroups.data(),
-        //
-        // !!! ASSUME NO RECURSION !!!
-        //
-        .maxPipelineRayRecursionDepth = 1,
-        //
-        //
-        .pLibraryInfo                 = &libInfo,
-        .layout                       = rtPipelineLayout,
-    };
-
-    VkResult r = svkCreateRayTracingPipelinesKHR(
-        device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &rtPipeline );
-
-    VK_CHECKERROR( r );
-    SET_DEBUG_NAME( device, rtPipeline, VK_OBJECT_TYPE_PIPELINE, "Ray tracing pipeline" );
-
-    CreateComputePipelines( shaderManager );
-}
-
-void RTGL1::RayTracingPipeline::CreateComputePipelines( const ShaderManager* shaderManager )
-{
     {
         VkComputePipelineCreateInfo info = {
             .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -302,114 +193,38 @@ void RTGL1::RayTracingPipeline::CreateComputePipelines( const ShaderManager* sha
     }
 }
 
-void RTGL1::RayTracingPipeline::DestroyPipeline()
+void RTGL1::RayTracingPipeline::DestroyPipelines()
 {
-    vkDestroyPipeline( device, rtPipeline, nullptr );
-    rtPipeline = VK_NULL_HANDLE;
+    for( VkPipeline& p : pipelines )
+    {
+        vkDestroyPipeline( device, p, nullptr );
+        p = VK_NULL_HANDLE;
+    }
     vkDestroyPipeline( device, compPipelineIndirectFinal, nullptr );
     compPipelineIndirectFinal = VK_NULL_HANDLE;
 }
 
-void RTGL1::RayTracingPipeline::CreateSBT()
+void RTGL1::RayTracingPipeline::BindPass( VkCommandBuffer cmd, uint32_t passIndex ) const
 {
-    uint32_t groupCount = uint32_t( shaderGroups.size() );
-    groupBaseAlignment  = physDevice->GetRTPipelineProperties().shaderGroupBaseAlignment;
-
-    handleSize        = physDevice->GetRTPipelineProperties().shaderGroupHandleSize;
-    alignedHandleSize = Utils::Align( handleSize, groupBaseAlignment );
-
-    uint32_t sbtSize = alignedHandleSize * groupCount;
-
-    shaderBindingTable->Create( sbtSize,
-                                VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
-                                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                "SBT",
-                                1 );
-
-    std::vector< uint8_t > shaderHandles( uint64_t( handleSize * groupCount ) );
-    VkResult               r = svkGetRayTracingShaderGroupHandlesKHR(
-        device, rtPipeline, 0, groupCount, shaderHandles.size(), shaderHandles.data() );
-    VK_CHECKERROR( r );
-
-    auto* mapped = shaderBindingTable->GetMappedAs< uint8_t* >( 0 );
-
-    for( uint32_t i = 0; i < groupCount; i++ )
-    {
-        memcpy( mapped + uint64_t( i * alignedHandleSize ),
-                shaderHandles.data() + uint64_t( i * handleSize ),
-                handleSize );
-    }
-
-    copySBTFromStaging = true;
+    assert( passIndex < PASS_COUNT );
+    vkCmdBindPipeline( cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[ passIndex ] );
 }
 
-void RTGL1::RayTracingPipeline::DestroySBT()
+auto RTGL1::RayTracingPipeline::GetPipeline( uint32_t passIndex ) const -> VkPipeline
 {
-    shaderBindingTable->Destroy();
+    assert( passIndex < PASS_COUNT );
+    return pipelines[ passIndex ];
 }
 
-auto RTGL1::RayTracingPipeline::GetShaderTableSafely_RayTracing( VkCommandBuffer cmd ) -> VkPipeline
+auto RTGL1::RayTracingPipeline::GetPassName( uint32_t passIndex ) const -> const char*
 {
-    if( copySBTFromStaging )
-    {
-        shaderBindingTable->CopyFromStaging( cmd, 0 );
-        copySBTFromStaging = false;
-    }
-
-    return rtPipeline;
+    assert( passIndex < PASS_COUNT );
+    return passes[ passIndex ].name;
 }
 
 auto RTGL1::RayTracingPipeline::GetPipelineIndirectFinal_Compute() -> VkPipeline
 {
     return compPipelineIndirectFinal;
-}
-
-void RTGL1::RayTracingPipeline::GetEntries( uint32_t                         sbtRayGenIndex,
-                                            VkStridedDeviceAddressRegionKHR& raygenEntry,
-                                            VkStridedDeviceAddressRegionKHR& missEntry,
-                                            VkStridedDeviceAddressRegionKHR& hitEntry,
-                                            VkStridedDeviceAddressRegionKHR& callableEntry ) const
-{
-    assert( sbtRayGenIndex == SBT_INDEX_RAYGEN_PRIMARY ||
-            sbtRayGenIndex == SBT_INDEX_RAYGEN_REFL_REFR ||
-            sbtRayGenIndex == SBT_INDEX_RAYGEN_DIRECT ||
-            sbtRayGenIndex == SBT_INDEX_RAYGEN_INDIRECT_INIT ||
-         // sbtRayGenIndex == SBT_INDEX_RAYGEN_INDIRECT_FINAL ||
-            sbtRayGenIndex == SBT_INDEX_RAYGEN_GRADIENTS ||
-            sbtRayGenIndex == SBT_INDEX_RAYGEN_INITIAL_RESERVOIRS ||
-            sbtRayGenIndex == SBT_INDEX_RAYGEN_VOLUMETRIC );
-
-    VkDeviceAddress bufferAddress = shaderBindingTable->GetDeviceAddress();
-
-    uint64_t        offset = 0;
-
-
-    raygenEntry = {
-        .deviceAddress = bufferAddress + offset + uint64_t( sbtRayGenIndex ) * alignedHandleSize,
-        .stride        = alignedHandleSize,
-        .size          = alignedHandleSize,
-    };
-    assert( raygenEntry.size == raygenEntry.stride );
-    offset += uint64_t( raygenShaderCount ) * alignedHandleSize;
-
-
-    missEntry = {
-        .deviceAddress = bufferAddress + offset,
-        .stride        = alignedHandleSize,
-        .size          = uint64_t( missShaderCount ) * alignedHandleSize,
-    };
-    offset += uint64_t( missShaderCount ) * alignedHandleSize;
-
-
-    hitEntry = {
-        .deviceAddress = bufferAddress + offset,
-        .stride        = alignedHandleSize,
-        .size          = uint64_t( hitGroupCount ) * alignedHandleSize,
-    };
-    offset += uint64_t( hitGroupCount ) * alignedHandleSize;
-
-
-    callableEntry = {};
 }
 
 VkPipelineLayout RTGL1::RayTracingPipeline::GetLayout() const
@@ -419,66 +234,6 @@ VkPipelineLayout RTGL1::RayTracingPipeline::GetLayout() const
 
 void RTGL1::RayTracingPipeline::OnShaderReload( const ShaderManager* shaderManager )
 {
-    DestroySBT();
-    DestroyPipeline();
-
-    CreatePipeline( shaderManager );
-    CreateSBT();
-}
-
-void RTGL1::RayTracingPipeline::AddGeneralGroup( uint32_t generalIndex )
-{
-    shaderGroups.push_back( VkRayTracingShaderGroupCreateInfoKHR{
-        .sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-        .type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
-        .generalShader      = generalIndex,
-        .closestHitShader   = VK_SHADER_UNUSED_KHR,
-        .anyHitShader       = VK_SHADER_UNUSED_KHR,
-        .intersectionShader = VK_SHADER_UNUSED_KHR,
-    } );
-}
-
-void RTGL1::RayTracingPipeline::AddRayGenGroup( uint32_t raygenIndex )
-{
-    AddGeneralGroup( raygenIndex );
-
-    raygenShaderCount++;
-}
-
-void RTGL1::RayTracingPipeline::AddMissGroup( uint32_t missIndex )
-{
-    AddGeneralGroup( missIndex );
-
-    missShaderCount++;
-}
-
-void RTGL1::RayTracingPipeline::AddHitGroup( uint32_t closestHitIndex )
-{
-    AddHitGroup( closestHitIndex, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR );
-}
-
-void RTGL1::RayTracingPipeline::AddHitGroupOnlyAny( uint32_t anyHitIndex )
-{
-    AddHitGroup( VK_SHADER_UNUSED_KHR, anyHitIndex, VK_SHADER_UNUSED_KHR );
-}
-
-void RTGL1::RayTracingPipeline::AddHitGroup( uint32_t closestHitIndex, uint32_t anyHitIndex )
-{
-    AddHitGroup( closestHitIndex, anyHitIndex, VK_SHADER_UNUSED_KHR );
-}
-
-void RTGL1::RayTracingPipeline::AddHitGroup( uint32_t closestHitIndex,
-                                             uint32_t anyHitIndex,
-                                             uint32_t intersectionIndex )
-{
-    shaderGroups.push_back( VkRayTracingShaderGroupCreateInfoKHR{
-        .sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-        .type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR,
-        .generalShader      = VK_SHADER_UNUSED_KHR,
-        .closestHitShader   = closestHitIndex,
-        .anyHitShader       = anyHitIndex,
-        .intersectionShader = intersectionIndex,
-    } );
-
-    hitGroupCount++;
+    DestroyPipelines();
+    CreatePipelines( shaderManager );
 }

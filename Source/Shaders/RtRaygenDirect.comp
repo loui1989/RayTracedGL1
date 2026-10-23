@@ -39,6 +39,8 @@
 
 void main()
 {
+    RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
+
     const ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
     const uint seed = getRandomSeed(pix, globalUniform.frameId);
 

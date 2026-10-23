@@ -434,16 +434,12 @@ int probeWaterBelow( const vec3  position,
     // water, it is INCAPABLE of intersecting it: no reach, slant or winding
     // change could ever have made it return a hit. RTGL's own refl/refr path
     // says as much: getReflectionRefractionCullMask ORs in INSTANCE_MASK_REFRACT.
-    traceRayEXT( topLevelAS,
-                 gl_RayFlagsNoneEXT,
-                 globalUniform.rayCullMaskWorld | INSTANCE_MASK_REFRACT,
-                 0, 0, // sbtRecordOffset, sbtRecordStride
-                 SBT_INDEX_MISS_DEFAULT,
-                 origin,
-                 0.001,
-                 dir,
-                 globalUniform.waterCausticDist,
-                 PAYLOAD_INDEX_DEFAULT );
+    g_payload = traceRayQuery( gl_RayFlagsNoneEXT,
+                               globalUniform.rayCullMaskWorld | INSTANCE_MASK_REFRACT,
+                               origin,
+                               0.001,
+                               dir,
+                               globalUniform.waterCausticDist );
 
     waterPos  = position;
     waterDist = 0.0;
@@ -667,6 +663,8 @@ bool tryAsFluid( const ivec2 pix, const ivec2 pix_regular, const vec3 cameraRayD
 
 void main() 
 {
+    RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
+
     const ivec2 regularPix = ivec2(gl_LaunchIDEXT.xy);
     const ivec2 pix = getCheckerboardPix(regularPix);
     const vec2 inUV = getPixelUVWithJitter(regularPix);
@@ -876,6 +874,8 @@ void main()
 #ifdef RAYGEN_REFL_REFR_SHADER
 void main() 
 {
+    RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
+
     if (globalUniform.reflectRefractMaxDepth == 0)
     {
         return;

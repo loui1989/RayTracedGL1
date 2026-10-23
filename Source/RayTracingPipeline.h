@@ -21,6 +21,9 @@
 #pragma once
 
 #include "BlueNoise.h"
+#include "Generated/ShaderCommonC.h"
+
+#include <optional>
 #include "GlobalUniform.h"
 #include "ShaderManager.h"
 #include "Framebuffers.h"
@@ -34,6 +37,10 @@
 namespace RTGL1
 {
 
+// The path tracer's passes. Rays are cast with ray queries (GL_EXT_ray_query) from ordinary
+// compute shaders, the model Metal uses natively, instead of a Vulkan ray tracing pipeline
+// with a shader binding table. One compute pipeline per pass, all with one pipeline layout.
+// Pass indices are the former SBT_INDEX_RAYGEN_* values.
 class RayTracingPipeline : public IShaderDependency
 {
 public:
@@ -60,33 +67,23 @@ public:
     RayTracingPipeline& operator=( const RayTracingPipeline& other ) = delete;
     RayTracingPipeline& operator=( RayTracingPipeline&& other ) noexcept = delete;
 
-    auto GetShaderTableSafely_RayTracing( VkCommandBuffer cmd ) -> VkPipeline;
+    // pass index is one of SBT_INDEX_RAYGEN_*
+    void BindPass( VkCommandBuffer cmd, uint32_t passIndex ) const;
+    auto GetPipeline( uint32_t passIndex ) const -> VkPipeline;
+    auto GetPassName( uint32_t passIndex ) const -> const char*;
     auto GetPipelineIndirectFinal_Compute() -> VkPipeline;
+    VkPipelineLayout GetLayout() const;
 
-    void                GetEntries( uint32_t                         sbtRayGenIndex,
-                                    VkStridedDeviceAddressRegionKHR& raygenEntry,
-                                    VkStridedDeviceAddressRegionKHR& missEntry,
-                                    VkStridedDeviceAddressRegionKHR& hitEntry,
-                                    VkStridedDeviceAddressRegionKHR& callableEntry ) const;
-    VkPipelineLayout    GetLayout() const;
+    // compute workgroup size of the passes (must match RaygenCommon.h)
+    static constexpr uint32_t GROUP_SIZE_X = 8;
+    static constexpr uint32_t GROUP_SIZE_Y = 8;
+    static constexpr uint32_t PASS_COUNT   = SBT_INDEX_RAYGEN_VOLUMETRIC + 1;
 
-    void                OnShaderReload( const ShaderManager* shaderManager ) override;
+    void OnShaderReload( const ShaderManager* shaderManager ) override;
 
 private:
-    void CreatePipeline( const ShaderManager* shaderManager );
-    void CreateComputePipelines( const ShaderManager* shaderManager );
-    void DestroyPipeline();
-    void CreateSBT();
-    void DestroySBT();
-
-    void AddGeneralGroup( uint32_t generalIndex );
-
-    void AddRayGenGroup( uint32_t raygenIndex );
-    void AddMissGroup( uint32_t missIndex );
-    void AddHitGroup( uint32_t closestHitIndex );
-    void AddHitGroupOnlyAny( uint32_t anyHitIndex );
-    void AddHitGroup( uint32_t closestHitIndex, uint32_t anyHitIndex );
-    void AddHitGroup( uint32_t closestHitIndex, uint32_t anyHitIndex, uint32_t intersectionIndex );
+    void CreatePipelines( const ShaderManager* shaderManager );
+    void DestroyPipelines();
 
 private:
     struct SpecConst
@@ -97,35 +94,20 @@ private:
         constexpr static int MemberCount = 2;
     };
 
-    struct ShaderStageInfo
+    struct PassInfo
     {
-        std::string_view           name{};
-        // One uint specialization const to use in the shader.
-        // Must exist throughout class lifetime, as CreatePipeline can be called any time.
+        const char*                name{};
         std::optional< SpecConst > specConst{};
     };
 
 private:
-    VkDevice                                            device;
-    std::shared_ptr< PhysicalDevice >                   physDevice;
+    VkDevice                          device;
+    std::shared_ptr< PhysicalDevice > physDevice;
 
-    std::vector< ShaderStageInfo >                      shaderStageInfos;
-
-    std::vector< VkRayTracingShaderGroupCreateInfoKHR > shaderGroups;
-    VkPipelineLayout                                    rtPipelineLayout;
-    VkPipeline                                          rtPipeline;
-    VkPipeline                                          compPipelineIndirectFinal{};
-
-    std::shared_ptr< AutoBuffer >                       shaderBindingTable;
-    bool                                                copySBTFromStaging;
-
-    uint32_t                                            groupBaseAlignment;
-    uint32_t                                            handleSize;
-    uint32_t                                            alignedHandleSize;
-
-    uint32_t                                            raygenShaderCount;
-    uint32_t                                            hitGroupCount;
-    uint32_t                                            missShaderCount;
+    PassInfo         passes[ PASS_COUNT ]{};
+    VkPipeline       pipelines[ PASS_COUNT ]{};
+    VkPipelineLayout rtPipelineLayout{ VK_NULL_HANDLE };
+    VkPipeline       compPipelineIndirectFinal{ VK_NULL_HANDLE };
 };
 
 }

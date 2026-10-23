@@ -45,6 +45,10 @@
 
 void main()
 {
+    RAYGEN_RETURN_IF_OUTSIDE( ( uint( globalUniform.renderWidth ) + COMPUTE_ASVGF_STRATA_SIZE - 1 ) / COMPUTE_ASVGF_STRATA_SIZE,
+                              ( uint( globalUniform.renderHeight ) + COMPUTE_ASVGF_STRATA_SIZE - 1 ) / COMPUTE_ASVGF_STRATA_SIZE,
+                              1 );
+
     const ivec2 gradPix = ivec2(gl_LaunchIDEXT.xy);
     const ivec2 screenSize = ivec2(globalUniform.renderWidth, globalUniform.renderHeight);
 

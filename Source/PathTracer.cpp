@@ -21,6 +21,7 @@
 #include "PathTracer.h"
 #include "Generated/ShaderCommonC.h"
 #include "CmdLabel.h"
+#include "Utils.h"
 
 using namespace RTGL1;
 
@@ -97,11 +98,8 @@ PathTracer::TraceParams PathTracer::BindRayTracing( VkCommandBuffer             
                                                     const PortalList&                portalList,
                                                     const Volumetric&                volumetric )
 {
-    vkCmdBindPipeline( cmd,
-                       VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-                       rtPipeline->GetShaderTableSafely_RayTracing( cmd ) );
-
-    BindDescSet( VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+    // the passes are compute pipelines (ray queries); each binds its pipeline in TraceRays
+    BindDescSet( VK_PIPELINE_BIND_POINT_COMPUTE,
                  cmd,
                  frameIndex,
                  scene,
@@ -130,11 +128,12 @@ PathTracer::TraceParams PathTracer::BindRayTracing( VkCommandBuffer             
 void PathTracer::TraceRays(
     VkCommandBuffer cmd, uint32_t sbtRayGenIndex, uint32_t width, uint32_t height, uint32_t depth )
 {
-    VkStridedDeviceAddressRegionKHR raygenEntry, missEntry, hitEntry, callableEntry;
-    rtPipeline->GetEntries( sbtRayGenIndex, raygenEntry, missEntry, hitEntry, callableEntry );
-
-    svkCmdTraceRaysKHR(
-        cmd, &raygenEntry, &missEntry, &hitEntry, &callableEntry, width, height, depth );
+    // a compute dispatch over the former launch size; the shaders return outside of it
+    rtPipeline->BindPass( cmd, sbtRayGenIndex );
+    vkCmdDispatch( cmd,
+                   Utils::GetWorkGroupCount( width, RayTracingPipeline::GROUP_SIZE_X ),
+                   Utils::GetWorkGroupCount( height, RayTracingPipeline::GROUP_SIZE_Y ),
+                   depth );
 }
 
 void PathTracer::TracePrimaryRays( const TraceParams& params )

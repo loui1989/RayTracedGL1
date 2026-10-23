@@ -48,21 +48,15 @@ struct ShaderModuleDefinition
 // Note: set shader stage to VK_SHADER_STAGE_ALL, to identify stage by the file extension
 static ShaderModuleDefinition G_SHADERS[] =
 {
-    { "RGenPrimary",                "RtRaygenPrimary.rgen.spv"              },
-    { "RGenReflRefr",               "RtRaygenReflRefr.rgen.spv"             },
-    { "RGenDirect",                 "RtRaygenDirect.rgen.spv"               },
-    { "RGenIndirectInit",           "RtRaygenIndirectInit.rgen.spv"         },
+    // the path tracer's passes: compute shaders casting rays with ray queries
+    { "RGenPrimary",                "RtRaygenPrimary.comp.spv"              },
+    { "RGenReflRefr",               "RtRaygenReflRefr.comp.spv"             },
+    { "RGenDirect",                 "RtRaygenDirect.comp.spv"               },
+    { "RGenIndirectInit",           "RtRaygenIndirectInit.comp.spv"         },
     { "CmIndirectFinal",            "RtRaygenIndirectFinal.comp.spv"        },
-    { "RGenGradients",              "RtGradients.rgen.spv"                  },
-    { "RInitialReservoirs",         "RtInitialReservoirs.rgen.spv"          },
-    { "RVolumetric",                "RtVolumetric.rgen.spv"                 },
-    { "RMiss",                      "RtMiss.rmiss.spv"                      },
-    { "RMissShadow",                "RtMissShadowCheck.rmiss.spv"           },
-    { "RClsOpaque",                 "RtClsOpaque.rchit.spv"                 },
-    { "RAlphaTest",                 "RtAlphaTest.rahit.spv"                 },
-    // Doom64-RT: any-hit for MEDIA shadow rays -- alpha test plus "sprites do
-    // not occlude the medium". See RtAlphaTestMedia.rahit.
-    { "RAlphaTestMedia",            "RtAlphaTestMedia.rahit.spv"            },
+    { "RGenGradients",              "RtGradients.comp.spv"                  },
+    { "RInitialReservoirs",         "RtInitialReservoirs.comp.spv"          },
+    { "RVolumetric",                "RtVolumetric.comp.spv"                 },
 #if LIGHT_GRID_ENABLED
     { "CLightGridBuild",            "CmLightGridBuild.comp.spv"             },
 #endif

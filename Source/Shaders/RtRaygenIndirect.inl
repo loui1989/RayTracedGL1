@@ -316,6 +316,8 @@ bool testSurfaceForReuseIndirect(
 #ifdef RT_RAYGEN_INDIRECT_INIT
 void main()
 {
+    RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
+
     const ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
     const uint seed = getRandomSeed(pix, globalUniform.frameId);
     uint salt = RANDOM_SALT_RESAMPLE_INDIRECT_BASE;
