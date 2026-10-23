@@ -306,6 +306,7 @@ struct ShGlobalUniform
     mat4 skyCubemapRotationTransform;
     vec4 smokeSpheres[32];
     vec4 smokeParams[32];
+    vec4 smokeExtra[32];
     vec4 rippleSources[32];
     vec4 rippleParams[32];
 };

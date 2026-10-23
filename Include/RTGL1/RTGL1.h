@@ -961,6 +961,9 @@ typedef struct RgSmokeVolume
     float       seed;
     // Fiery glow (emission) of a fresh explosion, 0 - none.
     float       glow;
+    // How much light the smoke scatters rather than absorbs: 0.1 - dark soot, 0.6 - light
+    // gunpowder smoke. 0 - RgDrawFrameVolumetricParams::smokeAlbedo.
+    float       albedo;
 } RgSmokeVolume;
 
 #define RG_MAX_SMOKE_VOLUMES 32

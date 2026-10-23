@@ -637,6 +637,8 @@ GLOBAL_UNIFORM_STRUCT = [
     (TYPE_FLOAT32,      4,      "smokeSpheres",                 CONST["MAX_SMOKE_VOLUMES"]),
     # x - peak extinction, y - age in seconds, z - random seed, w - glow
     (TYPE_FLOAT32,      4,      "smokeParams",                  CONST["MAX_SMOKE_VOLUMES"]),
+    # x - albedo, yzw - unused
+    (TYPE_FLOAT32,      4,      "smokeExtra",                   CONST["MAX_SMOKE_VOLUMES"]),
     # xyz - center (on the surface), w - age in seconds
     (TYPE_FLOAT32,      4,      "rippleSources",                CONST["MAX_WATER_RIPPLES"]),
     # x - max slope, y - wavelength, z - speed, w - decay time

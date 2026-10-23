@@ -311,6 +311,7 @@ struct ShGlobalUniform
     float skyCubemapRotationTransform[16];
     float smokeSpheres[128];
     float smokeParams[128];
+    float smokeExtra[128];
     float rippleSources[128];
     float rippleParams[128];
 };

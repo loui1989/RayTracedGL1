@@ -645,6 +645,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const RgDrawFrameInfo &drawI
                     gu->smokeParams[ k * 4 + 1 ]  = sm.age;
                     gu->smokeParams[ k * 4 + 2 ]  = sm.seed;
                     gu->smokeParams[ k * 4 + 3 ]  = std::max( sm.glow, 0.0f );
+                    gu->smokeExtra[ k * 4 + 0 ]   = std::clamp( sm.albedo > 0 ? sm.albedo : gu->smokeAlbedo, 0.0f, 1.0f );
+                    gu->smokeExtra[ k * 4 + 1 ]   = 0;
+                    gu->smokeExtra[ k * 4 + 2 ]   = 0;
+                    gu->smokeExtra[ k * 4 + 3 ]   = 0;
                 }
             }
         }

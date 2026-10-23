@@ -76,11 +76,12 @@ float smoke_fbm( vec3 p )
            0.125 * smoke_noise( p * 4.01 + 31.7 );
 }
 
-// x - extinction, y - glow, at a world position
-vec2 smokeAt( const vec3 pos )
+// x - extinction, y - glow, z - scattering (extinction times each cloud's albedo), at a world position
+vec3 smokeAt( const vec3 pos )
 {
     float ext  = 0.0;
     float glow = 0.0;
+    float scat = 0.0;
 
     for( uint i = 0; i < min( globalUniform.smokeCount, MAX_SMOKE_VOLUMES ); i++ )
     {
@@ -108,9 +109,10 @@ vec2 smokeAt( const vec3 pos )
 
         ext += prm.x * dens;
         glow += prm.w * dens;
+        scat += prm.x * dens * clamp( globalUniform.smokeExtra[ i ].x, 0.0, 1.0 );
     }
 
-    return vec2( ext, glow );
+    return vec3( ext, glow, scat );
 }
 
 void main()
@@ -262,13 +264,42 @@ void main()
     vec3 emission = vec3( 0.0 );
     if( globalUniform.smokeCount > 0 )
     {
-        const vec2  sm     = smokeAt( center );
-        const float albedo = clamp( globalUniform.smokeAlbedo, 0.0, 1.0 );
+        const vec3 sm = smokeAt( center );
 
-        scattering += sm.x * albedo;
-        absorbtion += sm.x * ( 1.0 - albedo );
+        scattering += sm.z;
+        absorbtion += max( sm.x - sm.z, 0.0 );
         // a fresh explosion's fireball lights its smoke from inside
         emission = vec3( 1.0, 0.45, 0.15 ) * sm.y;
+
+        // the fog is lit only by the sky / sun, but smoke is also lit by the lights around it
+        // (lamps, torches, the muzzle flash): otherwise it's black indoors. One light sample
+        // from each side, as if the cell were a surface facing the viewer and one facing away
+        if( sm.z > 0.0 )
+        {
+            vec3 local = vec3( 0.0 );
+            for( int side = 0; side < 2; side++ )
+            {
+                const vec3 n = side == 0 ? toviewer : -toviewer;
+
+                Surface s;
+                s.position        = center;
+                s.instCustomIndex = 0;
+                s.normalGeom      = n;
+                s.roughness       = 1.0;
+                s.normal          = n;
+                s.albedo          = vec3( 1.0 );
+                s.isSky           = false;
+                s.specularColor   = vec3( 0.0 );
+                s.emission        = 0.0;
+                s.toViewerDir     = toviewer;
+
+                const uint seed = getRandomSeed( ivec2( cell.x + cell.z, cell.y + 19 * cell.z + 7 * side ),
+                                                 globalUniform.frameId );
+                vec3 tolight = vec3( 0, 0, 1 );
+                local += processDirectIllumination( seed, s, 0, tolight );
+            }
+            emission += local * sm.z;
+        }
     }
 
 
