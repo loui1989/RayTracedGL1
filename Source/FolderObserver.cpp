@@ -20,6 +20,9 @@
 
 #include "FolderObserver.h"
 
+#include <chrono>
+#include <thread>
+
 #include <future>
 #include <optional>
 

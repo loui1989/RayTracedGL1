@@ -29,7 +29,10 @@
 #include <glaze/api/std/span.hpp>
 #include <glaze/file/file_ops.hpp>
 
+#include <cstdlib>
 #include <filesystem>
+#include <string>
+#include <type_traits>
 #include <fstream>
 #include <optional>
 
@@ -511,6 +514,26 @@ static constexpr auto convert_sv_to( std::string_view sv ) -> std::optional< T >
     }
 
     T value{};
+
+    if constexpr( std::is_floating_point_v< T > )
+    {
+        // std::from_chars for floating point needs macOS 26 in Apple's libc++
+        const auto str = std::string{ sv };
+        char*      end = nullptr;
+        if constexpr( std::is_same_v< T, float > )
+        {
+            value = std::strtof( str.c_str(), &end );
+        }
+        else
+        {
+            value = static_cast< T >( std::strtod( str.c_str(), &end ) );
+        }
+        if( str.empty() || end != str.c_str() + str.size() )
+        {
+            return std::nullopt;
+        }
+        return value;
+    }
 
     std::from_chars_result r = std::from_chars( sv.data(), sv.data() + sv.size(), value );
     if( r.ec != std::errc{} )

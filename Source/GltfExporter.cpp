@@ -46,8 +46,8 @@
 
 namespace
 {
-template< class T >
-void HashCombine( std::size_t& seed, const T& v )
+template< class S, class T >
+void HashCombine( S& seed, const T& v )
 {
     seed ^= std::hash< T >{}( v ) + 0x9e3779b9 + ( seed << 6 ) + ( seed >> 2 );
 }
