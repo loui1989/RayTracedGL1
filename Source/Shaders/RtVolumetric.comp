@@ -317,17 +317,24 @@ void main()
         emission = vec3( 1.0, 0.45, 0.15 ) * sm.y;
 
         // the fog is lit only by the sky / sun, but smoke is also lit by the lights around it
-        // (lamps, torches, the muzzle flash): otherwise it's black indoors. One light sample
-        // from each side, as if the cell were a surface facing the viewer and one facing away
+        // (lamps, torches, the muzzle flash): otherwise it's black indoors. Light samples from
+        // both sides, as if the cell were a surface facing the viewer and one facing away. The
+        // random numbers are the same for every cell, so neighbouring cells pick the same lights
+        // and points on them: the noise is in time (smoothed by the volume history), not blocky
+        // in space. Each sample's brightness is limited: a light inside the cloud (an explosion's
+        // flash) would otherwise blow it out to white.
         if( sm.z > 0.0 )
         {
+            #define SMOKE_LIGHT_SAMPLES_PER_SIDE 2
+            #define SMOKE_LIGHT_MAX              16.0
+
             vec3 local = vec3( 0.0 );
             for( int side = 0; side < 2; side++ )
             {
                 const vec3 n = side == 0 ? toviewer : -toviewer;
 
                 Surface s;
-                s.position        = center;
+                s.position        = cellCenter;
                 s.instCustomIndex = 0;
                 s.normalGeom      = n;
                 s.roughness       = 1.0;
@@ -338,12 +345,20 @@ void main()
                 s.emission        = 0.0;
                 s.toViewerDir     = toviewer;
 
-                const uint seed = getRandomSeed( ivec2( cell.x + cell.z, cell.y + 19 * cell.z + 7 * side ),
-                                                 globalUniform.frameId );
-                vec3 tolight = vec3( 0, 0, 1 );
-                local += processDirectIllumination( seed, s, 0, tolight );
+                for( int k = 0; k < SMOKE_LIGHT_SAMPLES_PER_SIDE; k++ )
+                {
+                    const uint seed =
+                        getRandomSeed( ivec2( 3 + side * SMOKE_LIGHT_SAMPLES_PER_SIDE + k, 11 ), globalUniform.frameId );
+                    vec3 tolight = vec3( 0, 0, 1 );
+                    vec3 l       = processDirectIllumination( seed, s, 0, tolight );
+
+                    const float lum = getLuminance( l );
+                    l *= SMOKE_LIGHT_MAX / max( SMOKE_LIGHT_MAX, lum );
+
+                    local += l;
+                }
             }
-            emission += local * sm.z;
+            emission += local * ( sm.z / float( SMOKE_LIGHT_SAMPLES_PER_SIDE ) );
         }
     }
 
