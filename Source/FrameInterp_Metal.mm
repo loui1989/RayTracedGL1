@@ -37,6 +37,8 @@
 #include <cmath>
 #include <cstdio>
 
+// Common.h: the Vulkan calls go to the Metal implementation (MetalShims.h)
+#include "Common.h"
 #include "MetalBridge.h"
 #include "MetalNative.h"
 
