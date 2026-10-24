@@ -159,6 +159,28 @@ RTGL1::MetalComputePipelines::Upload RTGL1::MetalComputePipelines::AllocUpload( 
     return Upload{ b, 0, static_cast< uint8_t* >( b.contents ) };
 }
 
+id< MTLLibrary > RTGL1::MetalComputePipelines::CompileLibrarySource( id< MTLDevice >              device,
+                                                                     const std::filesystem::path& path,
+                                                                     NSError* __strong&          error )
+{
+    std::ifstream f( path, std::ios::binary );
+    if( !f )
+    {
+        return nil;
+    }
+    const std::string src{ std::istreambuf_iterator< char >( f ), {} };
+
+    MTLCompileOptions* options = [MTLCompileOptions new];
+    options.languageVersion    = MTLLanguageVersion3_1;
+
+    id< MTLLibrary > lib = [device newLibraryWithSource:@( src.c_str() ) options:options error:&error];
+    if( lib )
+    {
+        debug::Verbose( "Metal backend: compiled {}", path.filename().string() );
+    }
+    return lib;
+}
+
 id< MTLFunction > RTGL1::MetalComputePipelines::GetFunction( const char* shaderName, const Constants& constants )
 {
     NSError* error = nil;
@@ -167,11 +189,20 @@ id< MTLFunction > RTGL1::MetalComputePipelines::GetFunction( const char* shaderN
     if( !lib )
     {
         const auto path = folder / ( std::string{ shaderName } + ".metallib" );
-        lib             = [device newLibraryWithURL:[NSURL fileURLWithPath:@( path.c_str() )] error:&error];
+        if( std::filesystem::exists( path ) )
+        {
+            lib = [device newLibraryWithURL:[NSURL fileURLWithPath:@( path.c_str() )] error:&error];
+        }
+        else
+        {
+            // built without Xcode's Metal toolchain (CompileShadersMetal.py --msl-only): compile the MSL now
+            lib = CompileLibrarySource( device, folder / ( std::string{ shaderName } + ".metal" ), error );
+        }
         if( !lib )
         {
             throw RgException( RG_RESULT_ERROR_CANT_FIND_SHADER,
-                               "Can't load " + path.string() + ": " + error.localizedDescription.UTF8String );
+                               "Can't load " + path.string() + ": " +
+                                   ( error ? error.localizedDescription.UTF8String : "no .metallib or .metal" ) );
         }
         libraries[ shaderName ] = lib;
     }

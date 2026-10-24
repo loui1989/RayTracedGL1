@@ -117,13 +117,21 @@ id< MTLLibrary > LoadShaderLibrary( id< MTLDevice > device )
     const auto path = GetLibraryFolder() / "RTGL1.metallib";
 
     NSError*         error = nil;
-    id< MTLLibrary > lib   = [device newLibraryWithURL:[NSURL fileURLWithPath:@( path.c_str() )]
-                                               error:&error];
+    id< MTLLibrary > lib   = nil;
+    if( std::filesystem::exists( path ) )
+    {
+        lib = [device newLibraryWithURL:[NSURL fileURLWithPath:@( path.c_str() )] error:&error];
+    }
+    else
+    {
+        // built without Xcode's Metal toolchain: RTGL1.metal, with its includes inlined
+        lib = RTGL1::MetalComputePipelines::CompileLibrarySource( device, GetLibraryFolder() / "RTGL1.metal", error );
+    }
     if( !lib )
     {
         throw RTGL1::RgException( RG_RESULT_ERROR_CANT_FIND_SHADER,
                                   std::string{ "Can't load " } + path.string() + ": " +
-                                      error.localizedDescription.UTF8String );
+                                      ( error ? error.localizedDescription.UTF8String : "no RTGL1.metallib or RTGL1.metal" ) );
     }
     return lib;
 }

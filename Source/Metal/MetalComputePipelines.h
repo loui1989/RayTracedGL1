@@ -149,6 +149,12 @@ public:
                      const MetalBindingTable&      bindings,
                      std::span< const uint8_t >    pushConstants = {} );
 
+    // a library from MSL source, compiled at run time: for when there's no .metallib
+    // (the build had no Metal toolchain); nil if the file can't be read
+    static id< MTLLibrary > CompileLibrarySource( id< MTLDevice >              device,
+                                                  const std::filesystem::path& path,
+                                                  NSError* __strong&          error );
+
     // VkPipelineDepthStencilStateCreateInfo with VK_COMPARE_OP_LESS_OR_EQUAL
     id< MTLDepthStencilState > GetDepthState( bool test, bool write );
 
