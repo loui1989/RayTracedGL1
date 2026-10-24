@@ -76,6 +76,11 @@ public:
 
     bool Valid() const;
 
+#ifdef __APPLE__
+    // macOS (DLSSRR_Metal.mm, the MetalFX denoiser): if it can upscale renderSize -> outSize
+    bool SupportsScale( uint32_t renderWidth, uint32_t renderHeight, uint32_t outWidth, uint32_t outHeight ) const;
+#endif
+
 private:
     void Destroy();
 

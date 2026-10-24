@@ -591,6 +591,11 @@ void RTGL1::Rasterizer::DrawToSwapchain( VkCommandBuffer       cmd,
     Draw( cmd, frameIndex, params );
 }
 
+bool RTGL1::Rasterizer::HasSwapchainGeometry() const
+{
+    return !collector->GetDrawInfos( GeometryRasterType::SWAPCHAIN ).empty();
+}
+
 void RTGL1::Rasterizer::Draw( VkCommandBuffer         cmd,
                               uint32_t                frameIndex,
                               const RasterDrawParams& drawParams )

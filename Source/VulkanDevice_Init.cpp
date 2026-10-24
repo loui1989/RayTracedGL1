@@ -490,6 +490,9 @@ RTGL1::VulkanDevice::VulkanDevice( const RgInstanceCreateInfo* info )
         appGuid.c_str() );
     // Ray Reconstruction shares NGX init owned by DLSS2
     nvDlssRr = DLSSRR::MakeInstance( device, nvDlss2.get() );
+#elif defined( __APPLE__ )
+    // the MetalFX denoiser (DLSSRR_Metal.mm)
+    nvDlssRr = DLSSRR::MakeInstance( device, nullptr );
 #endif
 
     sharpening = std::make_shared< Sharpening >( 

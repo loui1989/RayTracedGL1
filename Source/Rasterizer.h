@@ -139,6 +139,9 @@ public:
                       float                         lightmapScreenCoverage,
                       const RgFloat3D&              skyViewerPos );
 
+    // something to draw with DrawToSwapchain (HUD, menus)
+    bool HasSwapchainGeometry() const;
+
     void DrawToSwapchain( VkCommandBuffer       cmd,
                           uint32_t              frameIndex,
                           FramebufferImageIndex imageToDrawIn,

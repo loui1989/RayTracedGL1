@@ -45,6 +45,10 @@ namespace
 {
     SwapchainType MakeSwapchainType( const RgStartFrameRenderResolutionParams& resolution )
     {
+#ifdef __APPLE__
+        // frame generation is MetalFX frame interpolation (FrameInterp_Metal.mm), on the usual swapchain
+        return SWAPCHAIN_TYPE_VULKAN_NATIVE;
+#endif
         if( resolution.frameGeneration != RG_FRAME_GENERATION_MODE_OFF )
         {
             switch( resolution.upscaleTechnique )
@@ -99,6 +103,10 @@ VkCommandBuffer RTGL1::VulkanDevice::BeginFrame( const RgStartFrameInfo& info )
                              vkswapchainAvailableSemaphores[ frameIndex ] );
     m_skipGeneratedFrame =
         ( resolution.frameGeneration == RG_FRAME_GENERATION_MODE_WITHOUT_GENERATED );
+#ifdef __APPLE__
+    m_frameGenerationMode = resolution.frameGeneration;
+    m_fiThisFrame         = false;
+#endif
 
 
     VkSemaphore semaphoreToWaitOnSubmit = VK_NULL_HANDLE;
@@ -1153,6 +1161,10 @@ void RTGL1::VulkanDevice::FillUniform( RTGL1::ShGlobalUniform* gu,
                               nvDlssRr != nullptr )
                                 ? 1u
                                 : 0u;
+#ifdef __APPLE__
+        // the MetalFX denoiser (DLSSRR_Metal.mm) gets the exposed colour, as the upscaler does
+        gu->rrPreExposure = 0u;
+#endif
         gu->rrPreExpDebug = !!illum.rrPreExposureDebug;
 
         // NRD lane: validation overlay switch. (nrdReserved0 became
@@ -1768,9 +1780,9 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
         };
 
         // upscale finalized image
-        if( renderResolution.IsNvDlssEnabled() )
+        // (Ray Reconstruction first: on macOS it's the MetalFX denoiser, with the FSR2 / MetalFX slot)
+        if( renderResolution.IsNvDlssRayReconstructionEnabled() && nvDlssRr )
         {
-            if( renderResolution.IsNvDlssRayReconstructionEnabled() && nvDlssRr )
             {
                 // Exposure texture only with the pre-exposure reorder: against
                 // an already-exposed input it would declare the scale twice.
@@ -1792,7 +1804,10 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
                                          uniform->GetData()->view,
                                          uniform->GetData()->projection );
             }
-            else if( nvDlss3dx12 && swapchain->WithDLSS3FrameGeneration() )
+        }
+        else if( renderResolution.IsNvDlssEnabled() )
+        {
+            if( nvDlss3dx12 && swapchain->WithDLSS3FrameGeneration() )
             {
                 ID3D12GraphicsCommandList* dx12cmd = l_todx12( cmd, *nvDlss3dx12 );
 
@@ -2018,6 +2033,51 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
         accum = l_applyIf( effectVHS, postef.pVHS, accum );
     }
 
+#ifdef __APPLE__
+    // macOS frame generation: MetalFX frame interpolation, with the MetalFX upscaler / denoiser;
+    // it gets the image without HUD, and the HUD separately (FB_IMAGE_INDEX_HUD_ONLY)
+    {
+        const bool fiWanted = m_frameGenerationMode != RG_FRAME_GENERATION_MODE_OFF &&
+                              renderResolution.IsAmdFsr2Enabled() && amdFsr2 &&
+                              MetalFI::Prepare( device,
+                                                renderResolution.Width(),
+                                                renderResolution.Height(),
+                                                renderResolution.UpscaledWidth(),
+                                                renderResolution.UpscaledHeight() );
+        if( !fiWanted && m_fiWasActive )
+        {
+            MetalFI::Release();
+        }
+        m_fiWasActive = fiWanted;
+        m_fiThisFrame = fiWanted;
+        if( fiWanted )
+        {
+            const bool hasHud = !drawInfo.disableRasterization && rasterizer->HasSwapchainGeometry();
+
+            needHudOnly = true;
+            m_fiParams  = MetalFI::Params{
+                 .rendered         = VK_NULL_HANDLE, // at the end of Render
+                 .width            = renderResolution.UpscaledWidth(),
+                 .height           = renderResolution.UpscaledHeight(),
+                 .hud              = hasHud ? framebuffers->GetImage( FB_IMAGE_INDEX_HUD_ONLY, frameIndex )
+                                            : VK_NULL_HANDLE,
+                 .depthNdc         = framebuffers->GetImage( FB_IMAGE_INDEX_DEPTH_NDC, frameIndex ),
+                 .motion           = framebuffers->GetImage( FB_IMAGE_INDEX_MOTION_DLSS, frameIndex ),
+                 .renderWidth      = renderResolution.Width(),
+                 .renderHeight     = renderResolution.Height(),
+                 .jitterX          = jitter.data[ 0 ],
+                 .jitterY          = jitter.data[ 1 ],
+                 .nearPlane        = cameraInfo.cameraNear,
+                 .farPlane         = cameraInfo.cameraFar,
+                 .fovYRadians      = cameraInfo.fovYRadians,
+                 .deltaTime        = float( timeDelta ),
+                 .reset            = resetHistory,
+                 .presentGenerated = m_frameGenerationMode == RG_FRAME_GENERATION_MODE_ON,
+            };
+        }
+    }
+#endif
+
     // draw geometry such as HUD into an upscaled framebuf
     if( !drawInfo.disableRasterization )
     {
@@ -2101,6 +2161,14 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
         };
         accum = effectHDRPrepare->Apply( descSets, args, accum );
     }
+
+#ifdef __APPLE__
+    if( m_fiThisFrame )
+    {
+        framebuffers->BarrierOne( cmd, frameIndex, accum );
+        m_fiParams.rendered = framebuffers->GetImage( accum, frameIndex );
+    }
+#endif
 
     m_prevAccum = accum;
     return accum;
@@ -2287,6 +2355,17 @@ void RTGL1::VulkanDevice::EndFrame( VkCommandBuffer cmd, FramebufferImageIndex r
     else
     {
         // copy to swapchain's back buffer
+        bool presentedByFrameInterpolation = false;
+#ifdef __APPLE__
+        // macOS frame generation: the actual frame (HUD on top) and the generated one are made
+        // here, and presented by vkQueuePresentKHR (FrameInterp_Metal.mm)
+        if( m_fiThisFrame && m_fiParams.rendered != VK_NULL_HANDLE )
+        {
+            presentedByFrameInterpolation = MetalFI::Encode( device, cmd, m_fiParams );
+        }
+        m_fiThisFrame = false;
+#endif
+        if( !presentedByFrameInterpolation )
         {
             framebuffers->BarrierOne( cmd, frameIndex, rendered );
 
@@ -3184,6 +3263,21 @@ bool RTGL1::VulkanDevice::IsUpscaleTechniqueAvailable( RgRenderUpscaleTechnique 
 
 
         case RG_RENDER_UPSCALE_TECHNIQUE_AMD_FSR2:
+#ifdef __APPLE__
+            if( frameGeneration != RG_FRAME_GENERATION_MODE_OFF )
+            {
+                // MetalFX frame interpolation, with the MetalFX upscaler
+                if( !amdFsr2 || !MetalFI::Supported( device ) )
+                {
+                    if( ppFailureReason )
+                    {
+                        *ppFailureReason = "MetalFX frame interpolation needs macOS 26 and a supported GPU";
+                    }
+                    return false;
+                }
+                return true;
+            }
+#endif
             if( frameGeneration != RG_FRAME_GENERATION_MODE_OFF )
             {
                 const char* error = swapchain->FailReason( SWAPCHAIN_TYPE_FRAME_GENERATION_FSR3 );

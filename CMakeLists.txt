@@ -170,14 +170,19 @@ if (NOT RG_WITH_DX12)
     list(APPEND Sources "Source/NoDX12.cpp")
 endif()
 if (APPLE)
-    list(REMOVE_ITEM Sources "Source/FSR2.cpp")
+    # MetalFX: the temporal scaler in the FSR2 slot, the denoiser in the Ray Reconstruction one,
+    # frame interpolation as frame generation
+    list(REMOVE_ITEM Sources "Source/FSR2.cpp" "Source/DLSSRR.cpp")
     list(APPEND Sources
         "Source/FSR2_Metal.mm"
+        "Source/DLSSRR_Metal.mm"
+        "Source/FrameInterp_Metal.mm"
         "Source/MetalBridge.mm"
         "Source/MetalNative.mm"
         "Source/MetalShaderGen.cpp")
     set_source_files_properties(
-        "Source/FSR2_Metal.mm" "Source/MetalBridge.mm" "Source/MetalNative.mm"
+        "Source/FSR2_Metal.mm" "Source/DLSSRR_Metal.mm" "Source/FrameInterp_Metal.mm"
+        "Source/MetalBridge.mm" "Source/MetalNative.mm"
         PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
 

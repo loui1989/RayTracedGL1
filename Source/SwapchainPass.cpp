@@ -56,7 +56,17 @@ RTGL1::SwapchainPass::SwapchainPass( VkDevice                    _device,
                                                  "VertDefault",
                                                  "FragSwapchain",
                                                  false,
-                                                 _instanceInfo.rasterizedVertexColorGamma );
+                                                 _instanceInfo.rasterizedVertexColorGamma,
+                                                 nullptr,
+                                                 nullptr,
+#ifdef __APPLE__
+                                                 // macOS frame interpolation (FrameInterp_Metal.mm):
+                                                 // premultiplied colour + true coverage in alpha
+                                                 true
+#else
+                                                 false
+#endif
+        );
 }
 
 RTGL1::SwapchainPass::~SwapchainPass()

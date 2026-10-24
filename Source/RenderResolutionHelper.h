@@ -129,11 +129,21 @@ public:
                     break;
                 default: upscaleTechnique = RG_RENDER_UPSCALE_TECHNIQUE_NEAREST; break;
             }
+#ifdef __APPLE__
+            // macOS: "Ray Reconstruction" is the MetalFX denoiser (DLSSRR_Metal.mm), which
+            // denoises and upscales in place of the MetalFX temporal scaler (the FSR2 slot)
+            if( rayReconstruction &&
+                ( upscaleTechnique != RG_RENDER_UPSCALE_TECHNIQUE_AMD_FSR2 || !dlssRr ) )
+            {
+                rayReconstruction = false;
+            }
+#else
             if( rayReconstruction &&
                 ( upscaleTechnique != RG_RENDER_UPSCALE_TECHNIQUE_NVIDIA_DLSS || !dlssRr ) )
             {
                 rayReconstruction = false;
             }
+#endif
             switch( sharpenTechnique )
             {
                 case RG_RENDER_SHARPEN_TECHNIQUE_NONE:
@@ -180,7 +190,36 @@ public:
                 renderWidth = static_cast< uint32_t >( static_cast< float >( windowWidth ) / div );
                 renderHeight =
                     static_cast< uint32_t >( static_cast< float >( windowHeight ) / div );
+#ifdef __APPLE__
+                if( rayReconstruction && dlssRr )
+                {
+                    // the denoiser's own range of upscaling ratios
+                    std::tie( renderWidth, renderHeight ) =
+                        dlssRr->GetOptimalSettings( windowWidth, windowHeight, resolutionMode );
+                }
+#endif
             }
+#ifdef __APPLE__
+            // a ratio the MetalFX denoiser can't do (e.g. a custom render size): RTGL1's denoiser
+            if( rayReconstruction &&
+                ( !dlssRr || !dlssRr->SupportsScale( renderWidth + renderWidth % 2,
+                                                     renderHeight,
+                                                     windowWidth,
+                                                     windowHeight ) ) )
+            {
+                static bool s_warned = false;
+                if( !s_warned )
+                {
+                    s_warned = true;
+                    debug::Warning( "MetalFX denoiser can't upscale {}x{} -> {}x{}, using RTGL1's denoiser",
+                                    renderWidth,
+                                    renderHeight,
+                                    windowWidth,
+                                    windowHeight );
+                }
+                rayReconstruction = false;
+            }
+#endif
         }
         else if( upscaleTechnique == RG_RENDER_UPSCALE_TECHNIQUE_NVIDIA_DLSS )
         {
@@ -267,7 +306,12 @@ public:
     }
     bool IsNvDlssRayReconstructionEnabled() const
     {
+#ifdef __APPLE__
+        // the MetalFX denoiser, with the MetalFX upscaler (see Setup)
+        return IsAmdFsr2Enabled() && rayReconstruction;
+#else
         return IsNvDlssEnabled() && rayReconstruction;
+#endif
     }
     bool IsUpscaleEnabled() const { return IsAmdFsr2Enabled() || IsNvDlssEnabled(); }
 

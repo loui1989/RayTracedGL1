@@ -26,6 +26,7 @@
 #define RG_METAL_BRIDGE_IMPLEMENTATION // the calls in this file aren't routed by MetalShims.h
 #include "MetalNativeInternal.h"
 #include "MetalBridge.h"
+#include "FrameInterp_Metal.h"
 
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
@@ -1004,12 +1005,18 @@ VkResult RTGL1::MetalNative::vkAcquireNextImageKHR( VkDevice,
     const ScopedCpuTimer timer( CPU_TIMER_ACQUIRE );
     @autoreleasepool
     {
-        auto*                sc       = Obj< NativeSwapchain >( swapchain );
-        id< CAMetalDrawable > drawable = [sc->surface->layer nextDrawable];
-        if( !drawable )
+        auto* sc = Obj< NativeSwapchain >( swapchain );
+        // with frame interpolation, vkQueuePresentKHR acquires the drawables it presents
+        // (FrameInterp_Metal.mm); if the image is written anyway, SwapchainTexture acquires it then
+        id< CAMetalDrawable > drawable = nil;
+        if( !MetalFI::WantsLateDrawables() )
         {
-            // e.g. the window is being resized: try again
-            return VK_ERROR_OUT_OF_DATE_KHR;
+            drawable = [sc->surface->layer nextDrawable];
+            if( !drawable )
+            {
+                // e.g. the window is being resized: try again
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
         }
         const uint32_t i   = sc->next;
         sc->next           = ( sc->next + 1 ) % uint32_t( sc->images.size() );
@@ -1050,7 +1057,15 @@ VkResult RTGL1::MetalNative::vkQueuePresentKHR( VkQueue, const VkPresentInfoKHR*
         {
             auto*          sc  = Obj< NativeSwapchain >( pi->pSwapchains[ i ] );
             const uint32_t idx = pi->pImageIndices[ i ];
-            if( idx < sc->drawables.size() && sc->drawables[ idx ] )
+            // frame interpolation: the generated frame, then the actual one (FrameInterp_Metal.mm)
+            if( MetalFI::Present( cb, sc->surface->layer ) )
+            {
+                if( idx < sc->drawables.size() )
+                {
+                    sc->drawables[ idx ] = nil; // acquired before it was turned on: not used
+                }
+            }
+            else if( idx < sc->drawables.size() && sc->drawables[ idx ] )
             {
                 [cb presentDrawable:sc->drawables[ idx ]];
                 sc->drawables[ idx ] = nil;
@@ -1074,6 +1089,12 @@ id< MTLTexture > RTGL1::MetalNative::SwapchainTexture( VkImage image )
         return nil;
     }
     id< CAMetalDrawable > d = img->swapchain->drawables[ img->swapchainIndex ];
+    if( !d )
+    {
+        // not acquired by vkAcquireNextImageKHR (frame interpolation was on): acquire it now
+        d = [img->swapchain->surface->layer nextDrawable];
+        img->swapchain->drawables[ img->swapchainIndex ] = d;
+    }
     return d ? d.texture : nil;
 }
 

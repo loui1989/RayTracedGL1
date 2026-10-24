@@ -48,6 +48,7 @@
 #include "Sharpening.h"
 #include "DLSS2.h"
 #include "DLSSRR.h"
+#include "FrameInterp_Metal.h"
 #include "NrdDenoiser.h"
 #include "DLSS3_DX12.h"
 #include "RenderResolutionHelper.h"
@@ -269,6 +270,13 @@ private:
     std::optional< RgExtent2D > m_pixelated{};
     FramebufferImageIndex       m_prevAccum{ FB_IMAGE_INDEX_UPSCALED_PONG };
     bool                        m_skipGeneratedFrame{ false };
+#ifdef __APPLE__
+    // macOS frame generation: MetalFX frame interpolation (FrameInterp_Metal.mm)
+    RgFrameGenerationMode       m_frameGenerationMode{ RG_FRAME_GENERATION_MODE_OFF };
+    bool                        m_fiThisFrame{ false };
+    bool                        m_fiWasActive{ false };
+    MetalFI::Params             m_fiParams{};
+#endif
 
     RgFloat3D fluidGravity{ 0, -9.8f, 0 };
     RgFloat3D fluidColor{ 1, 1, 1 };
