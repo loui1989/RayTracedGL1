@@ -28,6 +28,7 @@
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreGraphics/CoreGraphics.h>
 #include <dispatch/dispatch.h>
 
 #include <vulkan/vulkan.h>
@@ -94,6 +95,16 @@ struct FiState
     // a slot is taken by Encode, and given back when its frames have been presented
     dispatch_semaphore_t slotSem      = nil;
     dispatch_queue_t     presentQueue = nil;
+    // its own command queue: on the frames' queue, a frame's presentation would wait
+    // behind the next frame's whole rendering
+    id< MTLCommandQueue > presentCmdQueue = nil;
+
+    // generated frames are shown only while there's room for them on the display: an actual
+    // frame rate above half the refresh rate can't be doubled, and trying to only made the
+    // presentation queue back up (and the game wait for it)
+    bool   generating      = false;
+    double refreshInterval = 0;
+    double refreshChecked  = 0;
 
     bool loggedFirst = false;
 };
@@ -269,6 +280,8 @@ bool Init( VkDevice vkDevice )
 
     g.slotSem      = dispatch_semaphore_create( SLOTS );
     g.presentQueue = dispatch_queue_create( "RTGL1 MetalFX frame interpolation present", DISPATCH_QUEUE_SERIAL );
+    g.presentCmdQueue       = [g.device newCommandQueue];
+    g.presentCmdQueue.label = @"RTGL1 MetalFX frame interpolation present";
 
     Log( "available" );
     g.initOk = true;
@@ -419,7 +432,44 @@ void BlitToDrawable( id< MTLCommandBuffer >       cb,
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [enc endEncoding];
 }
+// the display's refresh interval (re-read now and then: the window can move to another display)
+double RefreshInterval()
+{
+    const double now = Now();
+    if( g.refreshInterval <= 0 || now - g.refreshChecked > 2.0 )
+    {
+        g.refreshChecked = now;
+        double hz        = 0;
+        if( CGDisplayModeRef mode = CGDisplayCopyDisplayMode( CGMainDisplayID() ) )
+        {
+            hz = CGDisplayModeGetRefreshRate( mode );
+            CGDisplayModeRelease( mode );
+        }
+        // 0: a variable refresh rate display (ProMotion), up to 120 Hz
+        g.refreshInterval = 1.0 / ( hz > 1 ? hz : 120.0 );
+    }
+    return g.refreshInterval;
 }
+
+// generate only while the actual frames come slower than every 2 refreshes (with some hysteresis)
+bool ShouldGenerate()
+{
+    const double frameTime = g_frameTime.load();
+    const double twoRefr   = 2.0 * RefreshInterval();
+    const bool   was       = g.generating;
+    g.generating           = was ? frameTime > twoRefr * 0.92 : frameTime > twoRefr * 1.04;
+    if( g.generating != was )
+    {
+        fprintf( stderr,
+                 "[MetalFX frame interpolation] %s (%.0f FPS, the display: %.0f Hz)\n",
+                 g.generating ? "generating frames" : "paused: the frame rate is already above half the refresh rate",
+                 1.0 / std::max( frameTime, 1e-4 ),
+                 1.0 / RefreshInterval() );
+    }
+    return g.generating;
+}
+}
+
 
 bool RTGL1::MetalFI::Supported( VkDevice device )
 {
@@ -494,7 +544,7 @@ bool RTGL1::MetalFI::Encode( VkDevice device, VkCommandBuffer cmd, const Params&
         }
 
         const uint32_t   slot        = g.cur;
-        const bool       interpolate = g.hasHistory && !p.reset;
+        const bool       interpolate = g.hasHistory && !p.reset && p.presentGenerated && ShouldGenerate();
         id< MTLTexture > cur         = g.color[ slot ];
         id< MTLTexture > prev        = g.color[ ( slot + SLOTS - 1 ) % SLOTS ];
         id< MTLTexture > real        = g.real[ slot ];
@@ -567,7 +617,7 @@ bool RTGL1::MetalFI::Encode( VkDevice device, VkCommandBuffer cmd, const Params&
         } );
 
         g.pendingReal      = real;
-        g.pendingGenerated = ( interpolate && p.presentGenerated ) ? generated : nil;
+        g.pendingGenerated = interpolate ? generated : nil;
         g.pendingHoldsSlot = true;
         g.lateDrawables    = true;
         g.hasHistory       = true;
@@ -612,7 +662,7 @@ bool RTGL1::MetalFI::Present( id< MTLCommandBuffer > cb, CAMetalLayer* layer )
     // drawables here would block the game until the previous frame's ones are shown
     id< MTLRenderPipelineState > pipe  = g.presentPipe;
     id< MTLSamplerState >        smp   = g.sampler;
-    id< MTLCommandQueue >        queue = cb.commandQueue;
+    id< MTLCommandQueue >        queue = g.presentCmdQueue;
     dispatch_queue_t             dq    = g.presentQueue;
 
     [cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
