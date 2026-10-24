@@ -1174,10 +1174,13 @@ void RTGL1::VulkanDevice::FillUniform( RTGL1::ShGlobalUniform* gu,
         gu->rrDemod       = !!illum.rrDemod;
         gu->rrDemodFilter = std::min( illum.rrDemodFilter, 2u );
 #ifdef __APPLE__
-        // the re-modulation is done by the post-RR exposure pass, which the MetalFX denoiser
-        // doesn't use (rrPreExposure is 0 above): it gets the colour with its albedo, and the
-        // albedo guides, which is what it expects
-        gu->rrDemod = 0u;
+        // the MetalFX denoiser: with demodulation it denoises the lighting only, and the
+        // albedo / texel detail is multiplied back afterwards, at output resolution, by
+        // DLSSRR_Metal.mm (not by the post-RR exposure pass: rrPreExposure is 0 above);
+        // 2 marks this for CmPrepareFinal. Only on the frames the denoiser runs.
+        gu->rrDemod = ( illum.rrDemod && renderResolution.IsNvDlssRayReconstructionEnabled() && nvDlssRr )
+                          ? 2u
+                          : 0u;
 #endif
         gu->svgfFp        = std::min( illum.svgfFp, 2u );
         gu->svgfFpGrad    = !!illum.svgfFpGrad;
@@ -1796,6 +1799,9 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
                     uniform->GetData()->rrPreExposure != 0 &&
                     !!pnext::get< RgDrawFrameIlluminationParams >( drawInfo ).rrExposureTexture;
 
+#ifdef __APPLE__
+                nvDlssRr->SetDemodulation( uniform->GetData()->rrDemod != 0 );
+#endif
                 accum = nvDlssRr->Apply( cmd,
                                          frameIndex,
                                          *framebuffers,

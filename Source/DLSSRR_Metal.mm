@@ -138,15 +138,36 @@ kernel void rr_prep( texture2d< float, access::read >  srcColor      [[texture(0
     overlay.write( float4( max( o.rgb, 0.0f ), saturate( o.a ) ), p );
 }
 
-kernel void rr_copy_out( texture2d< float, access::read >  src [[texture(0)]],
-                         texture2d< float, access::write > dst [[texture(1)]],
+struct RrCopyParams
+{
+    uint   demod;
+    float2 renderSize;
+    float2 jitter;
+};
+
+// into RTGL1's upscaled framebuffer; with demodulation, the denoised lighting is multiplied by the
+// albedo / texel factor CmNoisyCompose divided out (nearest texel at the unjittered position, as
+// CmRrPostExposure's rrDemodFilter 2: the pixel art stays crisp, it never goes through the network)
+kernel void rr_copy_out( texture2d< float, access::read >  src         [[texture(0)]],
+                         texture2d< float, access::write > dst         [[texture(1)]],
+                         texture2d< float, access::read >  demodFactor [[texture(2)]],
+                         constant RrCopyParams& prm                    [[buffer(0)]],
                          uint2 gid [[thread_position_in_grid]] )
 {
     if( gid.x >= src.get_width() || gid.y >= src.get_height() )
         return;
     float3 c = src.read( gid ).rgb;
     c        = select( c, float3( 0.0 ), !isfinite( c ) );
-    dst.write( float4( max( c, 0.0f ), 1.0 ), gid );
+    c        = max( c, 0.0f );
+    if( prm.demod != 0 )
+    {
+        float2 uv = ( float2( gid ) + 0.5 ) / float2( src.get_width(), src.get_height() ) - prm.jitter / prm.renderSize;
+        int2   nn = clamp( int2( floor( uv * prm.renderSize ) ), int2( 0 ), int2( prm.renderSize ) - 1 );
+        float3 m  = demodFactor.read( uint2( nn ) ).rgb;
+        m         = select( m, float3( 1.0 ), !isfinite( m ) );
+        c        *= max( m, 0.0f );
+    }
+    dst.write( float4( c, 1.0 ), gid );
 }
 )";
 
@@ -441,7 +462,9 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
         id< MTLTexture > srcSpec    = tex( FI::FB_IMAGE_INDEX_DIFF_PONG_COLOR_AND_VARIANCE );
         id< MTLTexture > srcOverlay = tex( FI::FB_IMAGE_INDEX_RR_TRANSPARENCY );
         id< MTLTexture > outputVk   = tex( FI::FB_IMAGE_INDEX_UPSCALED_PONG );
-        if( !srcColor || !srcDepth || !srcMotion || !srcDiff || !srcNormal || !srcSpec || !srcOverlay || !outputVk )
+        id< MTLTexture > demodTex   = tex( FI::FB_IMAGE_INDEX_RR_DEMOD_FACTOR );
+        if( !srcColor || !srcDepth || !srcMotion || !srcDiff || !srcNormal || !srcSpec || !srcOverlay || !outputVk ||
+            !demodTex )
         {
             if( g.loggedFailures++ < 5 )
             {
@@ -470,6 +493,19 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
         }
 
         const uint32_t useOverlay = transparencyLayerEnabled ? 1u : 0u;
+
+        struct
+        {
+            uint32_t demod;
+            uint32_t pad;
+            float    renderSize[ 2 ];
+            float    jitter[ 2 ];
+        } copyPrm = {
+            m_demod ? 1u : 0u,
+            0,
+            { float( rs.renderWidth ), float( rs.renderHeight ) },
+            { jitterOffset.data[ 0 ], jitterOffset.data[ 1 ] },
+        };
         const RgFloat2D jitter    = jitterOffset;
         (void)timeDelta;
 
@@ -535,6 +571,8 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
                     [enc setComputePipelineState:g.copyPipe];
                     [enc setTexture:g.out atIndex:0];
                     [enc setTexture:outputVk atIndex:1];
+                    [enc setTexture:demodTex atIndex:2];
+                    [enc setBytes:&copyPrm length:sizeof( copyPrm ) atIndex:0];
                     [enc dispatchThreads:MTLSizeMake( rs.upscaledWidth, rs.upscaledHeight, 1 )
                         threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
                     if( fence )

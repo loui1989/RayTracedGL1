@@ -215,6 +215,14 @@ void main()
 
             if( !postComp )
             {
+                // macOS MetalFX denoiser (rrDemod == 2): the image is lighting only here and is
+                // multiplied by the demodulation factor after denoising; the medium's in-scatter
+                // is not albedo-modulated, so pre-divide it, as the glow below
+                if( globalUniform.rrDemod == 2 )
+                {
+                    volumetric.rgb /= max( texelFetch( framebufRrDemodFactor_Sampler, pix, 0 ).rgb,
+                                           vec3( 0.02 ) );
+                }
                 hdr = hdr * volumetric.a + volumetric.rgb;
             }
 
@@ -375,6 +383,12 @@ void main()
         if( globalUniform.volumeOccludeEmis != 0 )
         {
             screenEmis *= volumeTransmittance;
+        }
+
+        // macOS MetalFX denoiser: see the volumetrics above
+        if( globalUniform.rrDemod == 2 )
+        {
+            screenEmis /= max( texelFetch( framebufRrDemodFactor_Sampler, pix, 0 ).rgb, vec3( 0.02 ) );
         }
 
         hdr = hdr + screenEmis * globalUniform.emissionMaxScreenColor;

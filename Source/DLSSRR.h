@@ -79,6 +79,14 @@ public:
 #ifdef __APPLE__
     // macOS (DLSSRR_Metal.mm, the MetalFX denoiser): if it can upscale renderSize -> outSize
     bool SupportsScale( uint32_t renderWidth, uint32_t renderHeight, uint32_t outWidth, uint32_t outHeight ) const;
+    // the colour is lighting only (CmNoisyCompose, rrDemod): multiply FB_IMAGE_INDEX_RR_DEMOD_FACTOR
+    // back after denoising
+    void SetDemodulation( bool demod ) { m_demod = demod; }
+
+private:
+    bool m_demod{ false };
+
+public:
 #endif
 
 private:
