@@ -2028,9 +2028,9 @@ void ProfileFrame()
     snprintf( line, sizeof line, "frames %u: %.2f ms per frame (%.1f fps), GPU %.2f ms in the measured parts\n",
               frames, frameMs, 1000.0 / std::max( frameMs, 0.001 ), total );
     report += line;
-    snprintf( line, sizeof line, "CPU per frame: %.2f ms encoding (submit), %.2f ms waiting for the GPU (fences), %.2f ms waiting for a drawable\n",
-              cpu[ RTGL1::MetalNative::CPU_TIMER_SUBMIT ], cpu[ RTGL1::MetalNative::CPU_TIMER_FENCE ],
-              cpu[ RTGL1::MetalNative::CPU_TIMER_ACQUIRE ] );
+    snprintf( line, sizeof line, "CPU per frame: %.2f ms encoding (submit; %.2f ms of it acceleration structures), %.2f ms waiting for the GPU (fences), %.2f ms waiting for a drawable\n",
+              cpu[ RTGL1::MetalNative::CPU_TIMER_SUBMIT ], cpu[ RTGL1::MetalNative::CPU_TIMER_AS ],
+              cpu[ RTGL1::MetalNative::CPU_TIMER_FENCE ], cpu[ RTGL1::MetalNative::CPU_TIMER_ACQUIRE ] );
     report += line;
     for( const auto& [ ms, name ] : rows )
     {

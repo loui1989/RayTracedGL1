@@ -312,6 +312,16 @@ struct State
     bool                           computeEnv    = true;
     bool                           fastMath      = false; // RTGL1_METAL_FASTMATH=1
     uint32_t                       asRebuildEvery = 8;    // RTGL1_METAL_AS_REBUILD_EVERY, 1 = never refit
+    // Bottom level structures of destroyed acceleration structures, kept (and resident)
+    // for new ones: RTGL1 creates a new structure for every dynamic primitive every frame,
+    // and allocating them -- and adding them to the residency set -- was a large part of
+    // the CPU time of a frame. By size; a structure is reused only once destroyed, i.e.
+    // when no submitted work uses it anymore.
+    std::multimap< NSUInteger, id< MTLAccelerationStructure > > asPool;
+    NSUInteger                                                  asPoolBytes = 0;
+    // accelerationStructureSizesWithDescriptor by geometry layout: the same few layouts
+    // come back every frame
+    std::map< std::vector< uint64_t >, MTLAccelerationStructureSizes > asSizeCache;
     struct
     {
         uint32_t blasBuilds = 0, blasRefits = 0, tlasInstances = 0;
@@ -884,6 +894,19 @@ bool EnsureAS( MtlAS& m, NSUInteger size )
     {
         RemoveResident( ( id< MTLResource > )m.as );
     }
+    // a pooled one of a fitting size (not more than twice the size)
+    {
+        auto p = s.asPool.lower_bound( size );
+        if( p != s.asPool.end() && p->first <= size * 2 + 65536 )
+        {
+            m.as   = p->second;
+            m.size = p->first;
+            s.asPoolBytes -= p->first;
+            s.asPool.erase( p );
+            s.asGeneration++;
+            return true;
+        }
+    }
     // some headroom, as dynamic geometry grows and shrinks every frame
     const NSUInteger alloc = size + size / 4;
     m.as                   = [s.mtlDevice newAccelerationStructureWithSize:alloc];
@@ -968,6 +991,7 @@ bool EncodeAccelerationStructureBuilds()
     {
         return false;
     }
+    const MetalNative::ScopedCpuTimer timer( MetalNative::CPU_TIMER_AS );
 
     bool blasEncoded = false;
 
@@ -1009,7 +1033,33 @@ bool EncodeAccelerationStructureBuilds()
                 }
             }
 
-            const MTLAccelerationStructureSizes sizes = [s.mtlDevice accelerationStructureSizesWithDescriptor:d];
+            MTLAccelerationStructureSizes sizes;
+            {
+                std::vector< uint64_t > key;
+                key.reserve( b.geoms.size() + 1 );
+                key.push_back( uint64_t( d.usage ) );
+                for( size_t g = 0; g < b.geoms.size(); g++ )
+                {
+                    const auto& t = b.geoms[ g ].geometry.triangles;
+                    key.push_back( ( uint64_t( b.ranges[ g ].primitiveCount ) << 32 ) |
+                                   ( uint64_t( t.transformData.deviceAddress != 0 ) << 20 ) |
+                                   ( uint64_t( t.indexType ) << 8 ) | uint64_t( b.geoms[ g ].flags ) );
+                }
+                auto c = s.asSizeCache.find( key );
+                if( c != s.asSizeCache.end() )
+                {
+                    sizes = c->second;
+                }
+                else
+                {
+                    sizes = [s.mtlDevice accelerationStructureSizesWithDescriptor:d];
+                    if( s.asSizeCache.size() > 16384 )
+                    {
+                        s.asSizeCache.clear();
+                    }
+                    s.asSizeCache.emplace( std::move( key ), sizes );
+                }
+            }
 
             MtlAS&     m         = s.as[ b.dst ];
             const bool recreated = EnsureAS( m, sizes.accelerationStructureSize );
@@ -2411,7 +2461,18 @@ void RTGL1::Metal::ForgetAccelerationStructure( VkAccelerationStructureKHR as )
     {
         if( it->second.as )
         {
-            RemoveResident( ( id< MTLResource > )it->second.as );
+            // bottom level ones go to the pool (top level ones have instance buffers)
+            constexpr NSUInteger maxPoolBytes = NSUInteger( 1 ) << 30;
+            if( it->second.instances.empty() && it->second.size > 0 &&
+                s.asPoolBytes + it->second.size <= maxPoolBytes && s.asPool.size() < 8192 )
+            {
+                s.asPool.emplace( it->second.size, it->second.as );
+                s.asPoolBytes += it->second.size;
+            }
+            else
+            {
+                RemoveResident( ( id< MTLResource > )it->second.as );
+            }
         }
         s.as.erase( it );
         s.asGeneration++;

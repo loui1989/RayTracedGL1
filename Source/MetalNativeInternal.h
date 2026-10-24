@@ -169,6 +169,7 @@ enum CpuTimer
     CPU_TIMER_SUBMIT,  // vkQueueSubmit: the recorded commands are encoded into Metal here
     CPU_TIMER_FENCE,   // vkWaitForFences: waiting for the GPU
     CPU_TIMER_ACQUIRE, // vkAcquireNextImageKHR: waiting for a drawable (display / GPU)
+    CPU_TIMER_AS,      // encoding acceleration structure builds (part of CPU_TIMER_SUBMIT)
     CPU_TIMER_COUNT
 };
 void AddCpuTime( CpuTimer which, double ms );
