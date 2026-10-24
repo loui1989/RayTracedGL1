@@ -100,6 +100,9 @@ public:
         const float* projection;
         // also make the image without HUD (GetHudlessImage), for frame interpolation
         bool         hudlessCopy;
+        // Doom 64 RT: ShGlobalUniform::volumePostComp, the medium is composed after the upscaling
+        // (CmVolumeCompose), not in CmPrepareFinal
+        bool         volumePostComp;
 
         // Rasterizer::DrawDecals, after the primary rays
         std::function< void( id< MTLCommandBuffer > ) >                   rasterDecals;
@@ -111,6 +114,14 @@ public:
         // Rasterizer::DrawToSwapchain into the accumulation image, before the post effects on HUD
         std::function< void( id< MTLCommandBuffer >, id< MTLTexture > ) > rasterHud;
     };
+
+    // Registers the volumetric images (scattering, illumination, Doom 64 RT's cloud map) and
+    // the tonemapping buffer to 'bindings': before any pass that reads them (the rasterized sky too)
+    void BindVolumetric( MetalBindingTable& bindings, uint32_t frameIndex );
+
+    // Doom 64 RT: Volumetric::ProcessClouds, the volumetric cloud map (CmCloudMap)
+    // that the rasterized sky passes read; 'enabled': ShGlobalUniform::cloudParams0[ 0 ] > 0.5
+    void ProcessClouds( id< MTLCommandBuffer > cmd, const MetalBindingTable& bindings, uint32_t frameIndex, bool enabled );
 
     // Registers the own buffers to 'bindings', then encodes all passes into 'cmd'.
     // Returns the image to present: LDR, linear color, of the upscaled size.
@@ -186,6 +197,12 @@ private:
     // Volumetric: scattering volumes, one per frame index, the previous one is the history
     id< MTLTexture >      scattering[ MAX_FRAMES_IN_FLIGHT ];
     id< MTLSamplerState > volumeSampler;
+    // Doom 64 RT (ILLUMINATION_VOLUME): the all-lights illumination of the froxels, the previous one is read
+    id< MTLTexture >      illumination[ MAX_FRAMES_IN_FLIGHT ];
+    // Doom 64 RT: the volumetric cloud map, sampled with a repeating U
+    id< MTLTexture >      cloudMap[ MAX_FRAMES_IN_FLIGHT ];
+    id< MTLSamplerState > cloudSampler;
+    uint32_t              cloudMapClearedMask{ 0 };
 
     // EffectWipe
     struct WipePush

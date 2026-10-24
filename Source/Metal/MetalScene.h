@@ -111,6 +111,8 @@ private:
         World2,
         FirstPerson,
         FirstPersonViewer,
+        // Doom 64 RT: RG_MESH_PRIMITIVE_SHADOW_ONLY, seen only by shadow rays (INSTANCE_MASK_RESERVED_0)
+        ShadowOnly,
     };
     enum class PassThrough : uint8_t
     {
@@ -126,7 +128,7 @@ private:
         bool     operator==( const Group& ) const = default;
         uint32_t ToIndex() const { return uint32_t( visibility ) * 3 + uint32_t( passThrough ); }
     };
-    static constexpr uint32_t GroupCount = 5 * 3;
+    static constexpr uint32_t GroupCount = 6 * 3;
 
     static Group MakeGroup( const RgMeshInfo& mesh, const RgMeshPrimitiveInfo& prim );
 
@@ -294,7 +296,7 @@ private:
         float    model_2[ 4 ];
         // index of ShGeometryInstance in the previous frame
         uint32_t globalIndex;
-        // to detect a texture change (e.g. a sprite's animation frame), see GEOM_INST_FLAG_NO_HISTORY
+        // to detect a texture change (e.g. a sprite's animation frame), see GEOM_INST_FLAGS2_NO_HISTORY
         uint32_t texture_base;
         uint32_t texture_base_E;
     };

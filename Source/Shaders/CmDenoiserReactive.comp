@@ -95,7 +95,7 @@ void main()
                 vec2 bary;
                 unpackVisibilityBuffer( v, instanceID, instCustomIndex, localGeomIndex, primIndex, bary );
 
-                if( ( geometryInstances[ instanceID ].flags & GEOM_INST_FLAG_NO_HISTORY ) != 0 )
+                if( ( geometryInstances[ instanceID ].flags2 & GEOM_INST_FLAGS2_NO_HISTORY ) != 0 )
                 {
                     reactive = 1.0;
                     break;
@@ -140,7 +140,7 @@ void main()
 
                 int curIndex;
                 if( !getCurrentGeometryIndexByPrev( prevInstanceID, 0, curIndex ) ||
-                    ( geometryInstances[ curIndex ].flags & GEOM_INST_FLAG_NO_HISTORY ) != 0 )
+                    ( geometryInstances[ curIndex ].flags2 & GEOM_INST_FLAGS2_NO_HISTORY ) != 0 )
                 {
                     reactive = 1.0;
                     break;

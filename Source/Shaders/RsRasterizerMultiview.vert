@@ -20,7 +20,13 @@
 
 #version 460
 
+#ifdef METAL
+// Metal: a cubemap face per pass (MetalRasterizer::RenderSkyCubemap), its index is a function constant
+layout( constant_id = 1 ) const uint metalCubemapFace = 0;
+#define gl_ViewIndex metalCubemapFace
+#else
 #extension GL_EXT_multiview : require
+#endif
 
 #define DESC_SET_GLOBAL_UNIFORM 1
 #include "ShaderCommonGLSLFunc.h"

@@ -53,12 +53,31 @@ void main()
     vec3  overlay  = raster.rgb;
     float coverage = raster.a;
 
+    float volumeTransmittance = 1.0;
+
     if( !classicShading( pix ) )
     {
         const float exposure = ev100ToLuminousExposure( getCurrentEV100() );
 
         // volumetrics: hdr * a + rgb, so the overlay is rgb with the opacity of ( 1 - a )
-        const vec4 volumetric = texelFetch( framebufScattering_Sampler, pix, 0 );
+        vec4 volumetric = texelFetch( framebufScattering_Sampler, pix, 0 );
+
+        // Doom 64 RT (CmPrepareFinal): no medium in front of the first-person weapon
+        if( globalUniform.volumeFp > 0.5 )
+        {
+            const uint ci =
+                floatBitsToUint( texelFetch( framebufSurfacePosition_Sampler, getCheckerboardPix( pix ), 0 ).a );
+            if( ( ci & INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON ) != 0 )
+            {
+                volumetric = vec4( 0, 0, 0, 1 );
+            }
+        }
+        // Doom 64 RT: the medium is composed after the upscaling (CmVolumeCompose)
+        if( globalUniform.volumePostComp != 0 )
+        {
+            volumetric = vec4( 0, 0, 0, 1 );
+        }
+        volumeTransmittance = volumetric.a;
 
         hdr      = hdr * exposure;
         overlay  = ( raster.rgb * volumetric.a + volumetric.rgb ) * exposure;
@@ -67,7 +86,12 @@ void main()
 
     // screen emissive
     {
-        const vec3 screenEmis = texelFetch( framebufScreenEmission_Sampler, pix, 0 ).rgb;
+        vec3 screenEmis = texelFetch( framebufScreenEmission_Sampler, pix, 0 ).rgb;
+        // Doom 64 RT: the medium hides the glow behind it
+        if( globalUniform.volumeOccludeEmis != 0 )
+        {
+            screenEmis *= volumeTransmittance;
+        }
         overlay += screenEmis * globalUniform.emissionMaxScreenColor;
     }
 

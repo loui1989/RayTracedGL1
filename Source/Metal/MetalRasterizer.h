@@ -80,12 +80,11 @@ public:
               const RgViewport*          pViewport,
               const MetalTextureManager& textures );
 
-    // Renders the sky primitives into SkyCubemap(). Returns false, if there are none.
-    bool             RenderSkyCubemap( id< MTLCommandBuffer >     cmd,
-                                       const MetalTextureManager& textures,
-                                       const RgFloat3D&           skyViewerPosition,
-                                       float                      zNear,
-                                       float                      zFar );
+    // RenderCubemap::Draw: the sky primitives into SkyCubemap(), with RTGL1's shaders
+    // (RsRasterizerMultiview.vert, Doom 64 RT's RsSkyCubemap.frag with the volumetric clouds),
+    // a pass per face; the faces' view-projections are ShGlobalUniform::viewProjCubemap.
+    // Returns false, if there are no sky primitives.
+    bool             RenderSkyCubemap( id< MTLCommandBuffer > cmd, MetalComputePipelines& shaders, const MetalBindingTable& bindings );
     id< MTLTexture > SkyCubemap() const { return skyCubemap; }
 
     struct PassParams
@@ -177,6 +176,8 @@ private:
         uint32_t          indexCount;
         uint32_t          firstIndex;
         float             emissive;
+        // Doom 64 RT: RG_MESH_PRIMITIVE_SKY_CLOUDS -> 1, RG_MESH_PRIMITIVE_SKY_BEHIND_CLOUDS -> 2
+        uint32_t          skyCloudMode;
 
         std::optional< std::array< float, 16 > > viewProj;
         std::optional< RgViewport >              viewport;

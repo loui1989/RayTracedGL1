@@ -203,6 +203,11 @@ auto RTGL1::MetalScene::MakeGroup( const RgMeshInfo& mesh, const RgMeshPrimitive
     {
         pv = Visibility::FirstPersonViewer;
     }
+    // Doom 64 RT: before the others, as a shadow proxy is submitted with its sprite's flags
+    else if( prim.flags & RG_MESH_PRIMITIVE_SHADOW_ONLY )
+    {
+        pv = Visibility::ShadowOnly;
+    }
     else if( prim.flags & RG_MESH_PRIMITIVE_SKY_VISIBILITY )
     {
         pv = Visibility::World2;
@@ -314,7 +319,9 @@ auto RTGL1::MetalScene::MakeGeomInfo( const RgMeshInfo&          mesh,
     g.roughnessDefault_metallicDefault = ( FloatToUint8( pbrInfo ? pbrInfo->roughnessDefault : 1.0f ) << 0 ) |
                                          ( FloatToUint8( pbrInfo ? pbrInfo->metallicDefault : 0.0f ) << 8 );
 
-    g.emissiveMult = Utils::Saturate( prim.emissive );
+    // Doom 64 RT: not saturated, and a separate GI emission (RG_MESH_PRIMITIVE_EMISSIVE_SCREEN_SCALED)
+    g.emissiveMult   = std::max( 0.0f, prim.emissive );
+    g.emissiveMultGi = std::max( 0.0f, prim.emissiveGi );
 
     g.firstVertex_Layer1 = range.firstVertexLayer[ 0 ];
     g.firstVertex_Layer2 = range.firstVertexLayer[ 1 ];
@@ -879,6 +886,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
                 }
                 break;
             case Visibility::World1: mask = INSTANCE_MASK_WORLD_1; break;
+            case Visibility::ShadowOnly: mask = INSTANCE_MASK_RESERVED_0; break;
             case Visibility::World2:
                 mask        = INSTANCE_MASK_WORLD_2;
                 customIndex = INSTANCE_CUSTOM_INDEX_FLAG_SKY;
@@ -887,6 +895,11 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
                     return;
                 }
                 break;
+        }
+        // Doom 64 RT: alpha tested (sprites) don't see the shadow proxies, see getShadowCullMask
+        if( pt == PassThrough::AlphaTested )
+        {
+            customIndex |= INSTANCE_CUSTOM_INDEX_FLAG_IGNORE_SHADOW_PROXY;
         }
         if( pt == PassThrough::Refract && pv != Visibility::FirstPerson && pv != Visibility::FirstPersonViewer )
         {
@@ -998,7 +1011,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
                 prev->second.indexCount != dst.indexCount || prev->second.texture_base != dst.texture_base ||
                 prev->second.texture_base_E != dst.texture_base_E )
             {
-                dst.flags |= GEOM_INST_FLAG_NO_HISTORY;
+                dst.flags2 |= GEOM_INST_FLAGS2_NO_HISTORY;
             }
 
             // GeomInfoManager::CopyFromStaging: the previous frame's ShGeometryInstance index -> the current one

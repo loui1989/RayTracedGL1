@@ -102,10 +102,23 @@ struct RasterizedPushConst
     float    emissiveMult;
     uint32_t normalTextureIndex;
     uint32_t manualSrgb;
+    // Doom 64 RT
+    uint32_t skyCloudMode;
 };
 static_assert( offsetof( RasterizedPushConst, packedColor ) == 64 );
 static_assert( offsetof( RasterizedPushConst, normalTextureIndex ) == 80 );
-static_assert( sizeof( RasterizedPushConst ) == 88 );
+static_assert( offsetof( RasterizedPushConst, skyCloudMode ) == 88 );
+static_assert( sizeof( RasterizedPushConst ) == 92 );
+
+// RenderCubemap.cpp
+struct RasterizedMultiviewPushConst
+{
+    float    model[ 16 ];
+    uint32_t packedColor;
+    uint32_t textureIndex;
+    uint32_t skyCloudMode;
+};
+static_assert( offsetof( RasterizedMultiviewPushConst, skyCloudMode ) == 72 );
 
 MTLViewport ToMetal( const RgViewport& v )
 {
@@ -254,6 +267,9 @@ void RTGL1::MetalRasterizer::Add( Type                       type,
         .indexCount       = indexed ? info.indexCount : 0,
         .firstIndex       = firstIndex,
         .emissive         = Utils::Saturate( info.emissive ),
+        .skyCloudMode     = ( info.flags & RG_MESH_PRIMITIVE_SKY_CLOUDS )          ? 1u
+                            : ( info.flags & RG_MESH_PRIMITIVE_SKY_BEHIND_CLOUDS ) ? 2u
+                                                                                   : 0u,
         .viewProj         = std::nullopt,
         .viewport         = pViewport ? std::optional{ *pViewport } : std::nullopt,
         .pipelineState    = ToPipelineState( type, info ),
@@ -486,6 +502,7 @@ void RTGL1::MetalRasterizer::DrawAll( id< MTLRenderCommandEncoder >     enc,
             .emissiveMult         = d.emissive,
             .normalTextureIndex   = d.texture_base_N,
             .manualSrgb           = 0,
+            .skyCloudMode         = d.skyCloudMode,
         };
         {
             float model[ 16 ] = RG_MATRIX_TRANSPOSED( d.transform );
@@ -612,6 +629,7 @@ void RTGL1::MetalRasterizer::DrawDecals( id< MTLCommandBuffer > cmd,
                 .emissiveMult         = d.emissive,
                 .normalTextureIndex   = d.texture_base_N,
                 .manualSrgb           = 0,
+                .skyCloudMode         = d.skyCloudMode,
             };
             float model[ 16 ] = RG_MATRIX_TRANSPOSED( d.transform );
             Matrix::Multiply( push.vp, model, d.viewProj ? d.viewProj->data() : defaultViewProj );
@@ -854,11 +872,9 @@ void RTGL1::MetalRasterizer::EncodeLegacyDraw( id< MTLRenderCommandEncoder > enc
     EncodeDraw( enc, d );
 }
 
-bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >     cmd,
-                                               const MetalTextureManager& textures,
-                                               const RgFloat3D&           skyViewerPosition,
-                                               float                      zNear,
-                                               float                      zFar )
+bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >   cmd,
+                                               MetalComputePipelines&   shaders,
+                                               const MetalBindingTable& bindings )
 {
     if( !HasDraws( Type::Sky ) )
     {
@@ -866,12 +882,10 @@ bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >     cmd,
     }
     UploadGeometry();
 
+    const auto size = uint32_t( skyCubemap.width );
+
     for( uint32_t face = 0; face < 6; face++ )
     {
-        // the same as viewProjCubemap in VulkanDevice.cpp
-        float viewProj[ 16 ];
-        Matrix::GetCubemapViewProjMat( viewProj, face, skyViewerPosition.data, zNear, zFar );
-
         auto* pass                             = [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[ 0 ].texture     = skyCubemap;
         pass.colorAttachments[ 0 ].slice       = face;
@@ -884,20 +898,46 @@ bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >     cmd,
         pass.depthAttachment.storeAction       = MTLStoreActionDontCare;
 
         id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
-        enc.label                         = @"Sky cubemap face";
-        [enc setVertexBuffer:frames[ frameIndex ].vertices offset:0 atIndex:MTL_RASTER_BINDING_VERTICES];
-        [enc setFragmentBuffer:textures.TableBuffer() offset:0 atIndex:MTL_RASTER_BINDING_TEXTURES];
-        textures.UseResources( enc );
+        enc.label                         = @"Rasterized sky to cubemap face";
+
+        [enc setVertexBuffer:frames[ frameIndex ].vertices
+                      offset:0
+                     atIndex:MetalComputePipelines::RasterVertexBufferIndex];
+        [enc setViewport:MTLViewport{ 0, 0, double( size ), double( size ), 0, 1 }];
 
         for( const DrawInfo& d : draws[ size_t( Type::Sky ) ] )
         {
-            [enc setRenderPipelineState:skyPipelines[ size_t( ToLegacyBlend( d.pipelineState ) ) ]];
-            [enc setDepthStencilState:( d.pipelineState & DEPTH_WRITE ) ? depthTestWrite : depthTestNoWrite];
+            const bool translucent = d.pipelineState & TRANSLUCENT;
+            const bool additive    = d.pipelineState & ADDITIVE;
 
-            float model[ 16 ] = RG_MATRIX_TRANSPOSED( d.transform );
-            float mvp[ 16 ];
-            Matrix::Multiply( mvp, model, viewProj );
-            EncodeLegacyDraw( enc, d, mvp );
+            // RenderCubemap::InitPipelines: RasterizerPipelines with "VertDefaultMultiview", "FragSkyCubemap"
+            auto desc = MetalComputePipelines::RenderDesc{
+                .vertexShader      = "RsRasterizerMultiview_vert",
+                .fragmentShader    = "RsSkyCubemap_frag",
+                .vertexConstants   = { { 0, vertexColorGamma ? 1u : 0u }, { 1, face } },
+                .fragmentConstants = { { 0, ( d.pipelineState & ALPHA_TEST ) ? 1u : 0u } },
+                .depthFormat       = DepthFormat,
+                .lines             = !!( d.pipelineState & DRAW_AS_LINES ),
+            };
+            desc.colorFormats[ 0 ] = skyCubemap.pixelFormat;
+            desc.blends[ 0 ]       = MetalComputePipelines::Blend{
+                      additive || translucent,
+                      translucent ? MTLBlendFactorSourceAlpha : MTLBlendFactorOne,
+                      translucent ? ( additive ? MTLBlendFactorOne : MTLBlendFactorOneMinusSourceAlpha ) : MTLBlendFactorOne,
+            };
+
+            auto push = RasterizedMultiviewPushConst{
+                .model        = {},
+                .packedColor  = d.colorFactor_base,
+                .textureIndex = d.texture_base,
+                .skyCloudMode = d.skyCloudMode,
+            };
+            Matrix::ToMat4Transposed( push.model, d.transform );
+
+            shaders.BindRender( enc, desc, bindings, { reinterpret_cast< const uint8_t* >( &push ), sizeof( push ) } );
+            [enc setDepthStencilState:shaders.GetDepthState( d.pipelineState & DEPTH_TEST, d.pipelineState & DEPTH_WRITE )];
+
+            EncodeDraw( enc, d );
         }
         [enc endEncoding];
     }

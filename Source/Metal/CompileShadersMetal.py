@@ -101,6 +101,10 @@ def main():
     parser.add_argument( "--output", required=True, help="output folder for .metallib-s" )
     parser.add_argument( "--spirv-to-msl", required=True, help="Tools/SpirvToMsl executable" )
     parser.add_argument( "--glslang" )
+    # without Xcode's Metal toolchain: the MSL sources are put to the output folder,
+    # and compiled at run time (MetalComputePipelines)
+    parser.add_argument( "--msl-only", action="store_true" )
+    parser.add_argument( "--only", nargs="*", help="compile only these shader files" )
     args = parser.parse_args()
 
     glslang = find_tool( "glslangValidator", args.glslang )
@@ -108,8 +112,19 @@ def main():
     os.makedirs( args.build, exist_ok=True )
     os.makedirs( args.output, exist_ok=True )
 
+    mslOnly = args.msl_only
+    if not mslOnly:
+        try:
+            run( [ "xcrun", "-sdk", "macosx", "metal", "--version" ] )
+        except ( ToolError, OSError ) as e:
+            print( "Note: Xcode's Metal toolchain is not available, shaders will be compiled at run time "
+                   "(to install it: xcodebuild -downloadComponent MetalToolchain)" )
+            mslOnly = True
+
     failed = []
     for filename, entry in SHADERS.items():
+      if args.only and filename not in args.only:
+          continue
       try:
         src = os.path.join( args.shaders, filename )
 
@@ -130,9 +145,16 @@ def main():
         threads = os.path.join( args.output, entry + ".threads" ) if stage == "comp" else "-"
         run( [ args.spirv_to_msl, spv, msl, entry, threads ] )
 
-        run( [ "xcrun", "-sdk", "macosx", "metal", "-std=metal3.1", "-O3", "-c", msl, "-o", air ] )
-        run( [ "xcrun", "-sdk", "macosx", "metallib", air, "-o", os.path.join( args.output, entry + ".metallib" ) ] )
-        print( "Compiled " + filename )
+        if mslOnly:
+            shutil.copyfile( msl, os.path.join( args.output, entry + ".metal" ) )
+            stale = os.path.join( args.output, entry + ".metallib" )
+            if os.path.exists( stale ):
+                os.remove( stale )
+            print( "Translated " + filename )
+        else:
+            run( [ "xcrun", "-sdk", "macosx", "metal", "-std=metal3.1", "-O3", "-c", msl, "-o", air ] )
+            run( [ "xcrun", "-sdk", "macosx", "metallib", air, "-o", os.path.join( args.output, entry + ".metallib" ) ] )
+            print( "Compiled " + filename )
       except ToolError as e:
         failed.append( filename )
         print( "FAILED " + filename + "\n" + "\n".join( str( e ).splitlines()[ :12 ] ) )

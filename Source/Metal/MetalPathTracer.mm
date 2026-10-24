@@ -134,6 +134,60 @@ RTGL1::MetalPathTracer::MetalPathTracer( id< MTLDevice >        _device,
         d.rAddressMode           = MTLSamplerAddressModeClampToEdge;
         d.supportArgumentBuffers = YES;
         volumeSampler            = [device newSamplerStateWithDescriptor:d];
+
+        // Volumetric::CreateSampler: the cloud map wraps around in U
+        d.sAddressMode = MTLSamplerAddressModeRepeat;
+        cloudSampler   = [device newSamplerStateWithDescriptor:d];
+    }
+
+    // Volumetric::CreateImages: Doom 64 RT's illumination volumes (ILLUMINATION_VOLUME_FORMAT),
+    // zeroed, as the previous one is read
+    for( auto& v : illumination )
+    {
+        auto* d       = [MTLTextureDescriptor new];
+        d.textureType = MTLTextureType3D;
+        d.pixelFormat = MTLPixelFormatRG11B10Float;
+        d.width       = VOLUMETRIC_SIZE_X;
+        d.height      = VOLUMETRIC_SIZE_Y;
+        d.depth       = VOLUMETRIC_SIZE_Z;
+        d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        d.storageMode = MTLStorageModeShared;
+        v             = [device newTextureWithDescriptor:d];
+        v.label       = @"Illumination Volume";
+
+        const auto zeros = std::vector< uint32_t >( size_t( VOLUMETRIC_SIZE_X ) * VOLUMETRIC_SIZE_Y, 0 );
+        for( uint32_t z = 0; z < VOLUMETRIC_SIZE_Z; z++ )
+        {
+            [v replaceRegion:MTLRegionMake3D( 0, 0, z, VOLUMETRIC_SIZE_X, VOLUMETRIC_SIZE_Y, 1 )
+                 mipmapLevel:0
+                       slice:0
+                   withBytes:zeros.data()
+                 bytesPerRow:VOLUMETRIC_SIZE_X * sizeof( uint32_t )
+               bytesPerImage:0];
+        }
+    }
+    // the cloud maps, cleared to "no cloud": rgb = 0, transmittance = 1
+    for( auto& c : cloudMap )
+    {
+        auto* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                     width:CLOUDMAP_WIDTH
+                                                                    height:CLOUDMAP_HEIGHT
+                                                                 mipmapped:NO];
+        d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        d.storageMode = MTLStorageModeShared;
+        c             = [device newTextureWithDescriptor:d];
+        c.label       = @"Cloud Map";
+
+        constexpr uint16_t HalfOne  = 0x3C00;
+        auto               noCloud = std::vector< uint16_t >( size_t( CLOUDMAP_WIDTH ) * CLOUDMAP_HEIGHT * 4, 0 );
+        for( size_t i = 3; i < noCloud.size(); i += 4 )
+        {
+            noCloud[ i ] = HalfOne;
+        }
+        [c replaceRegion:MTLRegionMake2D( 0, 0, CLOUDMAP_WIDTH, CLOUDMAP_HEIGHT )
+             mipmapLevel:0
+               withBytes:noCloud.data()
+             bytesPerRow:CLOUDMAP_WIDTH * 4 * sizeof( uint16_t )];
     }
 
     tonemapping = [device newBufferWithLength:sizeof( ShTonemapping ) options:MTLResourceStorageModePrivate];
@@ -419,6 +473,62 @@ void RTGL1::MetalPathTracer::PrepareReservoirs( uint32_t width, uint32_t height 
     reservoirsHeight = height;
 }
 
+void RTGL1::MetalPathTracer::BindVolumetric( MetalBindingTable& b, uint32_t frameIndex )
+{
+    const uint32_t prevFrame = ( frameIndex + MAX_FRAMES_IN_FLIGHT - 1 ) % MAX_FRAMES_IN_FLIGHT;
+
+    // Tonemapping::GetDescSet: Doom 64 RT's sky and world raster shaders read the exposure too
+    b.SetBuffer( "Historam", tonemapping );
+
+    // Volumetric::UpdateDescriptors
+    b.SetTexture( "g_volumetric", scattering[ frameIndex ] );
+    b.SetTexture( "g_volumetric_Sampler", scattering[ frameIndex ] );
+    b.SetSampler( "g_volumetric_SamplerSmplr", volumeSampler );
+    b.SetTexture( "g_volumetric_Sampler_Prev", scattering[ prevFrame ] );
+    b.SetSampler( "g_volumetric_Sampler_PrevSmplr", volumeSampler );
+
+    b.SetTexture( "g_illuminationVolume", illumination[ frameIndex ] );
+    b.SetTexture( "g_illuminationVolume_Sampler", illumination[ prevFrame ] );
+    b.SetSampler( "g_illuminationVolume_SamplerSmplr", volumeSampler );
+
+    b.SetTexture( "g_cloudMap", cloudMap[ frameIndex ] );
+    b.SetTexture( "g_cloudMap_Sampler", cloudMap[ frameIndex ] );
+    b.SetSampler( "g_cloudMap_SamplerSmplr", cloudSampler );
+    b.SetTexture( "g_cloudMap_Sampler_Prev", cloudMap[ prevFrame ] );
+    b.SetSampler( "g_cloudMap_Sampler_PrevSmplr", cloudSampler );
+}
+
+void RTGL1::MetalPathTracer::ProcessClouds( id< MTLCommandBuffer >   cmd,
+                                            const MetalBindingTable& b,
+                                            uint32_t                 frameIndex,
+                                            bool                     enabled )
+{
+    // Volumetric::ProcessClouds: when off, the map is written once per frame index (to "no cloud"),
+    // then the pass is skipped
+    if( !enabled )
+    {
+        if( cloudMapClearedMask & ( 1u << frameIndex ) )
+        {
+            return;
+        }
+        cloudMapClearedMask |= ( 1u << frameIndex );
+    }
+    else
+    {
+        cloudMapClearedMask = 0;
+    }
+
+    id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+    enc.label                          = @"Volumetric clouds";
+    shaders.DispatchThreadgroups( enc,
+                                  "CmCloudMap",
+                                  {},
+                                  b,
+                                  GroupCount( CLOUDMAP_WIDTH, COMPUTE_CLOUDMAP_GROUP_SIZE_X ),
+                                  GroupCount( CLOUDMAP_HEIGHT, COMPUTE_CLOUDMAP_GROUP_SIZE_Y ) );
+    [enc endEncoding];
+}
+
 id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >              cmd,
                                                  const Params&                       p,
                                                  const RgDrawFrameInfo&              drawInfo,
@@ -459,16 +569,10 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
 
     MakeLpmParams( lpmParams[ frameIndex ].contents, tnmp, p.hdr );
 
-    b.SetBuffer( "Historam", tonemapping );
     b.SetBuffer( "LpmParams", lpmParams[ frameIndex ] );
     b.SetBuffer( "RestirIndirectReservoirs", indirectReservoirs[ frameIndex ] );
     b.SetBuffer( "RestirIndirectReservoirs_Prev", indirectReservoirs[ prevFrame ] );
-    // Volumetric::UpdateDescriptors
-    b.SetTexture( "g_volumetric", scattering[ frameIndex ] );
-    b.SetTexture( "g_volumetric_Sampler", scattering[ frameIndex ] );
-    b.SetSampler( "g_volumetric_SamplerSmplr", volumeSampler );
-    b.SetTexture( "g_volumetric_Sampler_Prev", scattering[ prevFrame ] );
-    b.SetSampler( "g_volumetric_Sampler_PrevSmplr", volumeSampler );
+    BindVolumetric( b, frameIndex );
 
     const MetalComputePipelines::Constants primaryConstants = {
         { 0, p.primaryRaysMaxAlbedoLayers },
@@ -726,6 +830,23 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         }
     };
 
+    // ImageComposition::ComposeVolume: 'targetIdx' is 0 for FINAL, 1 for UPSCALED_PING, 2 for UPSCALED_PONG
+    auto l_composeVolume = [ & ]( uint32_t targetIdx, id< MTLTexture > target ) {
+        if( !p.volumePostComp )
+        {
+            return;
+        }
+        const uint32_t w = targetIdx == 0 ? p.width : uint32_t( target.width );
+        const uint32_t h = targetIdx == 0 ? p.height : uint32_t( target.height );
+
+        const uint32_t push[ 4 ] = { targetIdx, w, h, 0 };
+
+        BeginPass( cmd, enc, @"Volume compose (post-upscale)" );
+        shaders.DispatchThreadgroups(
+            enc, "CmVolumeCompose", {}, b, GroupCount( w, 16 ), GroupCount( h, 16 ), 1, AsBytes( push ) );
+        EndPass( enc );
+    };
+
     if( p.upscaler == Upscaler::MetalFX )
     {
         if( !profiling )
@@ -810,11 +931,17 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
             enc.label = @"RTGL1 post processing";
         }
 
+        // Doom 64 RT: ImageComposition::ComposeVolume, the medium after the upscaler and before the classic pass
+        l_composeVolume( 2, pong );
+
         // Rasterizer::DrawClassic, into the upscaled image
         l_rasterClassic( pong );
     }
     else
     {
+        // Doom 64 RT: ImageComposition::ComposeVolume, at the render size, as there's no upscaler
+        l_composeVolume( 0, final );
+
         // Rasterizer::DrawClassic, into the final image before the blit
         l_rasterClassic( final );
 
