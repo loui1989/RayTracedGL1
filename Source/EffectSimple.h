@@ -20,7 +20,8 @@
 
 #pragma once
 
-#include "EffectBase.h"
+#include <algorithm>
+#include <cstddef>
 
 template< size_t N >
 struct StringLiteral
@@ -28,6 +29,13 @@ struct StringLiteral
     constexpr StringLiteral( const char ( &str )[ N ] ) { std::copy_n( str, N, value ); }
     char value[ N ];
 };
+
+#ifdef RG_USE_METAL
+    // the same EffectSimple interface for EffectSimple_Instances.h, without Vulkan
+    #include "Metal/MetalEffectSimple.h"
+#else
+
+#include "EffectBase.h"
 
 namespace RTGL1
 {
@@ -148,3 +156,5 @@ private:
 };
 
 }
+
+#endif // RG_USE_METAL

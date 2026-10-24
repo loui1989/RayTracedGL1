@@ -1,0 +1,154 @@
+// Copyright (c) 2026 RTGL1 Metal backend contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#version 460
+
+// Reactive mask for an external temporal denoiser (MetalFX temporal denoised scaler):
+// how much to ignore the history, per pixel. The same as SVGF's temporal accumulation
+// limits its history by the gradients (antilag) and by the geometry matching (no prev info),
+// and as the upscalers get the reactivity (reflections / refractions, rasterized geometry).
+// Must run after the rasterization to the final image.
+
+#define DESC_SET_FRAMEBUFFERS 0
+#define DESC_SET_GLOBAL_UNIFORM 1
+#define DESC_SET_VERTEX_DATA 3
+#include "ShaderCommonGLSLFunc.h"
+
+layout( local_size_x = COMPUTE_COMPOSE_GROUP_SIZE_X, local_size_y = COMPUTE_COMPOSE_GROUP_SIZE_Y, local_size_z = 1 ) in;
+
+layout( set = 2, binding = 0, r8 ) uniform writeonly image2D denoiserReactive;
+// the previous frame's 'denoiserReactive'
+layout( set = 2, binding = 1, r8 ) uniform readonly image2D denoiserReactive_Prev;
+// where not to denoise: the sky is noise-free
+layout( set = 2, binding = 2, r8 ) uniform writeonly image2D denoiserStrength;
+
+// gradients are noisy themselves, so only the strong ones
+// (moving shadows, e.g. of enemies or the player)
+const float GradientThreshold = 0.05;
+const float GradientScale     = 2.0;
+// the history of the mask: after a change, it's ignored for a few frames, gradually less
+// (the mask is of the render size, the denoiser's history is of the upscaled one)
+const float ReactiveHistoryDecay = 0.6;
+// the upscalers' reactivity is 0.8 for reflections / refractions (UPSCALER_REACTIVITY_REFLREFR),
+// but for a denoiser with a long history it's not enough: the motion vectors are of the reflecting surface
+const float ReactivityScale = 1.25;
+
+void main()
+{
+    const ivec2 pix = ivec2( gl_GlobalInvocationID );
+
+    if( pix.x >= uint( globalUniform.renderWidth ) || pix.y >= uint( globalUniform.renderHeight ) )
+    {
+        return;
+    }
+
+    const ivec2 regularPix = getRegularPixFromCheckerboardPix( pix );
+
+    float reactive = clamp( texelFetch( framebufReactivity_Sampler, regularPix, 0 ).r * ReactivityScale, 0.0, 1.0 );
+
+#if GRADIENT_ESTIMATION_ENABLED
+    // antilag: lighting changed (moving lights, animated geometry, opened doors)
+    const vec3  gradDIS = texelFetch( framebufDISPingGradient_Sampler, pix / COMPUTE_ASVGF_STRATA_SIZE, 0 ).xyz;
+    const float grad    = max( gradDIS[ 0 ], max( gradDIS[ 1 ], gradDIS[ 2 ] ) );
+    reactive = max( reactive, clamp( ( grad - GradientThreshold ) * GradientScale, 0.0, 1.0 ) );
+#endif
+
+    // no history for the geometry: just appeared, or its shape changed (an animation frame of a model);
+    // there are no motion vectors for such changes, so the history must be ignored
+    // (also of the neighbours: the mask is upscaled, so the edges must be covered too)
+    {
+        const ivec2 size = ivec2( globalUniform.renderWidth, globalUniform.renderHeight );
+        for( int dy = -1; dy <= 1 && reactive < 1.0; dy++ )
+        {
+            for( int dx = -1; dx <= 1; dx++ )
+            {
+                const ivec2 p = regularPix + ivec2( dx, dy );
+                if( any( lessThan( p, ivec2( 0 ) ) ) || any( greaterThanEqual( p, size ) ) )
+                {
+                    continue;
+                }
+
+                const vec4 v = texelFetch( framebufVisibilityBuffer_Sampler, getCheckerboardPix( p ), 0 );
+                if( floatBitsToUint( v[ 0 ] ) == UINT32_MAX || floatBitsToUint( v[ 1 ] ) == UINT32_MAX )
+                {
+                    continue;
+                }
+
+                int  instanceID, instCustomIndex, localGeomIndex, primIndex;
+                vec2 bary;
+                unpackVisibilityBuffer( v, instanceID, instCustomIndex, localGeomIndex, primIndex, bary );
+
+                if( ( geometryInstances[ instanceID ].flags & GEOM_INST_FLAG_NO_HISTORY ) != 0 )
+                {
+                    reactive = 1.0;
+                    break;
+                }
+            }
+        }
+    }
+
+    const vec2  motionCurToPrev = texelFetch( framebufMotion_Sampler, pix, 0 ).rg;
+    const ivec2 size            = ivec2( globalUniform.renderWidth, globalUniform.renderHeight );
+    const ivec2 prevRegular =
+        ivec2( floor( ( ( vec2( regularPix ) + 0.5 ) / vec2( size ) + motionCurToPrev ) * vec2( size ) ) );
+
+    // the mask's history
+    if( reactive < 1.0 && all( greaterThanEqual( prevRegular, ivec2( 0 ) ) ) && all( lessThan( prevRegular, size ) ) )
+    {
+        reactive = max( reactive, imageLoad( denoiserReactive_Prev, prevRegular ).r * ReactiveHistoryDecay );
+    }
+
+    // what was visible at this point in the previous frame: if that geometry disappeared or changed its shape,
+    // the history here is of that geometry (e.g. a previous animation frame), not of the current one
+    if( reactive < 1.0 )
+    {
+        for( int dy = -1; dy <= 1 && reactive < 1.0; dy++ )
+        {
+            for( int dx = -1; dx <= 1; dx++ )
+            {
+                const ivec2 p = prevRegular + ivec2( dx, dy );
+                if( any( lessThan( p, ivec2( 0 ) ) ) || any( greaterThanEqual( p, size ) ) )
+                {
+                    continue;
+                }
+
+                const vec4 vp = texelFetch( framebufVisibilityBuffer_Prev_Sampler, getCheckerboardPix( p ), 0 );
+                if( floatBitsToUint( vp[ 0 ] ) == UINT32_MAX || floatBitsToUint( vp[ 1 ] ) == UINT32_MAX )
+                {
+                    continue;
+                }
+
+                int prevInstanceID, instCustomIndex;
+                unpackInstanceIdAndCustomIndex( floatBitsToUint( vp[ 0 ] ), prevInstanceID, instCustomIndex );
+
+                int curIndex;
+                if( !getCurrentGeometryIndexByPrev( prevInstanceID, 0, curIndex ) ||
+                    ( geometryInstances[ curIndex ].flags & GEOM_INST_FLAG_NO_HISTORY ) != 0 )
+                {
+                    reactive = 1.0;
+                    break;
+                }
+            }
+        }
+    }
+
+    imageStore( denoiserReactive, regularPix, vec4( reactive ) );
+    imageStore( denoiserStrength, regularPix, vec4( isSkyPix( pix ) ? 1.0 : 0.0 ) );
+}

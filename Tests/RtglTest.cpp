@@ -11,6 +11,8 @@
 
 #ifdef _WIN32
     #define RG_USE_SURFACE_WIN32
+#elif defined( __APPLE__ )
+    #define RG_USE_SURFACE_METAL
 #else
     #define RG_USE_SURFACE_XLIB
 #endif
@@ -28,10 +30,17 @@ RG_D3D12CORE_HELPER( ASSET_DIRECTORY )
 #include <GLFW/glfw3.h>
 #ifdef _WIN32
     #define GLFW_EXPOSE_NATIVE_WIN32
+#elif defined( __APPLE__ )
+    #define GLFW_EXPOSE_NATIVE_COCOA
 #else
     #define GLFW_EXPOSE_NATIVE_X11
 #endif
 #include <GLFW/glfw3native.h>
+
+#ifdef __APPLE__
+// RtglTestMetal.mm
+void* RtglTest_AttachMetalLayer( void* nsWindow );
+#endif
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -820,6 +829,10 @@ int main( int argc, char* argv[] )
         .hinstance = GetModuleHandle( NULL ),
         .hwnd      = glfwGetWin32Window( g_GlfwHandle ),
     };
+#elif defined( __APPLE__ )
+    auto metalInfo = RgMetalSurfaceCreateInfo{
+        .pLayer = RtglTest_AttachMetalLayer( glfwGetCocoaWindow( g_GlfwHandle ) ),
+    };
 #else
     RgXlibSurfaceCreateInfo xlibInfo = {
         .dpy    = glfwGetX11Display(),
@@ -838,6 +851,8 @@ int main( int argc, char* argv[] )
 
 #ifdef _WIN32
         .pWin32SurfaceInfo = &win32Info,
+#elif defined( __APPLE__ )
+        .pMetalSurfaceCreateInfo = &metalInfo,
 #else
         .pXlibSurfaceCreateInfo = &xlibInfo,
 #endif

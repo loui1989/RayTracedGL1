@@ -41,11 +41,11 @@ bool albedoThreePoint()
 // sampler's own bias so the hardware lands on exactly that level.
 vec4 getTextureSampleThreePoint( uint textureIndex, const vec2 uv, float lod )
 {
-    const int   levels = textureQueryLevels( globalTextures[ nonuniformEXT( textureIndex ) ] );
+    const int   levels = textureQueryLevels( globalTextures_Get( textureIndex ) );
     const int   level  = clamp( int( floor( lod + 0.5 ) ), 0, max( levels - 1, 0 ) );
     const float hwLod  = float( level ) - globalUniform.texFilterParams.y;
 
-    const vec2 size = vec2( textureSize( globalTextures[ nonuniformEXT( textureIndex ) ], level ) );
+    const vec2 size = vec2( textureSize( globalTextures_Get( textureIndex ), level ) );
     const vec2 inv  = 1.0 / size;
     const vec2 p    = uv * size - 0.5;
     const vec2 f    = fract( p );

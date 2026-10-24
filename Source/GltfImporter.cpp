@@ -860,7 +860,7 @@ namespace
 
         constexpr auto candelaToLuminousFlux = []( float lumensPerSteradian ) {
             // to lumens
-            return lumensPerSteradian * ( 4 * float( Utils::M_PI ) );
+            return lumensPerSteradian * ( 4 * float( Utils::Pi ) );
         };
 
 

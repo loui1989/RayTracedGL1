@@ -60,6 +60,26 @@ GLSL_TYPE_NAMES = {
 }
 
 
+# Metal structs mirror the C layout byte for byte. MSL vectors are aligned to
+# their size (float3 even takes 16 bytes), so vec3 always uses a packed type,
+# and vec2 / vec4 use one only when the C offset isn't aligned for them.
+MSL_TYPE_NAMES = {
+    TYPE_FLOAT32:       "float",
+    TYPE_INT32:         "int",
+    TYPE_UINT32:        "uint",
+    (TYPE_FLOAT32,  2): "float2",
+    (TYPE_FLOAT32,  3): "float3",
+    (TYPE_FLOAT32,  4): "float4",
+    (TYPE_INT32,    2): "int2",
+    (TYPE_INT32,    3): "int3",
+    (TYPE_INT32,    4): "int4",
+    (TYPE_UINT32,   2): "uint2",
+    (TYPE_UINT32,   3): "uint3",
+    (TYPE_UINT32,   4): "uint4",
+    (TYPE_FLOAT32, 44): "metal::float4x4",
+}
+
+
 TYPE_ACTUAL_SIZES = {
     TYPE_FLOAT32:   4,
     TYPE_INT32:     4,
@@ -180,7 +200,38 @@ GLSL_IMAGE_FORMATS = {
     (TYPE_PACK_E5,  COMPONENT_RGB):    "r32ui",
 }
 
-GLSL_IMAGE_2D_TYPE = { 
+METAL_IMAGE_FORMATS = {
+    (TYPE_UNORM8,   COMPONENT_R):       "MTLPixelFormatR8Unorm",
+    (TYPE_UNORM8,   COMPONENT_RG):      "MTLPixelFormatRG8Unorm",
+    (TYPE_UNORM8,   COMPONENT_RGBA):    "MTLPixelFormatRGBA8Unorm",
+
+    (TYPE_UINT8,    COMPONENT_R):       "MTLPixelFormatR8Uint",
+    (TYPE_UINT8,    COMPONENT_RG):      "MTLPixelFormatRG8Uint",
+    (TYPE_UINT8,    COMPONENT_RGBA):    "MTLPixelFormatRGBA8Uint",
+
+    (TYPE_UINT16,   COMPONENT_R):       "MTLPixelFormatR16Uint",
+    (TYPE_UINT16,   COMPONENT_RG):      "MTLPixelFormatRG16Uint",
+    (TYPE_UINT16,   COMPONENT_RGBA):    "MTLPixelFormatRGBA16Uint",
+
+    (TYPE_UINT32,   COMPONENT_R):       "MTLPixelFormatR32Uint",
+    (TYPE_UINT32,   COMPONENT_RG):      "MTLPixelFormatRG32Uint",
+    (TYPE_UINT32,   COMPONENT_RGBA):    "MTLPixelFormatRGBA32Uint",
+
+    (TYPE_FLOAT16,  COMPONENT_R):       "MTLPixelFormatR16Float",
+    (TYPE_FLOAT16,  COMPONENT_RG):      "MTLPixelFormatRG16Float",
+    (TYPE_FLOAT16,  COMPONENT_RGBA):    "MTLPixelFormatRGBA16Float",
+
+    (TYPE_FLOAT32,  COMPONENT_R):       "MTLPixelFormatR32Float",
+    (TYPE_FLOAT32,  COMPONENT_RG):      "MTLPixelFormatRG32Float",
+    (TYPE_FLOAT32,  COMPONENT_RGBA):    "MTLPixelFormatRGBA32Float",
+
+    # not RG11B10Float: it can't be read_write, but RaygenPrimary.inl loads and stores Albedo
+    (TYPE_PACK_11,  COMPONENT_RGB):     "MTLPixelFormatRGBA16Float",
+    # same manual packing as on Vulkan
+    (TYPE_PACK_E5,  COMPONENT_RGB):     "MTLPixelFormatR32Uint",
+}
+
+GLSL_IMAGE_2D_TYPE = {
     TYPE_FLOAT32    : "image2D",
     TYPE_INT32      : "iimage2D",
     TYPE_UINT32     : "uimage2D",
@@ -376,6 +427,9 @@ CONST = {
     "GEOM_INST_FLAG_GENERATE_NORMALS"       : BIT( 29 ),
     "GEOM_INST_FLAG_INVERTED_NORMALS"       : BIT( 30 ),
     "GEOM_INST_FLAG_IS_DYNAMIC"             : BIT( 31 ),
+    # ShGeometryInstance::flags2 (all bits of 'flags' are used)
+    # Metal: no previous frame data, see CmDenoiserReactive
+    "GEOM_INST_FLAGS2_NO_HISTORY"           : BIT( 0 ),
 
     "SKY_TYPE_COLOR"                        : 0,
     "SKY_TYPE_CUBEMAP"                      : 1,
@@ -1636,7 +1690,8 @@ GEOM_INSTANCE_STRUCT = [
     # units, animated separately from emissiveMult (which is then screen-only).
     # See RgMeshPrimitiveInfo::emissiveGi. Padded to a whole 16-byte row.
     (TYPE_FLOAT32,      1,      "emissiveMultGi",       1),
-    (TYPE_UINT32,       1,      "_padGi0",              1),
+    # Metal: GEOM_INST_FLAGS2_*
+    (TYPE_UINT32,       1,      "flags2",               1),
     (TYPE_UINT32,       1,      "_padGi1",              1),
     (TYPE_UINT32,       1,      "_padGi2",              1),
 ]
@@ -2038,6 +2093,78 @@ def getStruct(name, definition, typeNames, alignmentType, breakType):
     return r
 
 
+def getMSLMemberType(baseType, dim, offset, structName, mname):
+    if dim == 1:
+        return MSL_TYPE_NAMES[baseType]
+    if dim == 44:
+        if offset % 16 != 0:
+            raise Exception("Matrix %s.%s must be 16-byte aligned for Metal (offset %d)" % (structName, mname, offset))
+        return MSL_TYPE_NAMES[(baseType, dim)]
+    if dim > 4:
+        raise Exception("Matrix type of %s.%s is not supported for Metal" % (structName, mname))
+    alignment = 16 if dim == 3 else TYPE_ACTUAL_SIZES[(baseType, dim)]
+    if dim == 3 or offset % alignment != 0:
+        return "packed_" + MSL_TYPE_NAMES[(baseType, dim)]
+    return MSL_TYPE_NAMES[(baseType, dim)]
+
+
+# Same members and padding as the C struct, so the static_asserts check
+# that the Metal compiler places every member at the C offset.
+def getStructMSL(name, definition, alignmentType, breakType):
+    r = "struct " + name + "\n{\n"
+    checks = ""
+
+    global CURRENT_PAD_INDEX
+    CURRENT_PAD_INDEX = 0
+
+    offset = 0
+
+    for baseType, dim, mname, count in definition:
+        assert(count > 0)
+        memberOffset = offset
+
+        if count == 1:
+            r += "    %s %s;\n" % (getMSLMemberType(baseType, dim, offset, name, mname), mname)
+            offset += getMemberActualSize(baseType, dim, 1)
+        elif dim == 44:
+            r += "    %s %s[%d];\n" % (getMSLMemberType(baseType, dim, offset, name, mname), mname, count)
+            offset += getMemberActualSize(baseType, dim, count)
+        elif breakType != STRUCT_BREAK_TYPE_NONE:
+            if dim <= 4:
+                n = align4(count * dim)
+            else:
+                n = align4(count * int(TYPE_ACTUAL_SIZES[(baseType, dim)] / 4))
+            r += "    %s %s[%d];\n" % (MSL_TYPE_NAMES[baseType], mname, n)
+            offset += 4 * n
+        elif dim == 1:
+            r += "    %s %s[%d];\n" % (MSL_TYPE_NAMES[baseType], mname, count)
+            offset += getMemberActualSize(baseType, dim, count)
+        else:
+            r += "    %s %s[%d];\n" % (getMSLMemberType(baseType, dim, offset, name, mname), mname, count)
+            offset += getMemberActualSize(baseType, dim, count)
+
+        checks += "static_assert(__builtin_offsetof(%s, %s) == %d, \"%s.%s offset must match C\");\n" % (name, mname, memberOffset, name, mname)
+
+    if (alignmentType == STRUCT_ALIGNMENT_STD430) and offset % 16 != 0:
+        if (offset % 16) % 4 != 0:
+            raise Exception("Size of struct %s is not 4-byte aligned!" % name)
+        uint32ToAdd = (align(offset, 16) - offset) // 4
+        r += getPadsForStruct(MSL_TYPE_NAMES, uint32ToAdd)
+        offset += 4 * uint32ToAdd
+
+    r += "};\n"
+    r += checks
+    r += "static_assert(sizeof(%s) == %d, \"%s size must match C\");\n" % (name, offset, name)
+    return r
+
+
+def getAllStructDefsMSL():
+    return "\n".join(
+        getStructMSL(name, structDef, alignmentType, breakType)
+        for name, (structDef, onlyForGLSL, alignmentType, breakType) in STRUCTS.items()
+    ) + "\n"
+
+
 def getAllStructDefs(typeNames):
     return "\n".join(
         getStruct(name, structDef, typeNames, alignmentType, breakType)
@@ -2155,6 +2282,80 @@ def getAllGLSLFramebufDeclarations():
         ) \
         \
         + "\n\n#endif\n"
+
+
+# returns (image name, base format, components, flags, swap partner offset) for each framebuf image,
+# including _Prev ones: a framebuf and its _Prev swap their images each frame
+def getAllFramebufImages():
+    images = []
+    for name, (baseFormat, components, flags) in FRAMEBUFFERS.items():
+        if flags & FRAMEBUF_FLAGS_STORE_PREV:
+            images.append((name, baseFormat, components, flags, +1))
+            images.append((name + FRAMEBUF_STORE_PREV_POSTFIX, baseFormat, components, flags & ~FRAMEBUF_FLAGS_STORE_PREV, -1))
+        else:
+            images.append((name, baseFormat, components, flags, 0))
+    return images
+
+
+def getMetalFramebufSizeDivisor(name, flags):
+    # the same as Bloom::MakeSize
+    if flags & FRAMEBUF_FLAGS_FORCE_SIZE_BLOOM:
+        if name == "Bloom":
+            return 2
+        assert name.startswith("Bloom_Mip")
+        return 2 ** (int(name[len("Bloom_Mip"):]) + 1)
+    if flags & FRAMEBUF_FLAGS_FORCE_SIZE_1_3:
+        return 3
+    return 1
+
+
+def getAllMSLFramebufDeclarations():
+    return "// framebuffer indices\n" \
+        + "\n".join(
+            "#define FB_IMAGE_INDEX_%s %d" % (s, d) for (s, d) in getAllFramebufEnumTuples()
+        ) + "\n\n"
+
+
+def getAllMetalFramebufHostDeclarations():
+    images = getAllFramebufImages()
+
+    def flagsStr(flags):
+        r = " | ".join(
+            "FB_IMAGE_FLAGS_" + flName
+            for (flName, flValue) in FRAMEBUF_FLAGS_ENUM.items()
+            if flValue & flags
+        )
+        return r if r else "0"
+
+    rows = "".join(
+        "    { \"%s\", %s, %s, %d, %d, %s, %s },\n" % (
+            FRAMEBUF_PREFIX + name,
+            METAL_IMAGE_FORMATS[(baseFormat, components)],
+            flagsStr(flags),
+            swap,
+            getMetalFramebufSizeDivisor(name.replace(FRAMEBUF_STORE_PREV_POSTFIX, ""), flags),
+            "false" if flags & FRAMEBUF_FLAGS_NO_SAMPLER else "true",
+            "true" if flags & FRAMEBUF_FLAGS_BILINEAR_SAMPLER else "false",
+        )
+        for (name, baseFormat, components, flags, swap) in images
+    )
+
+    return ("struct ShFramebufferMetalInfo\n{\n"
+            "    // name in the shaders; its sampled variant is <name>_Sampler\n"
+            "    const char*           name;\n"
+            "    MTLPixelFormat        format;\n"
+            "    FramebufferImageFlags flags;\n"
+            "    // offset to the index of the image that swaps with this one each frame (<name>_Prev), or 0\n"
+            "    int32_t               swapPartnerOffset;\n"
+            "    // the size is divided by this (bloom mips, 1/3 size)\n"
+            "    uint32_t              sizeDivisor;\n"
+            "    bool                  hasSampler;\n"
+            "    bool                  bilinearSampler;\n"
+            "};\n\n"
+            "// indexed by FramebufferImageIndex\n"
+            "inline constexpr ShFramebufferMetalInfo ShFramebuffers_MetalInfos[] = \n{\n%s};\n"
+            "static_assert( sizeof( ShFramebuffers_MetalInfos ) / sizeof( ShFramebuffers_MetalInfos[ 0 ] ) == ShFramebuffers_Count );\n\n"
+            ) % (rows)
 
 
 def removeCoupledDuplicateChars(str, charToRemove = '_'):
@@ -2324,6 +2525,27 @@ def writeToGLSL(f):
     f.write(getAllGLSLFramebufDeclarations())
 
 
+def writeToMSL(f):
+    f.write(FILE_HEADER)
+    f.write("#pragma once\n\n")
+    f.write("#include <metal_stdlib>\n\n")
+    f.write(getAllConstDefs(CONST))
+    f.write(getAllConstDefs(CONST_GLSL_ONLY))
+    f.write(getAllStructDefsMSL())
+    f.write(getAllMSLFramebufDeclarations())
+
+
+def writeToMetalHost(f):
+    f.write(FILE_HEADER)
+    f.write("#pragma once\n\n")
+    f.write("// Objective-C++ only\n")
+    f.write("#import <Metal/Metal.h>\n\n")
+    f.write("#include \"ShaderCommonCFramebuf.h\"\n\n")
+    f.write("namespace RTGL1\n{\n\n")
+    f.write(getAllMetalFramebufHostDeclarations())
+    f.write("}")
+
+
 def main():
     basePath = ""
 
@@ -2349,6 +2571,10 @@ def main():
                 writeToC(commonHeaderFile, fbHeaderFile, fbSourceFile)
     with open(basePath + "ShaderCommonGLSL.h", "w") as f:
         writeToGLSL(f)
+    with open(basePath + "ShaderCommonMSL.h", "w") as f:
+        writeToMSL(f)
+    with open(basePath + "ShaderCommonCFramebufMetal.h", "w") as f:
+        writeToMetalHost(f)
 
 # main
 if __name__ == "__main__":

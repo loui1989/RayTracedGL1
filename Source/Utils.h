@@ -234,15 +234,16 @@ namespace Utils
     RgTransform MakeTransform( const RgFloat3D& up, const RgFloat3D& forward, float scale );
     RgTransform MakeTransform( const RgFloat3D& position, const RgFloat3D& forward );
 
-    constexpr double M_PI = 3.1415926535897932384626433;
+    // not M_PI, as some platforms define it as a macro
+    constexpr double Pi = 3.1415926535897932384626433;
 
     constexpr float DegToRad( float degrees )
     {
-        return degrees * float( M_PI ) / 180.0f;
+        return degrees * float( Pi ) / 180.0f;
     }
     constexpr float RadToDeg( float radians )
     {
-        return radians * 180.0f / float( M_PI );
+        return radians * 180.0f / float( Pi );
     }
 
     constexpr uint32_t GetPreviousByModulo( uint32_t value, uint32_t count )

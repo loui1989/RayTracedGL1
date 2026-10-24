@@ -93,7 +93,18 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 layout(set = DESC_SET_TLAS, binding = BINDING_ACCELERATION_STRUCTURE_MAIN)   uniform accelerationStructureEXT topLevelAS;
 
 #ifdef DESC_SET_CUBEMAPS
+#ifdef METAL
+// see globalTextures_Get
+#define METAL_DESC_SET_CUBEMAP_SAMPLERS 13
+layout(set = DESC_SET_CUBEMAPS, binding = BINDING_CUBEMAPS) uniform textureCube globalCubemaps_Images[];
+layout(set = METAL_DESC_SET_CUBEMAP_SAMPLERS, binding = 0) uniform sampler globalCubemaps_Samplers[];
+#define globalCubemaps_Get( index )                                 \
+    samplerCube( globalCubemaps_Images[ nonuniformEXT( index ) ], \
+                 globalCubemaps_Samplers[ nonuniformEXT( index ) ] )
+#else
 layout(set = DESC_SET_CUBEMAPS, binding = BINDING_CUBEMAPS) uniform samplerCube globalCubemaps[];
+#define globalCubemaps_Get( index ) globalCubemaps[ nonuniformEXT( index ) ]
+#endif
 #endif
 
 #ifdef DESC_SET_RENDER_CUBEMAP
@@ -292,9 +303,29 @@ bool rtAlphaTestAccepts( int instanceId, uint primitiveId, vec2 b, bool media )
     return ( color.r + color.g + color.b ) / 3 * color.a + color.a >= RQ_ALPHA_THRESHOLD;
 }
 
+// The same as gl_InstanceID and gl_InstanceCustomIndexEXT in hit shaders.
+// RAY_QUERY_GROUPED_INSTANCES (the native Metal backend, MetalScene): a TLAS instance contains
+// many geometries (one per primitive), its custom index is
+// ( index of the first ShGeometryInstance << 4 ) | INSTANCE_CUSTOM_INDEX_FLAG_*
+// ('committed' of rayQueryGet* must be a constant expression, hence macros)
+#ifdef RAY_QUERY_GROUPED_INSTANCES
+    #define rqGetInstanceId( q, committed )                                              \
+        ( int( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, committed ) ) >> 4 ) + \
+          rayQueryGetIntersectionGeometryIndexEXT( q, committed ) )
+    #define rqGetInstanceCustomIndex( q, committed ) \
+        int( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, committed ) ) & 0xF )
+#else
+    #define rqGetInstanceId( q, committed )          rayQueryGetIntersectionInstanceIdEXT( q, committed )
+    #define rqGetInstanceCustomIndex( q, committed ) rayQueryGetIntersectionInstanceCustomIndexEXT( q, committed )
+#endif
+
+// One ray query object for all traces: on Metal, each one is a large intersection_query
+// that lives for the whole kernel, so several of them increase register pressure
+rayQueryEXT g_rayQuery;
+
 bool rqIsCandidateAccepted( rayQueryEXT rq, bool media )
 {
-    return rtAlphaTestAccepts( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
+    return rtAlphaTestAccepts( rqGetInstanceId( rq, false ),
                                uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
                                rayQueryGetIntersectionBarycentricsEXT( rq, false ),
                                media );
@@ -309,7 +340,7 @@ ShPayload traceRayQuery( uint rayFlags, uint cullMask, vec3 origin, float tMin, 
     p.instIdAndIndex   = UINT32_MAX;
     p.geomAndPrimIndex = UINT32_MAX;
 
-    rayQueryEXT rq;
+    #define rq g_rayQuery
     rayQueryInitializeEXT( rq, topLevelAS, rayFlags, cullMask & 0xFF, origin, tMin, direction, tMax );
 
     while( rayQueryProceedEXT( rq ) )
@@ -326,13 +357,13 @@ ShPayload traceRayQuery( uint rayFlags, uint cullMask, vec3 origin, float tMin, 
     if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
     {
         p.baryCoords     = rayQueryGetIntersectionBarycentricsEXT( rq, true );
-        p.instIdAndIndex = packInstanceIdAndCustomIndex(
-            rayQueryGetIntersectionInstanceIdEXT( rq, true ),
-            rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+        p.instIdAndIndex = packInstanceIdAndCustomIndex( rqGetInstanceId( rq, true ),
+                                                         rqGetInstanceCustomIndex( rq, true ) );
         p.geomAndPrimIndex = packGeometryAndPrimitiveIndex(
             rayQueryGetIntersectionGeometryIndexEXT( rq, true ),
             rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
     }
+    #undef rq
     return p;
 }
 
@@ -340,7 +371,7 @@ ShPayload traceRayQuery( uint rayFlags, uint cullMask, vec3 origin, float tMin, 
 // anything is hit.
 bool traceRayQueryAnyHit( uint rayFlags, uint cullMask, vec3 origin, float tMin, vec3 direction, float tMax, bool media )
 {
-    rayQueryEXT rq;
+    #define rq g_rayQuery
     rayQueryInitializeEXT( rq,
                            topLevelAS,
                            rayFlags | gl_RayFlagsTerminateOnFirstHitEXT,
@@ -361,7 +392,9 @@ bool traceRayQueryAnyHit( uint rayFlags, uint cullMask, vec3 origin, float tMin,
         }
     }
 
-    return rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionNoneEXT;
+    const bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionNoneEXT;
+    #undef rq
+    return hit;
 }
 
 ShPayload tracePrimaryRay(vec3 origin, vec3 direction)
@@ -416,7 +449,7 @@ vec3 getSkyAlbedo( vec3 direction )
     {
         direction = mat3( globalUniform.skyCubemapRotationTransform ) * direction;
 
-        return texture( globalCubemaps[ nonuniformEXT( globalUniform.skyCubemapIndex ) ],
+        return texture( globalCubemaps_Get( globalUniform.skyCubemapIndex ),
                         direction )
             .rgb;
     }

@@ -516,32 +516,7 @@ void RTGL1::ImageComposition::DestroyPipelines()
     rrPostExposurePipeline = VK_NULL_HANDLE;
 }
 
-#define A_CPU 1
-#include "Shaders/LPM/ffx_a.h"
-
-namespace
-{
-void LpmSetupOut( AU1 i, inAU4 v )
-{
-    // this function version must not be called, only one with pContext
-    assert( 0 );
-}
-
-void LpmSetupOut( void* pContext, AU1 i, const inAU4 value )
-{
-    AU1* ctl = static_cast< AU1* >( pContext );
-
-    assert( i < 24 );
-
-    ctl[ i * 4 + 0 ] = value[ 0 ];
-    ctl[ i * 4 + 1 ] = value[ 1 ];
-    ctl[ i * 4 + 2 ] = value[ 2 ];
-    ctl[ i * 4 + 3 ] = value[ 3 ];
-}
-}
-
-#include "Shaders/LPM/ffx_lpm.h"
-#include "Shaders/LPM/LpmSetupCustom.inl"
+#include "LpmParams.h"
 
 auto RTGL1::ImageComposition::SetupLpmParams( VkCommandBuffer                     cmd,
                                               uint32_t                            frameIndex,
@@ -560,56 +535,7 @@ auto RTGL1::ImageComposition::SetupLpmParams( VkCommandBuffer                   
     }
 
     void* pContext = lpmParams->GetMapped( frameIndex );
-#define LPM_RG_CONTEXT pContext,
-
-    if( !hdr )
-    {
-        float contrast = params.contrast;
-
-        varAF3( saturation ) = initAF3( params.saturation.data[ 0 ], //
-                                        params.saturation.data[ 1 ],
-                                        params.saturation.data[ 2 ] );
-
-        varAF3( crosstalk ) = initAF3( params.crosstalk.data[ 0 ], //
-                                       params.crosstalk.data[ 1 ],
-                                       params.crosstalk.data[ 2 ] );
-
-        LpmSetup( LPM_RG_CONTEXT false,
-                  LPM_CONFIG_709_709,
-                  LPM_COLORS_709_709,
-                  0.0f,   // softGap
-                  256.0f, // hdrMax
-                  8.0f,   // exposure
-                  contrast,
-                  1.1f,   // shoulder contrast
-                  saturation,
-                  crosstalk );
-    }
-    else
-    {
-        float contrast = params.hdrContrast;
-
-        varAF3( saturation ) = initAF3( params.hdrSaturation.data[ 0 ], //
-                                        params.hdrSaturation.data[ 1 ],
-                                        params.hdrSaturation.data[ 2 ] );
-
-        varAF3( crosstalk ) = initAF3( params.crosstalk.data[ 0 ], //
-                                       params.crosstalk.data[ 1 ],
-                                       params.crosstalk.data[ 2 ] );
-
-        const float hdr10S = LpmHdr10RawScalar( 1000 );
-
-        LpmSetup( LPM_RG_CONTEXT false,
-                  LPM_CONFIG_HDR10RAW_2020,
-                  LPM_COLORS_HDR10RAW_2020,
-                  0.0f,   // softGap
-                  256.0f, // hdrMax
-                  8.0f,   // exposure
-                  contrast,
-                  1.1f, // shoulder contrast
-                  saturation,
-                  crosstalk );
-    }
+    MakeLpmParams( pContext, params, hdr );
 
     lpmParams->CopyFromStaging( cmd, frameIndex, LPM_BUFFER_SIZE );
 

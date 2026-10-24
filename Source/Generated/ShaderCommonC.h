@@ -114,6 +114,7 @@ namespace RTGL1
 #define GEOM_INST_FLAG_GENERATE_NORMALS (1 << 29)
 #define GEOM_INST_FLAG_INVERTED_NORMALS (1 << 30)
 #define GEOM_INST_FLAG_IS_DYNAMIC (1 << 31)
+#define GEOM_INST_FLAGS2_NO_HISTORY (1 << 0)
 #define SKY_TYPE_COLOR (0)
 #define SKY_TYPE_CUBEMAP (1)
 #define SKY_TYPE_RASTERIZED_GEOMETRY (2)
@@ -507,7 +508,7 @@ struct ShGeometryInstance
     uint32_t firstVertex_Layer2;
     uint32_t firstVertex_Layer3;
     float emissiveMultGi;
-    uint32_t _padGi0;
+    uint32_t flags2;
     uint32_t _padGi1;
     uint32_t _padGi2;
 };

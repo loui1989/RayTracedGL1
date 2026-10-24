@@ -1,0 +1,119 @@
+// Copyright (c) 2026 RTGL1 Metal backend contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#version 460
+
+// The same composition as the last iteration of CmSVGFAtrous, but of the unfiltered illumination:
+// for an external denoiser (MetalFX temporal denoised scaler), instead of SVGF.
+// Also writes the denoiser's guides: the factors that the illumination is multiplied by,
+// world-space normals, roughness.
+
+#define DESC_SET_FRAMEBUFFERS 0
+#define DESC_SET_GLOBAL_UNIFORM 1
+#include "ShaderCommonGLSLFunc.h"
+#include "BRDF.h"
+
+layout( local_size_x = COMPUTE_COMPOSE_GROUP_SIZE_X, local_size_y = COMPUTE_COMPOSE_GROUP_SIZE_Y, local_size_z = 1 ) in;
+
+layout( set = 2, binding = 0, rgba8 ) uniform writeonly image2D denoiserDiffuseAlbedo;
+layout( set = 2, binding = 1, rgba8 ) uniform writeonly image2D denoiserSpecularAlbedo;
+layout( set = 2, binding = 2, rgba16f ) uniform writeonly image2D denoiserNormal;
+layout( set = 2, binding = 3, r16f ) uniform writeonly image2D denoiserRoughness;
+
+void main()
+{
+    const ivec2 pix = ivec2( gl_GlobalInvocationID );
+
+    if( pix.x >= uint( globalUniform.renderWidth ) || pix.y >= uint( globalUniform.renderHeight ) )
+    {
+        return;
+    }
+
+    // guides are in the regular layout, as the composed image
+    const ivec2 regularPix = getRegularPixFromCheckerboardPix( pix );
+
+    vec3 albedo     = texelFetch( framebufAlbedo_Sampler, regularPix, 0 ).rgb;
+    vec3 throughput = texelFetch( framebufThroughput_Sampler, pix, 0 ).rgb;
+    if( ( globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_ALBEDO_WHITE ) != 0 )
+    {
+        albedo = vec3( 1.0 );
+    }
+
+    vec3  illuminated;
+    vec3  diffuseFactor  = vec3( 0.0 );
+    vec3  specularFactor = vec3( 0.0 );
+    vec3  normal         = vec3( 0.0, 0.0, 1.0 );
+    float roughness      = 1.0;
+
+    if( !isSkyPix( pix ) )
+    {
+        const vec2 mrFb = texelFetch( framebufMetallicRoughness_Sampler, pix, 0 ).xy;
+        normal          = texelFetchNormal( pix );
+
+        const float metallic = mrFb.x;
+        roughness            = mrFb.y;
+
+        const vec3 diffuse  = texelFetchUnfilteredDirect( pix );
+        const vec3 indirect = texelFetchUnfilteredIndir( pix );
+
+        // to prevent noise, specular will be replaced with indir, if the surface is too rough
+        const vec3 specular = mix( texelFetchUnfilteredSpecular( pix ),
+                                   indirect,
+                                   smoothstep( FAKE_ROUGH_SPECULAR_THRESHOLD,
+                                               FAKE_ROUGH_SPECULAR_THRESHOLD + FAKE_ROUGH_SPECULAR_LENGTH,
+                                               roughness ) );
+
+        const vec3 ro_s = getSpecularColor( albedo, metallic );
+        const vec3 ro_d = albedo * ( 1.0 - metallic );
+
+        illuminated = ( diffuse + indirect ) * ro_d + specular * ro_s;
+
+        if( ( globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_ONLY_DIRECT_DIFFUSE ) != 0 )
+        {
+            illuminated = diffuse * albedo;
+        }
+        else if( ( globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_ONLY_SPECULAR ) != 0 )
+        {
+            illuminated = specular * ro_s;
+        }
+        else if( ( globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_ONLY_INDIRECT_DIFFUSE ) != 0 )
+        {
+            illuminated = indirect;
+        }
+
+        const vec3 k = throughput * getMaterialAmbient( albedo );
+
+        illuminated *= k;
+        diffuseFactor  = ro_d * k;
+        specularFactor = ro_s * k;
+    }
+    else
+    {
+        illuminated   = albedo * throughput;
+        diffuseFactor = albedo * throughput;
+    }
+
+    imageStore( framebufPreFinal, regularPix, vec4( max( vec3( 0.0 ), illuminated ), 0 ) );
+
+    imageStore( denoiserDiffuseAlbedo, regularPix, vec4( clamp( diffuseFactor, 0.0, 1.0 ), 1.0 ) );
+    imageStore( denoiserSpecularAlbedo, regularPix, vec4( clamp( specularFactor, 0.0, 1.0 ), 1.0 ) );
+    imageStore( denoiserNormal, regularPix, vec4( normal, 0.0 ) );
+    imageStore( denoiserRoughness, regularPix, vec4( roughness ) );
+}

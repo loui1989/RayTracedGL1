@@ -58,7 +58,7 @@ namespace detail
     }
 
     template< typename Target >
-    constexpr auto TypeToStructureType = RgStructureType{ RG_STRUCTURE_TYPE_NONE };
+    inline constexpr auto TypeToStructureType = RgStructureType{ RG_STRUCTURE_TYPE_NONE };
 
     // clang-format off
     template<> inline constexpr auto TypeToStructureType< RgStartFrameRenderResolutionParams   > = RG_STRUCTURE_TYPE_START_FRAME_RENDER_RESOLUTION_PARAMS ;

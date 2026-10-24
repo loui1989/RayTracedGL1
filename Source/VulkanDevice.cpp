@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "VulkanDevice.h"
+#include "PrimitiveRouting.h"
 
 #include "HaltonSequence.h"
 #include "Matrix.h"
@@ -2593,43 +2594,6 @@ void RTGL1::VulkanDevice::DrawFrame( const RgDrawFrameInfo* pOriginalInfo )
     }
 }
 
-namespace RTGL1
-{
-namespace
-{
-    bool IsRasterized( const RgMeshInfo& mesh, const RgMeshPrimitiveInfo& primitive )
-    {
-        if( primitive.flags & RG_MESH_PRIMITIVE_DECAL )
-        {
-            return true;
-        }
-
-        if( primitive.flags & RG_MESH_PRIMITIVE_SKY )
-        {
-            return true;
-        }
-
-        if( !( primitive.flags & RG_MESH_PRIMITIVE_GLASS ) &&
-            !( mesh.flags & RG_MESH_FORCE_GLASS ) &&
-            !( primitive.flags & RG_MESH_PRIMITIVE_WATER ) &&
-            !( mesh.flags & RG_MESH_FORCE_WATER ) && !( primitive.flags & RG_MESH_PRIMITIVE_ACID ) )
-        {
-            if( primitive.flags & RG_MESH_PRIMITIVE_TRANSLUCENT )
-            {
-                return true;
-            }
-
-            if( Utils::UnpackAlphaFromPacked32( primitive.color ) <
-                MESH_TRANSLUCENT_ALPHA_THRESHOLD )
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-}
-}
 
 void RTGL1::VulkanDevice::UploadMeshPrimitive( const RgMeshInfo*          pMesh,
                                                const RgMeshPrimitiveInfo* pPrimitive )

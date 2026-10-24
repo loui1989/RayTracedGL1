@@ -63,29 +63,47 @@ layout(
 
 
 #ifdef DESC_SET_TEXTURES
+#ifdef METAL
+// Metal (through SPIRV-Cross) has no runtime arrays of combined image samplers:
+// images and samplers are separate arrays, with the same indices
+#define METAL_DESC_SET_TEXTURE_SAMPLERS 12
+layout(
+    set = DESC_SET_TEXTURES,
+    binding = BINDING_TEXTURES)
+    uniform texture2D globalTextures_Images[];
+layout(
+    set = METAL_DESC_SET_TEXTURE_SAMPLERS,
+    binding = 0)
+    uniform sampler globalTextures_Samplers[];
+#define globalTextures_Get( textureIndex )                                 \
+    sampler2D( globalTextures_Images[ nonuniformEXT( textureIndex ) ], \
+               globalTextures_Samplers[ nonuniformEXT( textureIndex ) ] )
+#else
 layout(
     set = DESC_SET_TEXTURES,
     binding = BINDING_TEXTURES)
     uniform sampler2D globalTextures[];
+#define globalTextures_Get( textureIndex ) globalTextures[ nonuniformEXT( textureIndex ) ]
+#endif
 
 ivec2 getTextureSize(uint textureIndex)
 {
-    return textureSize(globalTextures[nonuniformEXT(textureIndex)], 0);
+    return textureSize(globalTextures_Get(textureIndex), 0);
 }
 
 vec4 getTextureSample(uint textureIndex, const vec2 texCoord)
 {
-    return texture(globalTextures[nonuniformEXT(textureIndex)], texCoord);
+    return texture(globalTextures_Get(textureIndex), texCoord);
 }
 
 vec4 getTextureSampleLod(uint textureIndex, const vec2 texCoord, float lod)
 {
-    return textureLod(globalTextures[nonuniformEXT(textureIndex)], texCoord, lod);
+    return textureLod(globalTextures_Get(textureIndex), texCoord, lod);
 }
 
 vec4 getTextureSampleGrad(uint textureIndex, const vec2 texCoord, const vec2 dPdx, const vec2 dPdy)
 {
-    return textureGrad(globalTextures[nonuniformEXT(textureIndex)], texCoord, dPdx, dPdy);
+    return textureGrad(globalTextures_Get(textureIndex), texCoord, dPdx, dPdy);
 }
 #endif // DESC_SET_TEXTURES
 

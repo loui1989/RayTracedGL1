@@ -107,6 +107,7 @@
 #define GEOM_INST_FLAG_GENERATE_NORMALS (1 << 29)
 #define GEOM_INST_FLAG_INVERTED_NORMALS (1 << 30)
 #define GEOM_INST_FLAG_IS_DYNAMIC (1 << 31)
+#define GEOM_INST_FLAGS2_NO_HISTORY (1 << 0)
 #define SKY_TYPE_COLOR (0)
 #define SKY_TYPE_CUBEMAP (1)
 #define SKY_TYPE_RASTERIZED_GEOMETRY (2)
@@ -502,7 +503,7 @@ struct ShGeometryInstance
     uint firstVertex_Layer2;
     uint firstVertex_Layer3;
     float emissiveMultGi;
-    uint _padGi0;
+    uint flags2;
     uint _padGi1;
     uint _padGi2;
 };

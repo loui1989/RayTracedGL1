@@ -42,6 +42,12 @@
 
 #define RG_RTGL_VERSION_API "001.006.000"
 
+#if !defined( _WIN32 )
+    // for rgLoadLibraryAndCreate
+    #include <dlfcn.h>
+    #include <string.h>
+#endif // !defined( _WIN32 )
+
 #ifdef RG_USE_SURFACE_WIN32
     #include <windows.h>
 #endif // RG_USE_SURFACE_WIN32
@@ -909,6 +915,12 @@ typedef enum RgRenderSharpenTechnique
     RG_RENDER_SHARPEN_TECHNIQUE_AMD_CAS,
 } RgRenderSharpenTechnique;
 
+typedef enum RgDenoiser
+{
+    RG_DENOISER_DEFAULT, // RTGL1's (SVGF)
+    RG_DENOISER_METALFX, // Metal: MetalFX temporal denoised scaler (denoises and upscales). Check RG_FEATURE_METALFX_DENOISER
+} RgDenoiser;
+
 typedef enum RgRenderResolutionMode
 {
     RG_RENDER_RESOLUTION_MODE_CUSTOM,
@@ -954,6 +966,8 @@ typedef struct RgStartFrameRenderResolutionParams
     // SDK 310.4.0 and 6..15 revert to default. Changing this re-creates the
     // RR feature, so it takes effect live.
     uint32_t                 dlssRrPreset;
+    // Ignored, if the denoiser is not available
+    RgDenoiser               denoiser;
 } RgStartFrameRenderResolutionParams;
 
 // Can be linked after RgStartFrameInfo.
@@ -977,12 +991,16 @@ typedef enum RgStaticSceneStatusFlagBits
 } RgStaticSceneStatusFlagBits;
 typedef uint32_t RgStaticSceneStatusFlags;
 
+#define RG_VSYNC_HALF_RATE 2
+
 typedef struct RgStartFrameInfo
 {
     RgStructureType sType;
     void*           pNext;
     const char*     pMapName;
     RgBool32        ignoreExternalGeometry;
+    // 0 - off, 1 - on, RG_VSYNC_HALF_RATE - on, but at half of the display's refresh rate
+    // (even frame times, if the frame rate is lower than the display's; Metal only, otherwise the same as 1)
     RgBool32        vsync;
     RgBool32        hdr;
     RgBool32        allowMapAutoExport;
@@ -2252,6 +2270,7 @@ typedef enum RgFeatureFlagBits
 {
     RG_FEATURE_HDR      = 1,
     RG_FEATURE_FLUID    = 2,
+    RG_FEATURE_METALFX_DENOISER = 4,
 } RgFeatureFlagBits;
 typedef uint32_t RgFeatureFlags;
 

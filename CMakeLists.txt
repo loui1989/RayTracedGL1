@@ -37,6 +37,8 @@ set(Sources
     "Source/ASBuilder.cpp"
     "Source/ScratchBuffer.cpp"
     "Source/Utils.cpp"
+    "Source/UtilsMath.cpp"
+    "Source/UtilsFormat.cpp"
     "Source/PathTracer.cpp"
     "Source/Common.cpp"
     "Source/Matrix.cpp"
@@ -46,7 +48,8 @@ set(Sources
     "Source/ImageLoader.cpp" 
     "Source/TextureManager.cpp" 
     "Source/MemoryAllocator.cpp" 
-    "Source/SamplerManager.cpp" 
+    "Source/SamplerManager.cpp"
+    "Source/SamplerHandle.cpp" 
     "Source/TextureOverrides.cpp"
     "Source/TextureDescriptors.cpp" 
     "Source/TextureUploader.cpp"
@@ -57,6 +60,8 @@ set(Sources
     "Source/ImageComposition.cpp"
     "Source/Tonemapping.cpp"
     "Source/LightManager.cpp"
+    "Source/LightEncoding.cpp"
+    "Source/LpmParams.cpp"
     "Source/AutoBuffer.cpp"
     "Source/ASComponent.cpp"
     "Source/CubemapManager.cpp"
@@ -92,6 +97,7 @@ set(Sources
     "Source/DebugWindows.cpp"
     "Source/ScratchImmediate.cpp"
     "Source/GltfExporter.cpp"
+    "Source/PrimitiveLights.cpp"
     "Source/GltfImporter.cpp"
     "Source/FolderObserver.cpp"
     "Source/TextureExporter.cpp"
@@ -145,7 +151,9 @@ option(RG_WITH_NRD              "Build RTGL1 with the NVIDIA NRD denoiser lane (
 
 option(RG_WITH_EXAMPLES         "Build with examples executable"            ON)
 
-if (APPLE)
+option(RG_WITH_METAL            "Build with native Metal backend instead of Vulkan (macOS)" OFF)
+
+if (APPLE AND NOT RG_WITH_METAL)
     # macOS: Vulkan is implemented on Metal inside the library (Source/MetalNative.mm,
     # MetalBridge.mm), without a Vulkan loader or MoltenVK. No DX12 / DLSS / NRD; the
     # MetalFX temporal upscaler fills the FSR2 slot (Source/FSR2_Metal.mm).
@@ -169,7 +177,7 @@ if (NOT RG_WITH_DX12)
         "Source/DX12_Vulkan.cpp")
     list(APPEND Sources "Source/NoDX12.cpp")
 endif()
-if (APPLE)
+if (APPLE AND NOT RG_WITH_METAL)
     # MetalFX: the temporal scaler in the FSR2 slot, the denoiser in the Ray Reconstruction one,
     # frame interpolation as frame generation
     list(REMOVE_ITEM Sources "Source/FSR2.cpp" "Source/DLSSRR.cpp")
@@ -222,6 +230,14 @@ if (RG_WITH_SURFACE_XLIB)
     message(STATUS "RG_WITH_SURFACE_XLIB enabled")
     add_definitions(-DRG_USE_SURFACE_XLIB)
     add_definitions(-DVK_USE_PLATFORM_XLIB_KHR)
+endif()
+
+
+# Metal: a separate backend, built instead of everything below
+if (RG_WITH_METAL)
+    message(STATUS "RG_WITH_METAL enabled")
+    include(Source/Metal/Metal.cmake)
+    return()
 endif()
 
 

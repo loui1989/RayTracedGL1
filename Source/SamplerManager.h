@@ -76,7 +76,7 @@ public:
     // Wait idle and recreate all the samplers with new lod bias
     bool TryChangeMipLodBias( uint32_t frameIndex, float newMipLodBias );
 
-    auto Deconstruct( const Handle& handle ) const
+    static auto Deconstruct( const Handle& handle )
         -> std::tuple< RgSamplerAddressMode, RgSamplerAddressMode, RgSamplerFilter >;
 
 private:
