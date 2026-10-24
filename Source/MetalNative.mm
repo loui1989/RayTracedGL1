@@ -1001,6 +1001,7 @@ VkResult RTGL1::MetalNative::vkAcquireNextImageKHR( VkDevice,
                                                     VkFence     fence,
                                                     uint32_t*   index )
 {
+    const ScopedCpuTimer timer( CPU_TIMER_ACQUIRE );
     @autoreleasepool
     {
         auto*                sc       = Obj< NativeSwapchain >( swapchain );
@@ -1578,6 +1579,7 @@ void RTGL1::MetalNative::vkDestroyFence( VkDevice, VkFence fence, const VkAlloca
 
 VkResult RTGL1::MetalNative::vkWaitForFences( VkDevice, uint32_t count, const VkFence* fences, VkBool32 waitAll, uint64_t timeoutNs )
 {
+    const ScopedCpuTimer timer( CPU_TIMER_FENCE );
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::nanoseconds( std::min< uint64_t >( timeoutNs, uint64_t( INT64_MAX / 2 ) ) );
     if( waitAll || count == 1 )
@@ -1961,6 +1963,9 @@ void DumpFrame( const char* dir, const std::vector< std::string >& filters )
 // time of each labelled part of the frame is measured and, every 2 seconds, written to
 // metal-profile.log (average milliseconds per frame) and to the log
 
+double g_cpuMs[ RTGL1::MetalNative::CPU_TIMER_COUNT ] = {};
+std::mutex g_cpuLock;
+
 void ProfileFrame()
 {
     static uint32_t                                frame = 0, frames = 0;
@@ -1976,6 +1981,10 @@ void ProfileFrame()
             on = want;
             RTGL1::Metal::SetProfiling( on );
             sums.clear();
+            {
+                std::lock_guard g( g_cpuLock );
+                std::fill( std::begin( g_cpuMs ), std::end( g_cpuMs ), 0.0 );
+            }
             frames     = 0;
             lastReport = cpuStart = CFAbsoluteTimeGetCurrent();
             fprintf( stderr, "[Metal] profiling %s\n", on ? "on (metal-profile.log)" : "off" );
@@ -2004,10 +2013,24 @@ void ProfileFrame()
     std::sort( rows.rbegin(), rows.rend() );
     const double frameMs = ( now - cpuStart ) * 1000.0 / frames;
 
+    double cpu[ RTGL1::MetalNative::CPU_TIMER_COUNT ];
+    {
+        std::lock_guard g( g_cpuLock );
+        for( int i = 0; i < RTGL1::MetalNative::CPU_TIMER_COUNT; i++ )
+        {
+            cpu[ i ]     = g_cpuMs[ i ] / frames;
+            g_cpuMs[ i ] = 0;
+        }
+    }
+
     std::string report;
     char        line[ 256 ];
     snprintf( line, sizeof line, "frames %u: %.2f ms per frame (%.1f fps), GPU %.2f ms in the measured parts\n",
               frames, frameMs, 1000.0 / std::max( frameMs, 0.001 ), total );
+    report += line;
+    snprintf( line, sizeof line, "CPU per frame: %.2f ms encoding (submit), %.2f ms waiting for the GPU (fences), %.2f ms waiting for a drawable\n",
+              cpu[ RTGL1::MetalNative::CPU_TIMER_SUBMIT ], cpu[ RTGL1::MetalNative::CPU_TIMER_FENCE ],
+              cpu[ RTGL1::MetalNative::CPU_TIMER_ACQUIRE ] );
     report += line;
     for( const auto& [ ms, name ] : rows )
     {
@@ -2088,6 +2111,12 @@ void MaybeDumpFrame()
     strftime( dir, sizeof dir, "metal-dump-%Y%m%d-%H%M%S", localtime( &t ) );
     DumpFrame( dir, filters );
 }
+}
+
+void RTGL1::MetalNative::AddCpuTime( CpuTimer which, double ms )
+{
+    std::lock_guard g( g_cpuLock );
+    g_cpuMs[ which ] += ms;
 }
 
 VkResult RTGL1::MetalNative::vkSetDebugUtilsObjectNameEXT( VkDevice, const VkDebugUtilsObjectNameInfoEXT* info )

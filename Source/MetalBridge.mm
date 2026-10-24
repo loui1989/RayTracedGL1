@@ -4728,6 +4728,7 @@ VkResult RTGL1::MetalNative::vkEndCommandBuffer( VkCommandBuffer )
 
 VkResult RTGL1::MetalNative::vkQueueSubmit( VkQueue, uint32_t count, const VkSubmitInfo* submits, VkFence fence )
 {
+    const ScopedCpuTimer timer( CPU_TIMER_SUBMIT );
     @autoreleasepool
     {
         std::lock_guard g( S().lock );

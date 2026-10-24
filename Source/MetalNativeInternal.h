@@ -26,6 +26,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -161,6 +162,27 @@ struct FormatInfo
     bool           depth = false, stencil = false, srgb = false, compressed = false;
 };
 FormatInfo GetFormatInfo( VkFormat format );
+
+// CPU time of the calls the frame may wait in, for the profile (metal-profile.txt)
+enum CpuTimer
+{
+    CPU_TIMER_SUBMIT,  // vkQueueSubmit: the recorded commands are encoded into Metal here
+    CPU_TIMER_FENCE,   // vkWaitForFences: waiting for the GPU
+    CPU_TIMER_ACQUIRE, // vkAcquireNextImageKHR: waiting for a drawable (display / GPU)
+    CPU_TIMER_COUNT
+};
+void AddCpuTime( CpuTimer which, double ms );
+struct ScopedCpuTimer
+{
+    explicit ScopedCpuTimer( CpuTimer w ) : which( w ), start( std::chrono::steady_clock::now() ) {}
+    ~ScopedCpuTimer()
+    {
+        AddCpuTime( which,
+                    std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - start ).count() );
+    }
+    CpuTimer                              which;
+    std::chrono::steady_clock::time_point start;
+};
 
 // the queue's work submitted so far is done (for vkQueueWaitIdle / vkDeviceWaitIdle)
 void WaitIdle();
