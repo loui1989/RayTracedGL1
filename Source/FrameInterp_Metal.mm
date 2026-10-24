@@ -39,6 +39,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <unistd.h>
 
 // Common.h: the Vulkan calls go to the Metal implementation (MetalShims.h)
 #include "Common.h"
@@ -495,6 +496,12 @@ void RTGL1::MetalFI::Release()
 {
     @autoreleasepool
     {
+        if( g.interpolator )
+        {
+            Log( "off" );
+        }
+        g.loggedFirst = false;
+        g.generating  = false;
         ReleaseInterpolator();
         g.pendingReal      = nil;
         g.pendingGenerated = nil;
@@ -677,33 +684,47 @@ bool RTGL1::MetalFI::Present( id< MTLCommandBuffer > cb, CAMetalLayer* layer )
       }
 
       dispatch_async( dq, ^{
+        // one drawable at a time, paced here (this is a background queue): the generated frame,
+        // then -- half a frame later -- the actual one. Asking for both drawables at once, and
+        // pacing with presentDrawable:afterMinimumDuration:, ran the 3 drawables out (worse
+        // with VSync off) and backed the presentation up.
+        const double frameTime = std::clamp( g_frameTime.load(), 0.001, 0.1 );
+
+        if( generated )
+        {
+            @autoreleasepool
+            {
+                if( id< CAMetalDrawable > d = [layer nextDrawable] )
+                {
+                    id< MTLCommandBuffer > pc = [queue commandBuffer];
+                    pc.label                  = @"RTGL1 MetalFX frame interpolation present (generated)";
+                    BlitToDrawable( pc, pipe, smp, d, generated, @"Blit generated frame to swapchain" );
+                    [pc presentDrawable:d];
+                    [pc commit];
+                    [pc waitUntilScheduled];
+
+                    const double until = Now() + frameTime * 0.5;
+                    while( true )
+                    {
+                        const double left = until - Now();
+                        if( left <= 0.0005 )
+                        {
+                            break;
+                        }
+                        usleep( useconds_t( std::min( left, 0.05 ) * 1e6 * 0.9 ) );
+                    }
+                }
+            }
+        }
+
         @autoreleasepool
         {
             id< MTLCommandBuffer > pc = [queue commandBuffer];
             pc.label                  = @"RTGL1 MetalFX frame interpolation present";
-
-            bool generatedPresented = false;
-            if( generated )
-            {
-                if( id< CAMetalDrawable > d = [layer nextDrawable] )
-                {
-                    BlitToDrawable( pc, pipe, smp, d, generated, @"Blit generated frame to swapchain" );
-                    [pc presentDrawable:d];
-                    generatedPresented = true;
-                }
-            }
             if( id< CAMetalDrawable > d = [layer nextDrawable] )
             {
                 BlitToDrawable( pc, pipe, smp, d, real, @"Blit to swapchain" );
-                if( generatedPresented )
-                {
-                    // the generated frame is shown for a half of the frame time
-                    [pc presentDrawable:d afterMinimumDuration:std::clamp( g_frameTime.load() * 0.5, 0.0, 0.05 )];
-                }
-                else
-                {
-                    [pc presentDrawable:d];
-                }
+                [pc presentDrawable:d];
             }
             [pc addCompletedHandler:^( id< MTLCommandBuffer > ) {
               dispatch_semaphore_signal( sem );
