@@ -122,10 +122,11 @@ struct PipelineInfo
     std::vector< VkSpecializationMapEntry > specEntries;
     std::vector< uint8_t >                  specData;
 
-    id< MTLComputePipelineState > mtl;
-    MTLSize                       threadsPerGroup = { 1, 1, 1 };
-    std::string                   name;
-    bool                          failed = false;
+    id< MTLComputePipelineState >      mtl;
+    id< MTLIntersectionFunctionTable > ftable; // the intersector version (MetalShaderGen)
+    MTLSize                            threadsPerGroup = { 1, 1, 1 };
+    std::string                        name;
+    bool                               failed = false;
 };
 
 // what vkCmdBind* / vkCmdPushConstants set on SectionCmd()
@@ -311,6 +312,7 @@ struct State
     bool                          waitASFence = false;
     bool                           computeEnv    = true;
     bool                           fastMath      = false; // RTGL1_METAL_FASTMATH=1
+    bool                           intersector   = true;  // RTGL1_METAL_INTERSECTOR=0: ray queries
     uint32_t                       asRebuildEvery = 8;    // RTGL1_METAL_AS_REBUILD_EVERY, 1 = never refit
     // Bottom level structures of destroyed acceleration structures, kept (and resident)
     // for new ones: RTGL1 creates a new structure for every dynamic primitive every frame,
@@ -2023,6 +2025,8 @@ bool RTGL1::Metal::Init( VkDevice device, std::shared_ptr< CommandBufferManager 
             s.computeEnv  = MetalNative::Enabled() || !( c && c[ 0 ] == '0' );
             const char* f = getenv( "RTGL1_METAL_FASTMATH" );
             s.fastMath    = f && f[ 0 ] == '1';
+            const char* in = getenv( "RTGL1_METAL_INTERSECTOR" );
+            s.intersector  = !( in && in[ 0 ] == '0' );
             const char* ra = getenv( "RTGL1_METAL_RASTER" );
             s.rasterEnv    = !( ra && ra[ 0 ] == '0' );
             const char* r = getenv( "RTGL1_METAL_AS_REBUILD_EVERY" );
@@ -2119,11 +2123,13 @@ struct PrepareJob
     std::vector< VkSpecializationMapEntry > specEntries;
     std::vector< uint8_t >                  specData;
     bool                                    fastMath = false;
+    bool                                    intersector = true; // RTGL1_METAL_INTERSECTOR
 };
 
 struct PrepareResult
 {
-    id< MTLComputePipelineState > ps;
+    id< MTLComputePipelineState >       ps;
+    id< MTLIntersectionFunctionTable >  ftable; // for the intersector version of a ray tracing pass
     MTLSize                       threadsPerGroup = { 1, 1, 1 };
     std::string                   error;
 };
@@ -2159,6 +2165,7 @@ bool MakePrepareJob( VkPipeline pipeline, PrepareJob& job, std::string& error )
     job.specEntries = pi.specEntries;
     job.specData    = pi.specData;
     job.fastMath    = s.fastMath;
+    job.intersector = s.intersector;
     return true;
 }
 
@@ -2287,6 +2294,68 @@ PrepareResult CompilePrepareJob( const PrepareJob& job, id< MTLDevice > device )
             return r;
         }
 
+        // ray tracing passes: Metal's intersector, with the alpha test as an intersection
+        // function (MetalShaderGen RewriteForIntersector); the query version if it fails
+        if( job.intersector )
+        {
+            std::string why;
+            for( const std::string* variant : { &sh.mslIntersector, &sh.mslIntersectorAlt } )
+            {
+                if( variant->empty() )
+                {
+                    continue;
+                }
+                std::string      e;
+                id< MTLLibrary > ilib = CompileLibrary( device, *variant, job.fastMath, job.name + "-intersector", e );
+                id< MTLFunction > fn  = ilib ? MakeFunction( ilib, sh.entryPoint, job.specEntries, job.specData, e ) : nil;
+                id< MTLFunction > ifn =
+                    fn ? [ilib newFunctionWithName:[NSString stringWithUTF8String:MetalGen::INTERSECTOR_FUNCTION]] : nil;
+                if( !ifn )
+                {
+                    why = e.empty() ? "no intersection function" : e;
+                    continue;
+                }
+                NSError*                      err = nil;
+                MTLComputePipelineDescriptor* pd  = [MTLComputePipelineDescriptor new];
+                pd.computeFunction                = fn;
+                pd.label                          = [NSString stringWithUTF8String:job.name.c_str()];
+                MTLLinkedFunctions* lf            = [MTLLinkedFunctions linkedFunctions];
+                lf.functions                      = @[ ifn ];
+                pd.linkedFunctions                = lf;
+                id< MTLComputePipelineState > ps  = [device newComputePipelineStateWithDescriptor:pd
+                                                                                         options:MTLPipelineOptionNone
+                                                                                      reflection:nil
+                                                                                           error:&err];
+                const NSUInteger threads = NSUInteger( sh.localSize[ 0 ] ) * sh.localSize[ 1 ] * sh.localSize[ 2 ];
+                if( !ps || ps.maxTotalThreadsPerThreadgroup < threads )
+                {
+                    why = std::string( "pipeline: " ) +
+                          ( ps ? "too many threads per group" : ( err ? err.localizedDescription.UTF8String : "?" ) );
+                    continue;
+                }
+                MTLIntersectionFunctionTableDescriptor* td = [MTLIntersectionFunctionTableDescriptor new];
+                td.functionCount                           = 1;
+                id< MTLIntersectionFunctionTable > table   = [ps newIntersectionFunctionTableWithDescriptor:td];
+                id< MTLFunctionHandle >            handle  = [ps functionHandleWithFunction:ifn];
+                if( !table || !handle )
+                {
+                    why = "no intersection function table";
+                    continue;
+                }
+                [table setFunction:handle atIndex:0];
+
+                r.ps              = ps;
+                r.ftable          = table;
+                r.threadsPerGroup = MTLSizeMake( sh.localSize[ 0 ], sh.localSize[ 1 ], sh.localSize[ 2 ] );
+                return r;
+            }
+            if( !why.empty() )
+            {
+                Log( "%s: the intersector version failed, using ray queries: %s", job.name.c_str(),
+                     why.substr( 0, 1500 ).c_str() );
+            }
+        }
+
         id< MTLLibrary > lib = CompileLibrary( device, sh.msl, job.fastMath, job.name, r.error );
         if( !lib )
         {
@@ -2336,6 +2405,7 @@ bool ApplyPrepareResult( const PrepareJob& job, const PrepareResult& r, bool log
         return false;
     }
     pi.mtl             = r.ps;
+    pi.ftable          = r.ftable;
     pi.threadsPerGroup = r.threadsPerGroup;
     pi.failed          = false;
     if( logSuccess )
@@ -2438,12 +2508,14 @@ void RTGL1::Metal::PrepareAllPipelines()
     }
 
     std::lock_guard g( S().lock );
-    size_t          ok = 0;
+    size_t          ok = 0, isect = 0;
     for( size_t i = 0; i < jobs.size(); i++ )
     {
         ok += ApplyPrepareResult( jobs[ i ], results[ i ], false ) ? 1 : 0;
+        isect += results[ i ].ftable ? 1 : 0;
     }
-    Log( "%zu compute pipelines prepared for Metal, %zu failed", ok, jobs.size() - ok );
+    Log( "%zu compute pipelines prepared for Metal, %zu failed, %zu tracing rays with the intersector%s", ok,
+         jobs.size() - ok, isect, S().intersector ? "" : " (off: RTGL1_METAL_INTERSECTOR=0)" );
 }
 
 void RTGL1::Metal::RegisterAccelerationStructureAddress( VkAccelerationStructureKHR as, VkDeviceAddress address )
@@ -2654,6 +2726,10 @@ void EncodeDispatch( PipelineInfo&          pi,
 {
     id< MTLComputeCommandEncoder > e = ComputeEnc();
     [e setComputePipelineState:pi.mtl];
+    if( pi.ftable )
+    {
+        [e setIntersectionFunctionTable:pi.ftable atBufferIndex:MetalGen::INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX];
+    }
     for( uint32_t i = 0; i < setCount; i++ )
     {
         if( sets[ i ] == VK_NULL_HANDLE )

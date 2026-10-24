@@ -38,6 +38,9 @@ namespace RTGL1::MetalGen
 
 // Metal buffer index of the push constants (argument buffers use indices 0..set count-1)
 constexpr uint32_t PUSH_CONSTANT_BUFFER_INDEX = 27;
+// compute shaders using Metal's intersector (ComputeShader::mslIntersector)
+constexpr uint32_t INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX = 28;
+constexpr const char* INTERSECTOR_FUNCTION = "rtglAlphaTest";
 // graphics: (first view, view count) for the multiview emulation, see TranslateGraphics
 constexpr uint32_t VIEW_MASK_BUFFER_INDEX = 26;
 // graphics: vertex buffer of Vulkan binding b is at Metal buffer index VERTEX_BUFFER_BASE + b
@@ -76,6 +79,12 @@ struct ComputeShader
     bool        ok = false;
     std::string error;
     std::string msl;
+    // compute shaders that trace rays: the same with Metal's intersector instead of
+    // intersection queries, alpha tests as the intersection function INTERSECTOR_FUNCTION,
+    // which the pipeline links and binds in an intersection function table at
+    // INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX (empty if it doesn't apply)
+    std::string mslIntersector;
+    std::string mslIntersectorAlt; // the same, written differently (tried second)
     std::string entryPoint;
     uint32_t    localSize[ 3 ] = { 1, 1, 1 };
 };

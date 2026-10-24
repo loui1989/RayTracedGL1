@@ -250,10 +250,11 @@ void resetPayload()
 // sprites don't take part.
 #define RQ_ALPHA_THRESHOLD 0.5
 
-bool rqIsCandidateAccepted( rayQueryEXT rq, bool media )
+// The alpha test of a candidate triangle. Separate from the ray query, so the macOS Metal
+// path can run it as an intersection function of Metal's intersector (MetalShaderGen.cpp
+// finds it by name and calls it from there).
+bool rtAlphaTestAccepts( int instanceId, uint primitiveId, vec2 b, bool media )
 {
-    const int instanceId = rayQueryGetIntersectionInstanceIdEXT( rq, false );
-
     if( media && ( geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_SPRITE ) != 0 )
     {
         return false;
@@ -263,11 +264,9 @@ bool rqIsCandidateAccepted( rayQueryEXT rq, bool media )
     // (getTriangleTexInfo): this runs for every candidate along a ray, and the full
     // getTriangle -- all layers, normals, world and previous-frame positions -- made it
     // the most expensive part of tracing through alpha-tested geometry.
-    const uint primitiveId = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) );
     const uint baseVertex  = geometryInstances[ instanceId ].baseVertexIndex;
     const uint baseIndex   = geometryInstances[ instanceId ].baseIndexIndex;
 
-    const vec2 b          = rayQueryGetIntersectionBarycentricsEXT( rq, false );
     const vec3 baryCoords = vec3( 1.0 - b.x - b.y, b.x, b.y );
 
     vec2 texCoord;
@@ -291,6 +290,14 @@ bool rqIsCandidateAccepted( rayQueryEXT rq, bool media )
                        unpackUintColor( geometryInstances[ instanceId ].colorFactor_base );
 
     return ( color.r + color.g + color.b ) / 3 * color.a + color.a >= RQ_ALPHA_THRESHOLD;
+}
+
+bool rqIsCandidateAccepted( rayQueryEXT rq, bool media )
+{
+    return rtAlphaTestAccepts( rayQueryGetIntersectionInstanceIdEXT( rq, false ),
+                               uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) ),
+                               rayQueryGetIntersectionBarycentricsEXT( rq, false ),
+                               media );
 }
 
 // Former closest-hit (RtClsOpaque.rchit) and miss (RtMiss.rmiss) shaders: the nearest
