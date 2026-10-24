@@ -28,11 +28,13 @@
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <dispatch/dispatch.h>
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_metal.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,6 +47,14 @@
 namespace
 {
 constexpr MTLPixelFormat COLOR_FORMAT = MTLPixelFormatRGBA16Float;
+// frames whose presentation can be pending: presented asynchronously, after the frame is done
+constexpr uint32_t SLOTS = 3;
+
+// the time between frames (done on the GPU), smoothed: to pace the generated and the actual frame.
+// Not the CPU time between presents: that includes waiting for drawables, which depends on the
+// pacing itself, and halved the frame rate (each frame waited for the previous one's pacing).
+std::atomic< double > g_frameTime{ 1.0 / 60.0 };
+std::atomic< double > g_lastFrameDone{ 0.0 };
 
 struct FiState
 {
@@ -64,11 +74,11 @@ struct FiState
 
     id               interpolator = nil; // id< MTLFXFrameInterpolator >
     uint32_t         renderW = 0, renderH = 0, outW = 0, outH = 0;
-    // the frame without HUD, current and previous
-    id< MTLTexture > color[ 2 ] = {};
-    // the actual frame (with HUD) and the generated one, per 'cur': presented after the frame
-    id< MTLTexture > real[ 2 ] = {};
-    id< MTLTexture > generated[ 2 ] = {};
+    // the frame without HUD (the previous one is the previous slot's)
+    id< MTLTexture > color[ SLOTS ] = {};
+    // the actual frame (with HUD) and the generated one, per slot: presented after the frame
+    id< MTLTexture > real[ SLOTS ] = {};
+    id< MTLTexture > generated[ SLOTS ] = {};
     id< MTLTexture > ui     = nil;
     id< MTLTexture > depth  = nil;
     id< MTLTexture > motion = nil;
@@ -78,12 +88,14 @@ struct FiState
     // for the next vkQueuePresentKHR
     id< MTLTexture > pendingReal      = nil;
     id< MTLTexture > pendingGenerated = nil;
+    bool             pendingHoldsSlot = false;
     bool             lateDrawables    = false;
 
-    // pacing: the generated frame is shown for a half of the frame time
-    double lastPresent    = 0;
-    double frameInterval  = 1.0 / 60.0;
-    bool   loggedFirst    = false;
+    // a slot is taken by Encode, and given back when its frames have been presented
+    dispatch_semaphore_t slotSem      = nil;
+    dispatch_queue_t     presentQueue = nil;
+
+    bool loggedFirst = false;
 };
 
 FiState g;
@@ -255,6 +267,9 @@ bool Init( VkDevice vkDevice )
     sd.tAddressMode          = MTLSamplerAddressModeClampToEdge;
     g.sampler                = [g.device newSamplerStateWithDescriptor:sd];
 
+    g.slotSem      = dispatch_semaphore_create( SLOTS );
+    g.presentQueue = dispatch_queue_create( "RTGL1 MetalFX frame interpolation present", DISPATCH_QUEUE_SERIAL );
+
     Log( "available" );
     g.initOk = true;
     return true;
@@ -278,9 +293,12 @@ id< MTLTexture > TextureOf( VkImage image )
 void ReleaseInterpolator()
 {
     g.interpolator = nil;
-    g.color[ 0 ] = g.color[ 1 ] = nil;
-    g.real[ 0 ] = g.real[ 1 ] = nil;
-    g.generated[ 0 ] = g.generated[ 1 ] = nil;
+    for( uint32_t i = 0; i < SLOTS; i++ )
+    {
+        g.color[ i ]     = nil;
+        g.real[ i ]      = nil;
+        g.generated[ i ] = nil;
+    }
     g.ui         = nil;
     g.depth      = nil;
     g.motion     = nil;
@@ -325,7 +343,7 @@ bool EnsureInterpolator( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
             td.usage                 = usage | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
             return [g.device newTextureWithDescriptor:td];
         };
-        for( int i = 0; i < 2; i++ )
+        for( uint32_t i = 0; i < SLOTS; i++ )
         {
             g.color[ i ]     = makeTex( COLOR_FORMAT, ow, oh, fi.colorTextureUsage );
             g.real[ i ]      = makeTex( COLOR_FORMAT, ow, oh, 0 );
@@ -334,8 +352,12 @@ bool EnsureInterpolator( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
         g.ui     = makeTex( COLOR_FORMAT, ow, oh, fi.uiTextureUsage );
         g.depth  = makeTex( MTLPixelFormatR32Float, rw, rh, 0 );
         g.motion = makeTex( MTLPixelFormatRG16Float, rw, rh, 0 );
-        if( !g.color[ 0 ] || !g.color[ 1 ] || !g.real[ 0 ] || !g.real[ 1 ] || !g.generated[ 0 ] ||
-            !g.generated[ 1 ] || !g.ui || !g.depth || !g.motion )
+        bool ok = g.ui && g.depth && g.motion;
+        for( uint32_t i = 0; i < SLOTS; i++ )
+        {
+            ok = ok && g.color[ i ] && g.real[ i ] && g.generated[ i ];
+        }
+        if( !ok )
         {
             Log( "texture allocation failed" );
             ReleaseInterpolator();
@@ -377,7 +399,12 @@ bool EnsurePresentPipeline( MTLPixelFormat format )
     return true;
 }
 
-void BlitToDrawable( id< MTLCommandBuffer > cb, id< CAMetalDrawable > drawable, id< MTLTexture > src, NSString* label )
+void BlitToDrawable( id< MTLCommandBuffer >       cb,
+                     id< MTLRenderPipelineState > pipe,
+                     id< MTLSamplerState >        smp,
+                     id< CAMetalDrawable >        drawable,
+                     id< MTLTexture >             src,
+                     NSString*                    label )
 {
     MTLRenderPassDescriptor* pass          = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[ 0 ].texture     = drawable.texture;
@@ -386,9 +413,9 @@ void BlitToDrawable( id< MTLCommandBuffer > cb, id< CAMetalDrawable > drawable, 
 
     id< MTLRenderCommandEncoder > enc = [cb renderCommandEncoderWithDescriptor:pass];
     enc.label                         = label;
-    [enc setRenderPipelineState:g.presentPipe];
+    [enc setRenderPipelineState:pipe];
     [enc setFragmentTexture:src atIndex:0];
-    [enc setFragmentSamplerState:g.sampler atIndex:0];
+    [enc setFragmentSamplerState:smp atIndex:0];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [enc endEncoding];
 }
@@ -421,6 +448,11 @@ void RTGL1::MetalFI::Release()
         ReleaseInterpolator();
         g.pendingReal      = nil;
         g.pendingGenerated = nil;
+        if( g.pendingHoldsSlot )
+        {
+            g.pendingHoldsSlot = false;
+            dispatch_semaphore_signal( g.slotSem );
+        }
     }
 }
 
@@ -447,10 +479,24 @@ bool RTGL1::MetalFI::Encode( VkDevice device, VkCommandBuffer cmd, const Params&
             return false;
         }
 
+        // a slot whose previous frames have been presented (normally free right away;
+        // waits only if the presentation falls behind)
+        if( g.pendingHoldsSlot )
+        {
+            // not presented (vkQueuePresentKHR wasn't called): reuse its slot
+            g.pendingHoldsSlot = false;
+            dispatch_semaphore_signal( g.slotSem );
+        }
+        if( dispatch_semaphore_wait( g.slotSem, dispatch_time( DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC ) ) != 0 )
+        {
+            Log( "presentation is stalled, the frame is presented without interpolation" );
+            return false;
+        }
+
         const uint32_t   slot        = g.cur;
         const bool       interpolate = g.hasHistory && !p.reset;
         id< MTLTexture > cur         = g.color[ slot ];
-        id< MTLTexture > prev        = g.color[ slot ^ 1 ];
+        id< MTLTexture > prev        = g.color[ ( slot + SLOTS - 1 ) % SLOTS ];
         id< MTLTexture > real        = g.real[ slot ];
         id< MTLTexture > generated   = g.generated[ slot ];
         id< MTLTexture > ui          = g.ui;
@@ -522,9 +568,10 @@ bool RTGL1::MetalFI::Encode( VkDevice device, VkCommandBuffer cmd, const Params&
 
         g.pendingReal      = real;
         g.pendingGenerated = ( interpolate && p.presentGenerated ) ? generated : nil;
+        g.pendingHoldsSlot = true;
         g.lateDrawables    = true;
         g.hasHistory       = true;
-        g.cur ^= 1;
+        g.cur              = ( g.cur + 1 ) % SLOTS;
 
         if( !g.loggedFirst )
         {
@@ -552,45 +599,69 @@ bool RTGL1::MetalFI::Present( id< MTLCommandBuffer > cb, CAMetalLayer* layer )
     id< MTLTexture > generated = g.pendingGenerated;
     g.pendingReal              = nil;
     g.pendingGenerated         = nil;
+    g.pendingHoldsSlot         = false; // given back by the presentation below
 
-    {
-        const double now = Now();
-        const double dt  = now - g.lastPresent;
-        if( g.lastPresent > 0 && dt > 0 && dt < 0.25 )
-        {
-            g.frameInterval = g.frameInterval * 0.9 + dt * 0.1;
-        }
-        g.lastPresent = now;
-    }
-
+    dispatch_semaphore_t sem = g.slotSem;
     if( !layer || !EnsurePresentPipeline( layer.pixelFormat ) )
     {
+        dispatch_semaphore_signal( sem );
         return true; // nothing presented this frame
     }
 
-    bool generatedPresented = false;
-    if( generated )
-    {
-        if( id< CAMetalDrawable > d = [layer nextDrawable] )
+    // presented asynchronously, after 'cb' (it waits for the frame's rendering): acquiring two
+    // drawables here would block the game until the previous frame's ones are shown
+    id< MTLRenderPipelineState > pipe  = g.presentPipe;
+    id< MTLSamplerState >        smp   = g.sampler;
+    id< MTLCommandQueue >        queue = cb.commandQueue;
+    dispatch_queue_t             dq    = g.presentQueue;
+
+    [cb addCompletedHandler:^( id< MTLCommandBuffer > ) {
+      {
+          const double now  = Now();
+          const double last = g_lastFrameDone.exchange( now );
+          const double dt   = now - last;
+          if( last > 0 && dt > 0 && dt < 0.25 )
+          {
+              g_frameTime.store( g_frameTime.load() * 0.9 + dt * 0.1 );
+          }
+      }
+
+      dispatch_async( dq, ^{
+        @autoreleasepool
         {
-            BlitToDrawable( cb, d, generated, @"Blit generated frame to swapchain" );
-            [cb presentDrawable:d];
-            generatedPresented = true;
+            id< MTLCommandBuffer > pc = [queue commandBuffer];
+            pc.label                  = @"RTGL1 MetalFX frame interpolation present";
+
+            bool generatedPresented = false;
+            if( generated )
+            {
+                if( id< CAMetalDrawable > d = [layer nextDrawable] )
+                {
+                    BlitToDrawable( pc, pipe, smp, d, generated, @"Blit generated frame to swapchain" );
+                    [pc presentDrawable:d];
+                    generatedPresented = true;
+                }
+            }
+            if( id< CAMetalDrawable > d = [layer nextDrawable] )
+            {
+                BlitToDrawable( pc, pipe, smp, d, real, @"Blit to swapchain" );
+                if( generatedPresented )
+                {
+                    // the generated frame is shown for a half of the frame time
+                    [pc presentDrawable:d afterMinimumDuration:std::clamp( g_frameTime.load() * 0.5, 0.0, 0.05 )];
+                }
+                else
+                {
+                    [pc presentDrawable:d];
+                }
+            }
+            [pc addCompletedHandler:^( id< MTLCommandBuffer > ) {
+              dispatch_semaphore_signal( sem );
+            }];
+            [pc commit];
         }
-    }
-    if( id< CAMetalDrawable > d = [layer nextDrawable] )
-    {
-        BlitToDrawable( cb, d, real, @"Blit to swapchain" );
-        if( generatedPresented )
-        {
-            // the generated frame is shown for a half of the frame time
-            [cb presentDrawable:d afterMinimumDuration:std::clamp( g.frameInterval * 0.5, 0.0, 0.05 )];
-        }
-        else
-        {
-            [cb presentDrawable:d];
-        }
-    }
+      } );
+    }];
     return true;
 }
 
