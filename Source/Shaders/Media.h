@@ -132,6 +132,14 @@ bool isRefractFromFlags( uint geometryInstanceFlags, float roughness )
              roughness < 0.1 );
 }
 
+// RG_MESH_PRIMITIVE_POLISHED, in the spare instance flag bit
+#define GEOM_INST_FLAG_POLISHED GEOM_INST_FLAG_RESERVED_6
+
+bool isPolishedFromFlags( uint geometryInstanceFlags )
+{
+    return TEST_FLAG( geometryInstanceFlags, GEOM_INST_FLAG_POLISHED );
+}
+
 bool isReflectFromFlags( uint geometryInstanceFlags, float roughness )
 {
     return ( TEST_FLAG( geometryInstanceFlags, GEOM_INST_FLAG_REFLECT ) ) ||

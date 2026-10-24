@@ -492,6 +492,12 @@ typedef enum RgMeshPrimitiveFlagBits
     // was tuned with. Combine with RG_MESH_PRIMITIVE_EMISSIVE_OVERRIDE, or
     // TextureMeta will replace `emissive` with the material's constant first.
     RG_MESH_PRIMITIVE_EMISSIVE_SCREEN_SCALED = 1 << 26,
+    // Doom 64 RT (macOS): a POLISHED wall or floor. Like the stylized water, half of its
+    // pixels show the surface, lit as usual, and the other half a mirror reflection of the
+    // scene, blended by a Fresnel-shaped weight -- so it keeps its texture and still
+    // reflects the room. Glossy (low roughness) surfaces alone can't: their one reflection
+    // sample per pixel gets denoised away, except for the lights. textures.json: "isPolished".
+    RG_MESH_PRIMITIVE_POLISHED               = 1 << 27,
 } RgMeshPrimitiveFlagBits;
 typedef uint32_t RgMeshPrimitiveFlags;
 

@@ -267,6 +267,11 @@ bool RTGL1::TextureMetaManager::Modify(
             prim.flags |= RG_MESH_PRIMITIVE_MIRROR_IF_SMOOTH;
         }
 
+        if( meta->isPolished )
+        {
+            prim.flags |= RG_MESH_PRIMITIVE_POLISHED;
+        }
+
         if( meta->isThinMedia )
         {
             prim.flags |= RG_MESH_PRIMITIVE_THIN_MEDIA;

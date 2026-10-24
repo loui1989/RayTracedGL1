@@ -959,8 +959,12 @@ void main()
         bool toRefract = isRefractFromFlags( h.geometryInstanceFlags, h.roughness );
         bool toReflect = isReflectFromFlags( h.geometryInstanceFlags, h.roughness );
 
+        // Doom 64 RT (macOS): a polished surface seen directly (RG_MESH_PRIMITIVE_POLISHED)
+        const bool polished = i == 0 && isPolishedFromFlags( h.geometryInstanceFlags ) &&
+                              !toReflect && !toRefract && !isPortal;
 
-        if (!toReflect && !toRefract && !isPortal)
+
+        if (!toReflect && !toRefract && !isPortal && !polished)
         {
             break;
         }
@@ -1015,7 +1019,29 @@ void main()
         // bit-for-bit unchanged.
         vec3  shadeNormal = normal;
 
-        if( stylizedWater )
+        if( polished )
+        {
+            // As the stylized water below: odd pixels keep the surface (lit as usual, with its
+            // own texture and sheen), even pixels are its mirror reflection; CmCheckerboard
+            // resolves them into F * reflection + (1 - F) * surface. F has the Schlick shape
+            // (weak head-on, strong at grazing angles), remapped so the reflection reads.
+            const float cosTheta = clamp( dot( normal, -normalize( rayDir ) ), 0.0, 1.0 );
+            F = mix( 0.15, 0.6, pow( 1.0 - cosTheta, 5.0 ) );
+
+            if( isPixOdd )
+            {
+                // *2 compensates the split: this half covers two pixels
+                imageStore( framebufThroughput, pix, vec4( throughput * ( 1.0 - F ) * 2.0, 1.0 ) );
+                imageStore( framebufReactivity,
+                            getRegularPixFromCheckerboardPix( pix ),
+                            vec4( UPSCALER_REACTIVITY_REFLREFR ) );
+                return;
+            }
+
+            // even pixels: the reflection below, weighted by F
+            doRefraction = false;
+        }
+        else if( stylizedWater )
         {
             // Never refract: these are opaque floor flats, there is nothing
             // below them to see. Instead spend the checkerboard split on
@@ -1264,7 +1290,7 @@ void main()
         {
             rayDir = reflect( normalize( rayDir ), shadeNormal );
 
-            if( !isWater )
+            if( !isWater && !polished )
             {
                 throughput *= getFresnelSchlick( max( 0, dot( normal, rayDir ) ),
                                                  getSpecularColor( h.albedo, h.metallic ) );

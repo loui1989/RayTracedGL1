@@ -60,6 +60,8 @@ struct TextureMeta
 
     bool isGlassIfSmooth  = false;
     bool isMirrorIfSmooth = false;
+    // RG_MESH_PRIMITIVE_POLISHED
+    bool isPolished       = false;
 
     bool isThinMedia = false;
 

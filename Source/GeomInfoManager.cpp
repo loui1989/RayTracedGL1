@@ -233,6 +233,12 @@ uint32_t RTGL1::GeomInfoManager::GetPrimitiveFlags( const RgMeshInfo*          m
         f |= GEOM_INST_FLAG_MIRROR_IF_SMOOTH;
     }
 
+    // the spare bit, see GEOM_INST_FLAG_POLISHED in Media.h
+    if( info.flags & RG_MESH_PRIMITIVE_POLISHED )
+    {
+        f |= GEOM_INST_FLAG_RESERVED_6;
+    }
+
     if( ( info.flags & RG_MESH_PRIMITIVE_IGNORE_REFRACT_AFTER ) ||
         ( mesh && ( mesh->flags & RG_MESH_FORCE_IGNORE_REFRACT_AFTER ) ) )
     {
