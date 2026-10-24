@@ -1173,6 +1173,12 @@ void RTGL1::VulkanDevice::FillUniform( RTGL1::ShGlobalUniform* gu,
         gu->nrdValidation = !!illum.nrdValidation;
         gu->rrDemod       = !!illum.rrDemod;
         gu->rrDemodFilter = std::min( illum.rrDemodFilter, 2u );
+#ifdef __APPLE__
+        // the re-modulation is done by the post-RR exposure pass, which the MetalFX denoiser
+        // doesn't use (rrPreExposure is 0 above): it gets the colour with its albedo, and the
+        // albedo guides, which is what it expects
+        gu->rrDemod = 0u;
+#endif
         gu->svgfFp        = std::min( illum.svgfFp, 2u );
         gu->svgfFpGrad    = !!illum.svgfFpGrad;
         gu->svgfIndirMaxHist = std::clamp( illum.svgfIndirMaxHist, 0.0f, 256.0f );
