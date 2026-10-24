@@ -1664,6 +1664,7 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
     if( !drawInfo.disableRasterization )
     {
         // draw rasterized geometry into the final image (or the RR layer)
+        auto label = CmdLabel{ cmd, "Rasterized geometry" };
         rasterizer->DrawToFinalImage( cmd,
                                       frameIndex,
                                       *textureManager,
@@ -1866,6 +1867,7 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
             }
             else if( amdFsr2 )
             {
+                auto label = CmdLabel{ cmd, "Upscale (FSR2 / MetalFX)" };
                 accum = amdFsr2->Apply( cmd,
                                         frameIndex,
                                         *framebuffers,
@@ -2019,6 +2021,7 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
     // draw geometry such as HUD into an upscaled framebuf
     if( !drawInfo.disableRasterization )
     {
+        auto label = CmdLabel{ cmd, "Rasterized HUD to swapchain" };
         if( !needHudOnly )
         {
             framebuffers->BarrierOne(

@@ -259,18 +259,36 @@ bool rqIsCandidateAccepted( rayQueryEXT rq, bool media )
         return false;
     }
 
-    const ShTriangle tr = getTriangle( instanceId,
-                                       rayQueryGetIntersectionInstanceCustomIndexEXT( rq, false ),
-                                       rayQueryGetIntersectionGeometryIndexEXT( rq, false ),
-                                       rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) );
+    // Only the layer 0 texture coordinates, as the former any-hit shader read them
+    // (getTriangleTexInfo): this runs for every candidate along a ray, and the full
+    // getTriangle -- all layers, normals, world and previous-frame positions -- made it
+    // the most expensive part of tracing through alpha-tested geometry.
+    const uint primitiveId = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, false ) );
+    const uint baseVertex  = geometryInstances[ instanceId ].baseVertexIndex;
+    const uint baseIndex   = geometryInstances[ instanceId ].baseIndexIndex;
 
     const vec2 b          = rayQueryGetIntersectionBarycentricsEXT( rq, false );
     const vec3 baryCoords = vec3( 1.0 - b.x - b.y, b.x, b.y );
-    const vec2 texCoord   = tr.layerTexCoord[ 0 ] * baryCoords;
+
+    vec2 texCoord;
+    if( ( geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_IS_DYNAMIC ) != 0 )
+    {
+        const uvec3 vi = getVertIndicesDynamic( baseVertex, baseIndex, primitiveId );
+        texCoord       = g_dynamicVertices[ vi[ 0 ] ].texCoord * baryCoords[ 0 ] +
+                   g_dynamicVertices[ vi[ 1 ] ].texCoord * baryCoords[ 1 ] +
+                   g_dynamicVertices[ vi[ 2 ] ].texCoord * baryCoords[ 2 ];
+    }
+    else
+    {
+        const uvec3 vi = getVertIndicesStatic( baseVertex, baseIndex, primitiveId );
+        texCoord       = g_staticVertices[ vi[ 0 ] ].texCoord * baryCoords[ 0 ] +
+                   g_staticVertices[ vi[ 1 ] ].texCoord * baryCoords[ 1 ] +
+                   g_staticVertices[ vi[ 2 ] ].texCoord * baryCoords[ 2 ];
+    }
 
     // check only first material's albedo
-    const vec4 color = getTextureSample( tr.layerColorTextures[ 0 ], texCoord ) *
-                       unpackUintColor( tr.layerColors[ 0 ] );
+    const vec4 color = getTextureSample( geometryInstances[ instanceId ].texture_base, texCoord ) *
+                       unpackUintColor( geometryInstances[ instanceId ].colorFactor_base );
 
     return ( color.r + color.g + color.b ) / 3 * color.a + color.a >= RQ_ALPHA_THRESHOLD;
 }
