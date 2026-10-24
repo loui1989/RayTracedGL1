@@ -66,7 +66,7 @@ struct RrState
     id        scaler = nil; // id< MTLFXTemporalDenoisedScaler >
     id< MTLTexture > color = nil, depth = nil, motion = nil;
     id< MTLTexture > diffAlbedo = nil, specAlbedo = nil, normal = nil, roughness = nil;
-    id< MTLTexture > overlay = nil, out = nil;
+    id< MTLTexture > overlay = nil, out = nil, reactive = nil;
 
     uint32_t renderW = 0, renderH = 0, outW = 0, outH = 0;
     bool     reset          = true;
@@ -83,6 +83,7 @@ using namespace metal;
 struct RrPrepParams
 {
     uint useOverlay;
+    uint useDisocc;
 };
 
 // RTGL1's framebuffers -> the formats the denoiser was created with (sanitized)
@@ -101,6 +102,8 @@ kernel void rr_prep( texture2d< float, access::read >  srcColor      [[texture(0
                      texture2d< float, access::write > normal        [[texture(12)]],
                      texture2d< float, access::write > roughness     [[texture(13)]],
                      texture2d< float, access::write > overlay       [[texture(14)]],
+                     texture2d< float, access::read >  srcDisocc     [[texture(15)]],
+                     texture2d< float, access::write > reactive      [[texture(16)]],
                      constant RrPrepParams& prm                       [[buffer(0)]],
                      uint2 p [[thread_position_in_grid]] )
 {
@@ -136,21 +139,53 @@ kernel void rr_prep( texture2d< float, access::read >  srcColor      [[texture(0
     float4 o = prm.useOverlay != 0 ? srcOverlay.read( p ) : float4( 0.0 );
     o        = select( o, float4( 0.0 ), !isfinite( o ) );
     overlay.write( float4( max( o.rgb, 0.0f ), saturate( o.a ) ), p );
+
+    // CmNoisyCompose's mask of sharp lighting changes (muzzle flashes, explosions, flickering
+    // lights): no history there, as DLSS-RR's disocclusion mask does
+    float r = prm.useDisocc != 0 ? srcDisocc.read( p ).r : 0.0;
+    reactive.write( float4( ( isfinite( r ) && r > 0.0 ) ? 1.0 : 0.0 ), p );
 }
 
 struct RrCopyParams
 {
     uint   demod;
+    uint   filter; // as rt_rr_demod_filter: 0 bilinear, 1 Catmull-Rom, 2 nearest
     float2 renderSize;
     float2 jitter;
 };
+
+float3 SampleCatmullRom( texture2d< float > t, sampler s, float2 uv, float2 size )
+{
+    float2 samplePos = uv * size;
+    float2 texPos1   = floor( samplePos - 0.5 ) + 0.5;
+    float2 f         = samplePos - texPos1;
+    float2 w0        = f * ( -0.5 + f * ( 1.0 - 0.5 * f ) );
+    float2 w1        = 1.0 + f * f * ( -2.5 + 1.5 * f );
+    float2 w2        = f * ( 0.5 + f * ( 2.0 - 1.5 * f ) );
+    float2 w3        = f * f * ( -0.5 + 0.5 * f );
+    float2 w12       = w1 + w2;
+    float2 p0        = ( texPos1 - 1.0 ) / size;
+    float2 p3        = ( texPos1 + 2.0 ) / size;
+    float2 p12       = ( texPos1 + w2 / w12 ) / size;
+    float3 acc       = float3( 0.0 );
+    acc += t.sample( s, float2( p0.x, p0.y ), level( 0 ) ).rgb * w0.x * w0.y;
+    acc += t.sample( s, float2( p12.x, p0.y ), level( 0 ) ).rgb * w12.x * w0.y;
+    acc += t.sample( s, float2( p3.x, p0.y ), level( 0 ) ).rgb * w3.x * w0.y;
+    acc += t.sample( s, float2( p0.x, p12.y ), level( 0 ) ).rgb * w0.x * w12.y;
+    acc += t.sample( s, float2( p12.x, p12.y ), level( 0 ) ).rgb * w12.x * w12.y;
+    acc += t.sample( s, float2( p3.x, p12.y ), level( 0 ) ).rgb * w3.x * w12.y;
+    acc += t.sample( s, float2( p0.x, p3.y ), level( 0 ) ).rgb * w0.x * w3.y;
+    acc += t.sample( s, float2( p12.x, p3.y ), level( 0 ) ).rgb * w12.x * w3.y;
+    acc += t.sample( s, float2( p3.x, p3.y ), level( 0 ) ).rgb * w3.x * w3.y;
+    return max( acc, float3( 0.0 ) );
+}
 
 // into RTGL1's upscaled framebuffer; with demodulation, the denoised lighting is multiplied by the
 // albedo / texel factor CmNoisyCompose divided out (nearest texel at the unjittered position, as
 // CmRrPostExposure's rrDemodFilter 2: the pixel art stays crisp, it never goes through the network)
 kernel void rr_copy_out( texture2d< float, access::read >  src         [[texture(0)]],
                          texture2d< float, access::write > dst         [[texture(1)]],
-                         texture2d< float, access::read >  demodFactor [[texture(2)]],
+                         texture2d< float >                demodFactor [[texture(2)]],
                          constant RrCopyParams& prm                    [[buffer(0)]],
                          uint2 gid [[thread_position_in_grid]] )
 {
@@ -161,9 +196,26 @@ kernel void rr_copy_out( texture2d< float, access::read >  src         [[texture
     c        = max( c, 0.0f );
     if( prm.demod != 0 )
     {
-        float2 uv = ( float2( gid ) + 0.5 ) / float2( src.get_width(), src.get_height() ) - prm.jitter / prm.renderSize;
-        int2   nn = clamp( int2( floor( uv * prm.renderSize ) ), int2( 0 ), int2( prm.renderSize ) - 1 );
-        float3 m  = demodFactor.read( uint2( nn ) ).rgb;
+        constexpr sampler lin( filter::linear, address::clamp_to_edge, coord::normalized );
+        // in texture UV (the framebuffer can be larger than the render size)
+        float2 texSize = float2( demodFactor.get_width(), demodFactor.get_height() );
+        float2 uv      = ( ( float2( gid ) + 0.5 ) / float2( src.get_width(), src.get_height() ) -
+                      prm.jitter / prm.renderSize ) *
+                    prm.renderSize / texSize;
+        float3 m;
+        if( prm.filter == 2 )
+        {
+            int2 nn = clamp( int2( floor( uv * texSize ) ), int2( 0 ), int2( prm.renderSize ) - 1 );
+            m       = demodFactor.read( uint2( nn ) ).rgb;
+        }
+        else if( prm.filter == 1 )
+        {
+            m = SampleCatmullRom( demodFactor, lin, uv, texSize );
+        }
+        else
+        {
+            m = demodFactor.sample( lin, uv, level( 0 ) ).rgb;
+        }
         m         = select( m, float3( 1.0 ), !isfinite( m ) );
         c        *= max( m, 0.0f );
     }
@@ -264,6 +316,7 @@ void ReleaseScaler()
     g.roughness  = nil;
     g.overlay    = nil;
     g.out        = nil;
+    g.reactive   = nil;
     g.renderW = g.renderH = g.outW = g.outH = 0;
 }
 
@@ -300,6 +353,9 @@ bool EnsureScaler( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
         // translucent sprites / particles: drawn into a layer, composited over the denoised image
         d.transparencyOverlayTextureEnabled      = YES;
         d.transparencyOverlayTextureFormat       = colorFormat;
+        // where the lighting changed sharply: CmNoisyCompose's disocclusion mask
+        d.reactiveMaskTextureEnabled             = YES;
+        d.reactiveMaskTextureFormat              = MTLPixelFormatR8Unorm;
 
         id< MTLFXTemporalDenoisedScaler > scaler = [d newTemporalDenoisedScalerWithDevice:g.device];
         if( !scaler )
@@ -326,8 +382,9 @@ bool EnsureScaler( uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh )
         g.roughness  = makeTex( roughnessFormat, rw, rh, scaler.roughnessTextureUsage );
         g.overlay    = makeTex( colorFormat, rw, rh, scaler.transparencyOverlayTextureUsage );
         g.out        = makeTex( colorFormat, ow, oh, scaler.outputTextureUsage );
+        g.reactive   = makeTex( MTLPixelFormatR8Unorm, rw, rh, scaler.reactiveMaskTextureUsage );
         if( !g.color || !g.depth || !g.motion || !g.diffAlbedo || !g.specAlbedo || !g.normal || !g.roughness ||
-            !g.overlay || !g.out )
+            !g.overlay || !g.out || !g.reactive )
         {
             Log( "texture allocation failed" );
             ReleaseScaler();
@@ -428,7 +485,7 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
                            double                        timeDelta,
                            bool                          resetAccumulation,
                            bool, // specHitDistEnabled: MetalFX derives it itself
-                           bool, // disoccMaskEnabled: no such input
+                           bool                          disoccMaskEnabled,
                            bool, // exposureTexEnabled: the colour is always exposed on macOS
                            bool                          transparencyLayerEnabled,
                            const float*                  worldToViewMatrix16,
@@ -463,8 +520,9 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
         id< MTLTexture > srcOverlay = tex( FI::FB_IMAGE_INDEX_RR_TRANSPARENCY );
         id< MTLTexture > outputVk   = tex( FI::FB_IMAGE_INDEX_UPSCALED_PONG );
         id< MTLTexture > demodTex   = tex( FI::FB_IMAGE_INDEX_RR_DEMOD_FACTOR );
+        id< MTLTexture > disoccTex  = tex( FI::FB_IMAGE_INDEX_RR_DISOCCLUSION );
         if( !srcColor || !srcDepth || !srcMotion || !srcDiff || !srcNormal || !srcSpec || !srcOverlay || !outputVk ||
-            !demodTex )
+            !demodTex || !disoccTex )
         {
             if( g.loggedFailures++ < 5 )
             {
@@ -492,17 +550,17 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
             }
         }
 
-        const uint32_t useOverlay = transparencyLayerEnabled ? 1u : 0u;
+        const uint32_t prepPrm[ 2 ] = { transparencyLayerEnabled ? 1u : 0u, disoccMaskEnabled ? 1u : 0u };
 
         struct
         {
             uint32_t demod;
-            uint32_t pad;
+            uint32_t filter;
             float    renderSize[ 2 ];
             float    jitter[ 2 ];
         } copyPrm = {
             m_demod ? 1u : 0u,
-            0,
+            m_demodFilter,
             { float( rs.renderWidth ), float( rs.renderHeight ) },
             { jitterOffset.data[ 0 ], jitterOffset.data[ 1 ] },
         };
@@ -524,13 +582,13 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
                     id< MTLTexture > textures[] = {
                         srcColor,  srcDepth,  srcMotion,    srcDiff,      srcNormal,    srcSpec,
                         srcOverlay, g.color, g.depth,       g.motion,     g.diffAlbedo, g.specAlbedo,
-                        g.normal,   g.roughness, g.overlay,
+                        g.normal,   g.roughness, g.overlay,  disoccTex,    g.reactive,
                     };
                     for( NSUInteger i = 0; i < std::size( textures ); i++ )
                     {
                         [enc setTexture:textures[ i ] atIndex:i];
                     }
-                    [enc setBytes:&useOverlay length:sizeof( useOverlay ) atIndex:0];
+                    [enc setBytes:&prepPrm length:sizeof( prepPrm ) atIndex:0];
                     [enc dispatchThreads:MTLSizeMake( rs.renderWidth, rs.renderHeight, 1 )
                         threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];
                     [enc endEncoding];
@@ -547,6 +605,7 @@ auto RTGL1::DLSSRR::Apply( VkCommandBuffer               cmd,
                     ds.normalTexture                     = g.normal;
                     ds.roughnessTexture                  = g.roughness;
                     ds.transparencyOverlayTexture        = g.overlay;
+                    ds.reactiveMaskTexture               = g.reactive;
                     ds.outputTexture                     = g.out;
                     ds.motionVectorScaleX                = float( rs.renderWidth );
                     ds.motionVectorScaleY                = float( rs.renderHeight );

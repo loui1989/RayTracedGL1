@@ -81,10 +81,15 @@ public:
     bool SupportsScale( uint32_t renderWidth, uint32_t renderHeight, uint32_t outWidth, uint32_t outHeight ) const;
     // the colour is lighting only (CmNoisyCompose, rrDemod): multiply FB_IMAGE_INDEX_RR_DEMOD_FACTOR
     // back after denoising
-    void SetDemodulation( bool demod ) { m_demod = demod; }
+    void SetDemodulation( bool demod, uint32_t filter )
+    {
+        m_demod       = demod;
+        m_demodFilter = filter;
+    }
 
 private:
-    bool m_demod{ false };
+    bool     m_demod{ false };
+    uint32_t m_demodFilter{ 1 };
 
 public:
 #endif

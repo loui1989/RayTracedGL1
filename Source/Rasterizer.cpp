@@ -286,6 +286,8 @@ struct RasterDrawParams
     std::optional< RasterLensFlares > flaresParams{};
     std::optional< float >            classic{};
     bool                              manualSrgb{ false };
+    // run the render pass even with nothing to draw, for its clear on load
+    bool                              clearIfEmpty{ false };
 };
 
 }
@@ -461,6 +463,9 @@ void RTGL1::Rasterizer::DrawToFinalImage( VkCommandBuffer               cmd,
         .defaultViewProj = defaultViewProj,
         .flaresParams    = RasterLensFlares{ .textureManager = &textureManager },
         .classic         = -lightmapScreenCoverage,
+        // the RR transparency layer is cleared by this pass: an empty frame must clear it too,
+        // or the last thing drawn into it (a muzzle flash) stays on the screen
+        .clearIfEmpty    = toRrTransparencyLayer,
     };
 
     Draw( cmd, frameIndex, params );
@@ -605,7 +610,7 @@ void RTGL1::Rasterizer::Draw( VkCommandBuffer         cmd,
     const bool draw           = !drawParams.drawInfos.empty();
     const bool drawLensFlares = drawParams.flaresParams && lensFlares->GetCullingInputCount() > 0;
 
-    if( !draw && !drawLensFlares )
+    if( !draw && !drawLensFlares && !drawParams.clearIfEmpty )
     {
         return;
     }

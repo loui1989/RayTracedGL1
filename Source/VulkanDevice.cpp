@@ -1800,7 +1800,8 @@ auto RTGL1::VulkanDevice::Render( VkCommandBuffer& cmd, const RgDrawFrameInfo& d
                     !!pnext::get< RgDrawFrameIlluminationParams >( drawInfo ).rrExposureTexture;
 
 #ifdef __APPLE__
-                nvDlssRr->SetDemodulation( uniform->GetData()->rrDemod != 0 );
+                nvDlssRr->SetDemodulation( uniform->GetData()->rrDemod != 0,
+                                           uniform->GetData()->rrDemodFilter );
 #endif
                 accum = nvDlssRr->Apply( cmd,
                                          frameIndex,
