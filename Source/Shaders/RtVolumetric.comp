@@ -492,6 +492,15 @@ void main()
     const bool allLightsCell =
         ILLUM_VOLUME_ACTIVE || ( inSmoke && globalUniform.smokeAllLights != 0 );
 
+    // A froxel wholly behind the visible surface ends with its lighting multiplied by
+    // a depth gate of exactly 0 (volume_depthGate, below), so its lights and shafts
+    // need not be traced at all -- the result is the same. In a typical indoor view
+    // that is 80-90% of the grid. Cells that feed the illumination volume keep being
+    // computed (their history must converge), and so does everything while a shaft
+    // debug view, which reads the shaft flags, is on.
+    const float depthGate    = volume_depthGate( cell, centerStable );
+    const bool  skipLighting = depthGate <= 0.0 && !allLightsCell && globalUniform.volumeShaftDebug == 0;
+
     vec3 lighting = globalUniform.volumeAmbient.rgb;
     vec3 radiance = vec3( 0.0 );
 
@@ -633,6 +642,7 @@ void main()
     }
     else
 #endif
+    if( !skipLighting )
     {
         vec3 lightdir;
         radiance += traceDirectIllumination_SpecificLight( center, lightdir );
@@ -654,7 +664,7 @@ void main()
     // around it, so the seam is not visible.
     bool shaftLit     = false;
     bool shaftVisible = false;
-    if( !allLightsCell )
+    if( !allLightsCell && !skipLighting )
     {
         lighting += globalUniform.volumeLightMult *
                     traceShaftLights( center, toviewer, shaftLit, shaftVisible );
@@ -748,7 +758,7 @@ void main()
     // un-fog everything seen through a gated cell. Only what the medium ADDS is
     // gated. Applied before the tint so a gated cell is black rather than
     // tinted black, and before the debug overrides so those still paint.
-    lighting *= volume_depthGate( cell, centerStable );
+    lighting *= depthGate;
 
     lighting *= smoke_blendTint( fogTint, fogDens, smoke );
 
