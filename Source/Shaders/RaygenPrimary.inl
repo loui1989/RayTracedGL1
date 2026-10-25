@@ -974,7 +974,7 @@ void main()
             imageStore( framebufAlbedo, regPix, vec4( 0.0 ) );
             imageStore( framebufScreenEmisRT,
                         regPix,
-                        vec4( polished ? vec3( 1, 0, 1 ) * clamp( h.polish / 1.75, 0.0, 1.0 ) + vec3( 0.02 )
+                        vec4( polished ? vec3( 1, 0, 1 ) * clamp( h.polish / 3.0, 0.0, 1.0 ) + vec3( 0.02 )
                                        : vec3( 0, 1, 0 ),
                               0.0 ) );
             imageStoreNormal( pix, h.normal );

@@ -738,8 +738,8 @@ ShHitInfo getHitInfoBounce(
         h.roughness = stripRoughness ? 1.0 : orm[ 1 ];
         h.metallic  = stripMetallic ? 0.0 : orm[ 2 ];
         // a polished texture's _orm roughness is its mirror mask: smooth texels mirror, rough
-        // ones don't (0.32, a uniform _orm of the earlier polished textures, gives ~1)
-        h.polish    = clamp( ( 0.7 - orm[ 1 ] ) * 2.5, 0.0, 1.75 );
+        // ones (0.7+) don't; roughness 0 mirrors ~3x as much as the old uniform polish
+        h.polish    = clamp( ( 0.7 - orm[ 1 ] ) * 4.5, 0.0, 3.0 );
     }
     else
     {
