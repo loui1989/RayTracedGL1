@@ -61,6 +61,7 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 #include <optional>
 
 // the same as in VulkanDevice_Init.cpp
@@ -2019,6 +2020,8 @@ RTGL1::MetalDevice::~MetalDevice()
 
 void RTGL1::MetalDevice::StartFrame( const RgStartFrameInfo* pInfo )
 {
+    FlushDeferredPrints();
+
     if( !pInfo )
     {
         throw RgException( RG_RESULT_WRONG_FUNCTION_ARGUMENT, "Argument is null" );
@@ -2113,6 +2116,8 @@ void RTGL1::MetalDevice::StartFrame( const RgStartFrameInfo* pInfo )
 
 void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 {
+    FlushDeferredPrints();
+
     if( !pInfo )
     {
         throw RgException( RG_RESULT_WRONG_FUNCTION_ARGUMENT, "Argument is null" );
@@ -3315,15 +3320,50 @@ void RTGL1::MetalDevice::ScratchFree( const RgPrimitiveVertex* pPointer )
     delete[] pPointer;
 }
 
+namespace
+{
+// The application's print callback is called only on the thread that calls RTGL1
+// (rgStartFrame / rgDrawFrame): messages from Metal's completion handlers are queued.
+// gzdoom's console isn't thread-safe: printing from a completion handler thread froze the game,
+// as the handler that releases the frame slot never ran.
+std::mutex                                                   g_printMutex;
+std::thread::id                                              g_apiThread{};
+std::vector< std::pair< std::string, RgMessageSeverityFlags > > g_deferredPrints;
+}
+
 void RTGL1::MetalDevice::Print( std::string_view msg, RgMessageSeverityFlags severity ) const
 {
-    static auto printMutex = std::mutex{};
+    auto l = std::lock_guard{ g_printMutex };
 
-    auto l = std::lock_guard{ printMutex };
+    if( g_apiThread != std::thread::id{} && std::this_thread::get_id() != g_apiThread )
+    {
+        if( g_deferredPrints.size() < 4096 )
+        {
+            g_deferredPrints.emplace_back( std::string{ msg }, severity );
+        }
+        return;
+    }
 
     if( impl->pfnPrint )
     {
         // msg is a view into a null-terminated string, the same as in VulkanDevice
         impl->pfnPrint( msg.data(), severity, impl->pUserPrintData );
+    }
+}
+
+void RTGL1::MetalDevice::FlushDeferredPrints()
+{
+    std::vector< std::pair< std::string, RgMessageSeverityFlags > > msgs;
+    {
+        auto l      = std::lock_guard{ g_printMutex };
+        g_apiThread = std::this_thread::get_id();
+        msgs.swap( g_deferredPrints );
+    }
+    if( impl->pfnPrint )
+    {
+        for( const auto& [ m, severity ] : msgs )
+        {
+            impl->pfnPrint( m.c_str(), severity, impl->pUserPrintData );
+        }
     }
 }

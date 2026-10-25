@@ -80,6 +80,9 @@ public:
     bool IsDevMode() const { return false; }
 
 private:
+    // prints the messages of other threads (Metal's completion handlers), on the calling thread
+    void FlushDeferredPrints();
+
     struct Impl;
     std::unique_ptr< Impl > impl;
 
