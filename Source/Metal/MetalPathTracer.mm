@@ -264,7 +264,7 @@ void RTGL1::MetalPathTracer::EndPass( __strong id< MTLComputeCommandEncoder >& e
 
 void RTGL1::MetalPathTracer::PrintProfile( id< MTLCommandBuffer > cmd )
 {
-    if( ++profiledFrames % 120 != 0 )
+    if( !printProfileNow )
     {
         return;
     }

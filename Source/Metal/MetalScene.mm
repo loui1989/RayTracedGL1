@@ -1056,6 +1056,24 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     tlasDesc.instancedAccelerationStructures =
         [NSArray arrayWithObjects:f.usedBlas.data() count:f.usedBlas.size()];
     tlasDesc.instanceCount            = NSUInteger( instances.size() );
+    {
+        lastStats = Stats{
+            .dynamicGeometries = 0,
+            .dynamicTriangles  = dynamicStorage.indices.size() / 3,
+            .dynamicVertices   = dynamicStorage.vertices.size(),
+            .staticGeometries  = 0,
+            .tlasInstances     = instances.size(),
+            .geometryInfos     = geomInfos.size(),
+        };
+        for( const auto& g : dynamicGeoms )
+        {
+            lastStats.dynamicGeometries += g.size();
+        }
+        for( const auto& g : staticGeoms )
+        {
+            lastStats.staticGeometries += g.size();
+        }
+    }
     tlasDesc.instanceDescriptorBuffer = f.instances;
     tlasDesc.instanceDescriptorType   = MTLAccelerationStructureInstanceDescriptorTypeUserID;
     tlasDesc.usage                    = MTLAccelerationStructureUsagePreferFastBuild;

@@ -1591,12 +1591,15 @@ struct RTGL1::MetalDevice::Impl
     }
     bool frameInterpolationWarned{ false };
 
-    // Debug: RTGL1_METAL_PROFILE=1, the CPU time of the frame's parts, printed every 120 frames
+    // Debug: RTGL1_METAL_PROFILE=1, the CPU time of the frame's parts, printed every 2 seconds
     struct CpuProfile
     {
         bool     enabled{ false };
         using Clock = std::chrono::steady_clock;
         Clock::time_point startFrameEnd{};
+        Clock::time_point lastPrint{};
+        bool              printNow{ false };
+        double            sincePrint{ 0 }; // ms, between the last two prints
         double   waitFrame{ 0 }, startFrame{ 0 }, betweenFrames{ 0 }, uploads{ 0 }, sceneBuild{ 0 },
                  render{ 0 }, drawFrame{ 0 };
         uint64_t primitives{ 0 }, frames{ 0 };
@@ -2118,6 +2121,17 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
     const auto tDraw = Impl::CpuProfile::Clock::now();
     impl->cpu.betweenFrames += Impl::CpuProfile::Ms( impl->cpu.startFrameEnd, tDraw );
+    // print the profile every 2 seconds, whatever the frame rate
+    impl->cpu.printNow = impl->cpu.enabled && tDraw - impl->cpu.lastPrint >= std::chrono::seconds( 2 );
+    if( impl->cpu.printNow )
+    {
+        impl->cpu.sincePrint = Impl::CpuProfile::Ms( impl->cpu.lastPrint, tDraw );
+        impl->cpu.lastPrint  = tDraw;
+    }
+    if( impl->pathTracer )
+    {
+        impl->pathTracer->printProfileNow = impl->cpu.printNow;
+    }
 
     // the same as VulkanDevice::DrawFrame: a scene can modify some parameters
     auto modified            = RgDrawFrameInfo{ *pInfo };
@@ -2182,9 +2196,9 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
         if( profile )
         {
-            const uint64_t frame = impl->frameCounter;
+            const bool printNow = impl->cpu.printNow;
             [cmdScene addCompletedHandler:^( id< MTLCommandBuffer > c ) {
-              if( frame % 120 == 0 )
+              if( printNow )
               {
                   debug::Warning( "Metal profile: {:>8.3f} ms  Acceleration structures",
                                ( c.GPUEndTime - c.GPUStartTime ) * 1000.0 );
@@ -2201,7 +2215,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                   count++;
               }
               prevEnd = c.GPUEndTime;
-              if( frame % 120 == 0 && count > 0 )
+              if( printNow && count > 0 )
               {
                   debug::Warning( "Metal profile: {:>8.3f} ms  GPU frame time (average)", sum / count * 1000.0 );
                   sum   = 0;
@@ -2803,17 +2817,28 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
     }
 
     impl->cpu.drawFrame += Impl::CpuProfile::Ms( tDraw, Impl::CpuProfile::Clock::now() );
-    if( impl->cpu.enabled && ++impl->cpu.frames % 120 == 0 )
+    if( impl->cpu.enabled && ( ++impl->cpu.frames, impl->cpu.printNow ) )
     {
         auto& c = impl->cpu;
-        const double n = 120.0;
+        const double n = double( c.frames );
+        debug::Warning( "Metal profile: {:.1f} fps over the last {:.1f} s",
+                        n * 1000.0 / std::max( 1.0, c.sincePrint ), c.sincePrint / 1000.0 );
         debug::Warning( "Metal profile (CPU, ms per frame): waiting for a frame slot {:.2f}, StartFrame {:.2f}, "
                         "game + uploads {:.2f} (uploads {:.2f}, {:.0f} primitives), DrawFrame {:.2f} "
                         "(acceleration structures {:.2f}, path tracer encoding {:.2f})",
                         c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n,
                         double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n );
+        if( impl->scene )
+        {
+            const auto& st = impl->scene->lastStats;
+            debug::Warning( "Metal profile: scene: {} dynamic geometries ({} triangles, {} vertices), "
+                            "{} static geometries, {} TLAS instances, {} geometry infos",
+                            st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
+                            st.staticGeometries, st.tlasInstances, st.geometryInfos );
+        }
         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
         c.primitives = 0;
+        c.frames     = 0;
     }
     else if( !impl->cpu.enabled )
     {

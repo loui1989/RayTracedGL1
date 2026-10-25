@@ -99,6 +99,13 @@ public:
     // Returns false, if there's nothing to trace.
     bool Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskWorld );
 
+    // Debug: the size of the last built scene, for RTGL1_METAL_PROFILE
+    struct Stats
+    {
+        size_t dynamicGeometries, dynamicTriangles, dynamicVertices, staticGeometries, tlasInstances, geometryInfos;
+    };
+    Stats lastStats{};
+
     // VertexBufferStatic, VertexBufferDynamic, ..., GeometryInstances, GeometryIndicesPrevToCur, topLevelAS
     void Bind( MetalBindingTable& table ) const;
 

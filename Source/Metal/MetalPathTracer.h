@@ -48,6 +48,8 @@ class MetalFramebuffers;
 class MetalPathTracer
 {
 public:
+    // set by the device each frame: print the profile of this frame (every couple of seconds)
+    bool printProfileNow{ false };
     MetalPathTracer( id< MTLDevice > device, id< MTLLibrary > library, MetalComputePipelines& shaders );
     ~MetalPathTracer();
 
@@ -231,7 +233,6 @@ private:
     id< MTLCounterSampleBuffer >                counters{ nil };
     std::array< NSString*, MaxProfiledPasses > passNames{};
     uint32_t                                    passCount{ 0 };
-    uint64_t                                    profiledFrames{ 0 };
 };
 
 }
