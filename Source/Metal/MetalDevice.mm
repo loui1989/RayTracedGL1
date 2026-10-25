@@ -2359,7 +2359,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             MetalBindingTable& b = impl->bindings;
             b.SetBuffer( "GlobalUniform", impl->globalUniform[ impl->frameIndex ] );
             b.SetArgumentBuffer(
-                "globalTextures_Images", impl->textures->ImageTableBuffer(), impl->textures->LiveTextures() );
+                "globalTextures_Images", impl->textures->ImageTableBuffer(), impl->textures->ResourcesToUse() );
             b.SetArgumentBuffer( "globalTextures_Samplers", impl->textures->SamplerTableBuffer(), {} );
             b.SetTexture( "blueNoiseTextures", impl->blueNoise );
             b.SetTexture( "renderCubemap", impl->rasterizer->SkyCubemap() );

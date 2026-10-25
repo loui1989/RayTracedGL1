@@ -107,6 +107,10 @@ public:
     id< MTLBuffer > SamplerTableBuffer() const { return samplerTable; }
     // all textures, to make them resident
     const std::vector< id< MTLResource > >& LiveTextures() const;
+    // The textures to list in useResources: all of them, or, if the textures are in a residency set
+    // (macOS 15+), only the ones uploaded in the last few frames, for the hazard tracking of their upload.
+    // useResources of thousands of textures cost ~3 ms of GPU time per render encoder.
+    const std::vector< id< MTLResource > >& ResourcesToUse() const;
     void            UseResources( id< MTLComputeCommandEncoder > enc ) const;
     void            UseResources( id< MTLRenderCommandEncoder > enc ) const;
 
@@ -176,6 +180,18 @@ private:
 
     mutable std::vector< id< MTLResource > > liveTextures;
     mutable bool                             liveTexturesDirty{ true };
+
+    // MTLResidencySet with all the textures, added to the queue; nil if unavailable
+    id                                residencySet{ nil };
+    mutable bool                      residencyDirty{ true };
+    uint64_t                          frameCounter{ 0 };
+    struct Fresh
+    {
+        id< MTLResource > texture;
+        uint64_t          frame;
+    };
+    std::vector< Fresh >              fresh;
+    mutable std::vector< id< MTLResource > > freshList;
 
     std::vector< Slot >                                    slots;
     std::vector< uint32_t >                                freeSlots;

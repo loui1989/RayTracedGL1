@@ -186,6 +186,30 @@ RTGL1::MetalTextureManager::MetalTextureManager( id< MTLDevice >       _device,
 
     slots.reserve( MaxTextureCount );
 
+    // Debug: RTGL1_METAL_NO_RESIDENCY_SET=1, to list all textures in useResources instead
+    if( !std::getenv( "RTGL1_METAL_NO_RESIDENCY_SET" ) )
+    {
+        if( @available( macOS 15.0, * ) )
+        {
+            MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
+            d.label                      = @"RTGL1 textures";
+            d.initialCapacity            = MaxTextureCount;
+
+            NSError*             error = nil;
+            id< MTLResidencySet > set   = [device newResidencySetWithDescriptor:d error:&error];
+            if( set )
+            {
+                [queue addResidencySet:set];
+                residencySet = set;
+            }
+            else
+            {
+                debug::Warning( "Metal backend: no residency set for the textures: {}",
+                                error ? error.localizedDescription.UTF8String : "(no info)" );
+            }
+        }
+    }
+
     // TextureManager::CreateEmptyTexture: white, so that sampling it doesn't change a color
     {
         static_assert( EMPTY_TEXTURE_INDEX == 0 && MATERIAL_NO_TEXTURE == 0 );
@@ -220,7 +244,16 @@ RTGL1::MetalTextureManager::MetalTextureManager( id< MTLDevice >       _device,
     sceneBuildingTextureIndex = CreateSingleTexture( ovrdFolder / "SceneBuildWarning.ktx2", true, "Scene building" );
 }
 
-RTGL1::MetalTextureManager::~MetalTextureManager() = default;
+RTGL1::MetalTextureManager::~MetalTextureManager()
+{
+    if( @available( macOS 15.0, * ) )
+    {
+        if( residencySet )
+        {
+            [queue removeResidencySet:residencySet];
+        }
+    }
+}
 
 RTGL1::TextureOverrides::Loader RTGL1::MetalTextureManager::OnlyKTX2LoaderIfNonDevMode()
 {
@@ -338,6 +371,7 @@ void RTGL1::MetalTextureManager::WriteTableEntry( uint32_t slot )
     static_cast< MTLResourceID* >( imageTable.contents )[ slot ]   = entry.texture;
     static_cast< MTLResourceID* >( samplerTable.contents )[ slot ] = entry.sampler;
     liveTexturesDirty                                              = true;
+    residencyDirty                                                 = true;
 }
 
 uint32_t RTGL1::MetalTextureManager::PrepareTexture( const std::optional< ImageLoader::ResultInfo >& info,
@@ -466,6 +500,11 @@ uint32_t RTGL1::MetalTextureManager::PrepareTexture( const std::optional< ImageL
     }
     [blit endEncoding];
     [cmd commit];
+
+    if( residencySet )
+    {
+        fresh.push_back( { texture, frameCounter } );
+    }
 
     slots[ slot ] = Slot{
         .texture = texture,
@@ -727,6 +766,10 @@ uint32_t RTGL1::MetalTextureManager::Find( const char* pTextureName ) const
 
 void RTGL1::MetalTextureManager::OnFrameStart()
 {
+    frameCounter++;
+    // the uploads are in command buffers before the frame's, a few frames are enough
+    std::erase_if( fresh, [ this ]( const Fresh& f ) { return f.frame + MAX_FRAMES_IN_FLIGHT + 2 < frameCounter; } );
+
     for( auto& p : pendingDeletes )
     {
         if( --p.framesLeft == 0 )
@@ -796,15 +839,52 @@ const std::vector< id< MTLResource > >& RTGL1::MetalTextureManager::LiveTextures
     return liveTextures;
 }
 
+const std::vector< id< MTLResource > >& RTGL1::MetalTextureManager::ResourcesToUse() const
+{
+    if( !residencySet )
+    {
+        return LiveTextures();
+    }
+
+    if( @available( macOS 15.0, * ) )
+    {
+        if( residencyDirty )
+        {
+            const auto& live = LiveTextures();
+
+            id< MTLResidencySet > set = residencySet;
+            [set removeAllAllocations];
+            for( id< MTLResource > r : live )
+            {
+                [set addAllocation:static_cast< id< MTLAllocation > >( r )];
+            }
+            [set commit];
+            residencyDirty = false;
+        }
+    }
+
+    freshList.clear();
+    for( const Fresh& f : fresh )
+    {
+        freshList.push_back( f.texture );
+    }
+    return freshList;
+}
+
 void RTGL1::MetalTextureManager::UseResources( id< MTLComputeCommandEncoder > enc ) const
 {
-    // TODO: MTLResidencySet, to not list every texture each frame
-    const auto& live = LiveTextures();
-    [enc useResources:live.data() count:live.size() usage:MTLResourceUsageRead];
+    const auto& r = ResourcesToUse();
+    if( !r.empty() )
+    {
+        [enc useResources:r.data() count:r.size() usage:MTLResourceUsageRead];
+    }
 }
 
 void RTGL1::MetalTextureManager::UseResources( id< MTLRenderCommandEncoder > enc ) const
 {
-    const auto& live = LiveTextures();
-    [enc useResources:live.data() count:live.size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+    const auto& r = ResourcesToUse();
+    if( !r.empty() )
+    {
+        [enc useResources:r.data() count:r.size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+    }
 }
