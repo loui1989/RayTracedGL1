@@ -737,11 +737,15 @@ ShHitInfo getHitInfoBounce(
 
         h.roughness = stripRoughness ? 1.0 : orm[ 1 ];
         h.metallic  = stripMetallic ? 0.0 : orm[ 2 ];
+        // a polished texture's _orm roughness is its mirror mask: smooth texels mirror, rough
+        // ones don't (0.32, a uniform _orm of the earlier polished textures, gives ~1)
+        h.polish    = clamp( ( 0.7 - orm[ 1 ] ) * 2.5, 0.0, 1.75 );
     }
     else
     {
         h.roughness = stripRoughness ? 1.0 : tr.roughnessDefault;
         h.metallic  = stripMetallic ? 0.0 : tr.metallicDefault;
+        h.polish    = 1.0;
     }
     // Dev Materials: soft path between authored roughness and full matte (Strip roughness = hard 1).
     h.roughness = mix( h.roughness, 1.0, clamp( globalUniform.materialRoughnessTowardMatte, 0.0, 1.0 ) );

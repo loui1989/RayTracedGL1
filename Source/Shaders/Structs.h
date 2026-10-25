@@ -77,6 +77,9 @@ struct ShHitInfo
     uint    instCustomIndex;
     uint    geometryInstanceFlags;
     uint    portalIndex;
+    // Doom 64 RT (macOS): how strongly a polished surface (RG_MESH_PRIMITIVE_POLISHED) mirrors
+    // at this texel, from the raw _orm roughness: 0 (rough texels) .. 1.75 (very smooth ones)
+    float   polish;
 };
 
 #endif // STRUCTS_H_

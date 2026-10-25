@@ -860,7 +860,8 @@ void main()
     imageStore(framebufThroughput,          pix, vec4(throughput, 0.0));
 
     // save some info for refl/refr shader
-    imageStore(framebufPrimaryToReflRefr,   pix, uvec4(h.geometryInstanceFlags, primaryPayload.instIdAndIndex, h.portalIndex, 0));
+    // (.a: the polish mask, see ShHitInfo::polish; the other store sites write 0 there)
+    imageStore(framebufPrimaryToReflRefr,   pix, uvec4(h.geometryInstanceFlags, primaryPayload.instIdAndIndex, h.portalIndex, floatBitsToUint(h.polish)));
 
     // save info for rasterization and upscalers (FSR/DLSS), but only about primary surface,
     // as reflections/refraction only may be losely represented via rasterization
@@ -896,7 +897,7 @@ void main()
 
 
     // restore state from primary shader
-    const uvec3 primaryToReflRefrBuf        = texelFetch(framebufPrimaryToReflRefr_Sampler, pix, 0).rgb;
+    const uvec4 primaryToReflRefrBuf        = texelFetch(framebufPrimaryToReflRefr_Sampler, pix, 0);
     ShHitInfo h;
     const vec4  albedoAndPhase              = texelFetch(framebufAlbedo_Sampler, getRegularPixFromCheckerboardPix(pix), 0);
     h.albedo                                = albedoAndPhase.rgb;
@@ -907,6 +908,7 @@ void main()
     h.hitPosition                           = texelFetch(framebufSurfacePosition_Sampler, pix, 0).xyz;
     h.geometryInstanceFlags                 = primaryToReflRefrBuf.r;
     h.portalIndex                           = primaryToReflRefrBuf.b;
+    h.polish                                = uintBitsToFloat(primaryToReflRefrBuf.a);
     h.normal                                = texelFetchNormal(pix);
     {
         vec2 mr                             = texelFetch( framebufMetallicRoughness_Sampler, pix, 0 ).rg;
@@ -1026,7 +1028,8 @@ void main()
             // resolves them into F * reflection + (1 - F) * surface. F has the Schlick shape
             // (weak head-on, strong at grazing angles), remapped so the reflection reads.
             const float cosTheta = clamp( dot( normal, -normalize( rayDir ) ), 0.0, 1.0 );
-            F = mix( 0.15, 0.6, pow( 1.0 - cosTheta, 5.0 ) );
+            // per texel: the _orm roughness masks it (ShHitInfo::polish)
+            F = min( mix( 0.15, 0.6, pow( 1.0 - cosTheta, 5.0 ) ) * h.polish, 0.95 );
 
             if( isPixOdd )
             {
