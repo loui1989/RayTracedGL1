@@ -41,6 +41,7 @@ set(MetalSources
     "Source/Metal/MetalRasterizer.mm"
     "Source/Metal/MetalLightManager.mm"
     "Source/Metal/MetalPathTracer.mm"
+    "Source/Metal/MetalProfiler.mm"
     "Source/Metal/MetalFluid.mm"
     "Source/Metal/MetalScene.mm"
     "Source/Metal/MetalTextureManager.mm"

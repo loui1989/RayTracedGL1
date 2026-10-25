@@ -48,8 +48,6 @@ class MetalFramebuffers;
 class MetalPathTracer
 {
 public:
-    // set by the device each frame: print the profile of this frame (every couple of seconds)
-    bool printProfileNow{ false };
     MetalPathTracer( id< MTLDevice > device, id< MTLLibrary > library, MetalComputePipelines& shaders );
     ~MetalPathTracer();
 
@@ -154,7 +152,6 @@ private:
     id   PrepareDenoisedScaler( uint32_t inputWidth, uint32_t inputHeight, uint32_t outputWidth, uint32_t outputHeight );
     void BeginPass( id< MTLCommandBuffer > cmd, __strong id< MTLComputeCommandEncoder >& enc, NSString* name );
     void EndPass( __strong id< MTLComputeCommandEncoder >& enc );
-    void PrintProfile( id< MTLCommandBuffer > cmd );
 
 private:
     id< MTLDevice >        device;
@@ -228,11 +225,7 @@ private:
     uint32_t        reservoirsWidth{ 0 };
     uint32_t        reservoirsHeight{ 0 };
 
-    static constexpr uint32_t                   MaxProfiledPasses = 32;
     bool                                        profiling{ false };
-    id< MTLCounterSampleBuffer >                counters{ nil };
-    std::array< NSString*, MaxProfiledPasses > passNames{};
-    uint32_t                                    passCount{ 0 };
 };
 
 }

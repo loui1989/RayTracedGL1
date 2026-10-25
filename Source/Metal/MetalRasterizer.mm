@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "MetalRasterizer.h"
+#include "MetalProfiler.h"
 
 #include "MetalComputePipelines.h"
 #include "MetalTextureManager.h"
@@ -551,7 +552,7 @@ void RTGL1::MetalRasterizer::DrawSkyToAlbedo( id< MTLCommandBuffer > cmd,
     pass.depthAttachment.clearDepth        = 1.0;
     pass.depthAttachment.storeAction       = MTLStoreActionDontCare;
 
-    id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+    id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
     enc.label                         = @"Rasterized sky to albedo framebuf";
 
     const MTLPixelFormat formats[] = { albedo.pixelFormat };
@@ -577,7 +578,7 @@ void RTGL1::MetalRasterizer::DrawDecals( id< MTLCommandBuffer > cmd,
 
     // DecalManager::CopyRtGBufferToAttachments: normals to an attachment
     {
-        id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+        id< MTLComputeCommandEncoder > enc = MetalProfiler::Compute( cmd );
         enc.label                          = @"Decal normals to attachment";
         params.shaders.DispatchThreadgroups( enc, "CmDecalNormalsCopy", { { 0, 0 } }, params.bindings, groupsX, groupsY );
         [enc endEncoding];
@@ -600,7 +601,7 @@ void RTGL1::MetalRasterizer::DrawDecals( id< MTLCommandBuffer > cmd,
             }
         }
 
-        id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+        id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
         enc.label                         = @"Decals";
 
         // DecalManager::CreatePipelines
@@ -643,7 +644,7 @@ void RTGL1::MetalRasterizer::DrawDecals( id< MTLCommandBuffer > cmd,
 
     // DecalManager::CopyAttachmentsToRtGBuffer
     {
-        id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+        id< MTLComputeCommandEncoder > enc = MetalProfiler::Compute( cmd );
         enc.label                          = @"Decal normals to G-buffer";
         params.shaders.DispatchThreadgroups( enc, "CmDecalNormalsCopy", { { 0, 1 } }, params.bindings, groupsX, groupsY );
         [enc endEncoding];
@@ -667,7 +668,7 @@ void RTGL1::MetalRasterizer::DrawToFinal( id< MTLCommandBuffer > cmd,
             pass.colorAttachments[ 0 ].loadAction  = MTLLoadActionClear;
             pass.colorAttachments[ 0 ].clearColor  = MTLClearColorMake( 0, 0, 0, 0 );
             pass.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
-            id< MTLRenderCommandEncoder > enc      = [cmd renderCommandEncoderWithDescriptor:pass];
+            id< MTLRenderCommandEncoder > enc      = MetalProfiler::Render( cmd, pass );
             enc.label                              = @"Clear raster overlay";
             [enc endEncoding];
         }
@@ -683,7 +684,7 @@ void RTGL1::MetalRasterizer::DrawToFinal( id< MTLCommandBuffer > cmd,
         pass.depthAttachment.loadAction  = MTLLoadActionDontCare;
         pass.depthAttachment.storeAction = MTLStoreActionStore;
 
-        id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+        id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
         enc.label                         = @"Depth copying";
 
         const auto desc = MetalComputePipelines::RenderDesc{
@@ -725,7 +726,7 @@ void RTGL1::MetalRasterizer::DrawToFinal( id< MTLCommandBuffer > cmd,
     pass.depthAttachment.loadAction  = MTLLoadActionLoad;
     pass.depthAttachment.storeAction = MTLStoreActionDontCare;
 
-    id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+    id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
     enc.label                         = @"Rasterized to final framebuf";
 
     const MTLPixelFormat formats[] = { final.pixelFormat, screenEmission.pixelFormat, reactivity.pixelFormat };
@@ -766,7 +767,7 @@ void RTGL1::MetalRasterizer::DrawClassic( id< MTLCommandBuffer > cmd,
         pass.depthAttachment.clearDepth        = 1.0;
         pass.depthAttachment.storeAction       = MTLStoreActionDontCare;
 
-        id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+        id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
         enc.label                         = label;
         return enc;
     };
@@ -832,7 +833,7 @@ void RTGL1::MetalRasterizer::DrawToSwapchain( id< MTLCommandBuffer > cmd,
     pass.colorAttachments[ 0 ].clearColor  = MTLClearColorMake( 0, 0, 0, 0 );
     pass.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
 
-    id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+    id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
     enc.label                         = @"Rasterized to swapchain";
 
     const MTLPixelFormat formats[] = { target.pixelFormat };
@@ -897,7 +898,7 @@ bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >   cmd,
         pass.depthAttachment.clearDepth        = 1.0;
         pass.depthAttachment.storeAction       = MTLStoreActionDontCare;
 
-        id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+        id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
         enc.label                         = @"Rasterized sky to cubemap face";
 
         [enc setVertexBuffer:frames[ frameIndex ].vertices

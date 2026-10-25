@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "MetalFluid.h"
+#include "MetalProfiler.h"
 
 #include "MetalComputePipelines.h"
 
@@ -255,7 +256,7 @@ void RTGL1::MetalFluid::Simulate( id< MTLCommandBuffer > cmd,
 
     if( !particlesCleared )
     {
-        id< MTLBlitCommandEncoder > blit = [cmd blitCommandEncoder];
+        id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
         blit.label                       = @"Fluid Particles - Clear";
         [blit fillBuffer:particles range:NSMakeRange( 0, particles.length ) value:0xFF];
         [blit endEncoding];
@@ -306,7 +307,7 @@ void RTGL1::MetalFluid::Simulate( id< MTLCommandBuffer > cmd,
         { 1, std::bit_cast< uint32_t >( particleRadius ) },
     };
 
-    id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+    id< MTLComputeCommandEncoder > enc = MetalProfiler::Compute( cmd );
     enc.label                          = @"Fluid Particles Simulate";
     if( generate )
     {
@@ -336,7 +337,7 @@ void RTGL1::MetalFluid::Simulate( id< MTLCommandBuffer > cmd,
         const uint32_t  n    = std::min( 4096u, push.activeRingLength );
         id< MTLBuffer > read = [device newBufferWithLength:n * sizeof( ShParticleDef )
                                                    options:MTLResourceStorageModeShared];
-        id< MTLBlitCommandEncoder > blit = [cmd blitCommandEncoder];
+        id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
         const uint32_t first = active.begin;
         const uint32_t cnt   = std::min( n, maxParticles - first );
         [blit copyFromBuffer:particles
@@ -411,7 +412,7 @@ void RTGL1::MetalFluid::Visualize( id< MTLCommandBuffer > cmd,
         pass.depthAttachment.clearDepth        = 1.0;
         pass.depthAttachment.storeAction       = MTLStoreActionStore;
 
-        id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];
+        id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
         enc.label                         = @"Fluid Particles Visualize";
 
         auto desc = MetalComputePipelines::RenderDesc{
@@ -440,7 +441,7 @@ void RTGL1::MetalFluid::Visualize( id< MTLCommandBuffer > cmd,
         [enc endEncoding];
     }
 
-    id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+    id< MTLComputeCommandEncoder > enc = MetalProfiler::Compute( cmd );
     enc.label                          = @"Fluid Smoothing";
 
     // framebufDepthFluid <- the raster depth

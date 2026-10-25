@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "MetalTextureManager.h"
+#include "MetalProfiler.h"
 
 #include "Common.h"
 #include "Const.h"
@@ -433,7 +434,7 @@ uint32_t RTGL1::MetalTextureManager::PrepareTexture( const std::optional< ImageL
 
     // the same queue as the frames, so the upload finishes before a frame that samples it
     id< MTLCommandBuffer >      cmd  = [queue commandBuffer];
-    id< MTLBlitCommandEncoder > blit = [cmd blitCommandEncoder];
+    id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
     for( uint32_t level = 0; level < levelsToCopy; level++ )
     {
         const uint32_t   w           = std::max( 1u, width >> level );

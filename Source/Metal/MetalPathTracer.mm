@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "MetalPathTracer.h"
+#include "MetalProfiler.h"
 
 #include "EffectSimple_Instances.h"
 
@@ -193,32 +194,8 @@ RTGL1::MetalPathTracer::MetalPathTracer( id< MTLDevice >        _device,
     tonemapping = [device newBufferWithLength:sizeof( ShTonemapping ) options:MTLResourceStorageModePrivate];
     tonemapping.label = @"Tonemapping";
 
-    if( const char* e = std::getenv( "RTGL1_METAL_PROFILE" ); e && e[ 0 ] == '1' )
-    {
-        id< MTLCounterSet > timestampSet = nil;
-        for( id< MTLCounterSet > set in device.counterSets )
-        {
-            if( [set.name isEqualToString:MTLCommonCounterSetTimestamp] )
-            {
-                timestampSet = set;
-            }
-        }
-        if( timestampSet && [device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary] )
-        {
-            MTLCounterSampleBufferDescriptor* d = [MTLCounterSampleBufferDescriptor new];
-            d.counterSet                        = timestampSet;
-            d.storageMode                       = MTLStorageModeShared;
-            d.sampleCount                       = MaxProfiledPasses * 2;
-
-            NSError* error = nil;
-            counters       = [device newCounterSampleBufferWithDescriptor:d error:&error];
-            profiling      = counters != nil;
-        }
-        if( !profiling )
-        {
-            debug::Warning( "Metal backend: GPU timestamps are not supported, RTGL1_METAL_PROFILE is ignored" );
-        }
-    }
+    // Debug: RTGL1_METAL_PROFILE=1, an encoder per pass, for the GPU timeline
+    profiling = MetalProfiler::Enabled();
 
     for( auto& b : lpmParams )
     {
@@ -227,8 +204,7 @@ RTGL1::MetalPathTracer::MetalPathTracer( id< MTLDevice >        _device,
     }
 }
 
-// Debug: RTGL1_METAL_PROFILE=1 makes a compute encoder per pass, with GPU timestamps
-// at the encoder boundaries, and prints the times of the passes every few seconds.
+// Debug: RTGL1_METAL_PROFILE=1 makes a compute encoder per pass, for MetalProfiler's GPU timeline
 void RTGL1::MetalPathTracer::BeginPass( id< MTLCommandBuffer > cmd, __strong id< MTLComputeCommandEncoder >& enc, NSString* name )
 {
     if( !profiling )
@@ -238,16 +214,7 @@ void RTGL1::MetalPathTracer::BeginPass( id< MTLCommandBuffer > cmd, __strong id<
     }
 
     assert( enc == nil );
-    MTLComputePassDescriptor* desc = [MTLComputePassDescriptor computePassDescriptor];
-    if( passCount < MaxProfiledPasses )
-    {
-        desc.sampleBufferAttachments[ 0 ].sampleBuffer              = counters;
-        desc.sampleBufferAttachments[ 0 ].startOfEncoderSampleIndex = passCount * 2;
-        desc.sampleBufferAttachments[ 0 ].endOfEncoderSampleIndex   = passCount * 2 + 1;
-        passNames[ passCount ]                                      = name;
-        passCount++;
-    }
-    enc       = [cmd computeCommandEncoderWithDescriptor:desc];
+    enc       = MetalProfiler::Compute( cmd );
     enc.label = name;
 }
 
@@ -260,36 +227,6 @@ void RTGL1::MetalPathTracer::EndPass( __strong id< MTLComputeCommandEncoder >& e
     }
     [enc endEncoding];
     enc = nil;
-}
-
-void RTGL1::MetalPathTracer::PrintProfile( id< MTLCommandBuffer > cmd )
-{
-    if( !printProfileNow )
-    {
-        return;
-    }
-
-    id< MTLCounterSampleBuffer > sampleBuffer = counters;
-    const uint32_t               count        = passCount;
-    auto                         names        = passNames;
-
-    [cmd addCompletedHandler:^( id< MTLCommandBuffer > ) {
-      NSData* data = [sampleBuffer resolveCounterRange:NSMakeRange( 0, count * 2 )];
-      if( !data )
-      {
-          return;
-      }
-      const auto* ts    = static_cast< const MTLCounterResultTimestamp* >( data.bytes );
-      double      total = 0;
-      for( uint32_t i = 0; i < count; i++ )
-      {
-          // Apple GPUs' timestamps are in nanoseconds
-          const double ms = double( ts[ i * 2 + 1 ].timestamp - ts[ i * 2 ].timestamp ) / 1e6;
-          total += ms;
-          debug::Warning( "Metal profile: {:>8.3f} ms  {}", ms, names[ i ].UTF8String );
-      }
-      debug::Warning( "Metal profile: {:>8.3f} ms  total", total );
-    }];
 }
 
 id RTGL1::MetalPathTracer::PrepareTemporalScaler( uint32_t inputWidth,
@@ -518,7 +455,7 @@ void RTGL1::MetalPathTracer::ProcessClouds( id< MTLCommandBuffer >   cmd,
         cloudMapClearedMask = 0;
     }
 
-    id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+    id< MTLComputeCommandEncoder > enc = MetalProfiler::Compute( cmd );
     enc.label                          = @"Volumetric clouds";
     shaders.DispatchThreadgroups( enc,
                                   "CmCloudMap",
@@ -583,7 +520,6 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         { 1, p.lightmapLayerIndex },
     };
 
-    passCount = 0;
 
     // EffectWipe::CopyToWipeEffectSourceIfNeeded: the previously presented image melts away
     if( postef.pWipe && postef.pWipe->beginNow && prevPresented )
@@ -592,14 +528,14 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         if( prevPresented.width == dst.width && prevPresented.height == dst.height &&
             prevPresented.pixelFormat == dst.pixelFormat )
         {
-            id< MTLBlitCommandEncoder > blit = [cmd blitCommandEncoder];
+            id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
             blit.label                       = @"Wipe effect source";
             [blit copyFromTexture:prevPresented toTexture:dst];
             [blit endEncoding];
         }
         else
         {
-            id< MTLComputeCommandEncoder > c = [cmd computeCommandEncoder];
+            id< MTLComputeCommandEncoder > c = MetalProfiler::Compute( cmd );
             c.label                          = @"Wipe effect source";
             [c setComputePipelineState:blitScaled];
             [c setTexture:prevPresented atIndex:0];
@@ -615,7 +551,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
     id< MTLComputeCommandEncoder > enc = nil;
     if( !profiling )
     {
-        enc       = [cmd computeCommandEncoder];
+        enc       = MetalProfiler::Compute( cmd );
         enc.label = @"RTGL1 path tracing";
     }
 
@@ -634,7 +570,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         p.rasterDecals( cmd );
         if( !profiling )
         {
-            enc       = [cmd computeCommandEncoder];
+            enc       = MetalProfiler::Compute( cmd );
             enc.label = @"RTGL1 path tracing";
         }
     }
@@ -786,7 +722,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         p.rasterToFinal( cmd, metalFXDenoiser ? denoiserRasterOverlay : nil );
         if( !profiling )
         {
-            enc       = [cmd computeCommandEncoder];
+            enc       = MetalProfiler::Compute( cmd );
             enc.label = @"RTGL1 composition";
         }
     }
@@ -825,7 +761,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         p.rasterClassic( cmd, target );
         if( !profiling )
         {
-            enc       = [cmd computeCommandEncoder];
+            enc       = MetalProfiler::Compute( cmd );
             enc.label = @"RTGL1 post processing";
         }
     };
@@ -927,7 +863,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
 
         if( !profiling )
         {
-            enc       = [cmd computeCommandEncoder];
+            enc       = MetalProfiler::Compute( cmd );
             enc.label = @"RTGL1 post processing";
         }
 
@@ -1110,7 +1046,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
                     hudlessBeforeHud.label = @"Hudless - before HUD";
                     withHud.label          = @"Hudless - with HUD";
                 }
-                id< MTLBlitCommandEncoder > blit = [cmd blitCommandEncoder];
+                id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
                 blit.label                       = @"Hudless - copy before HUD";
                 [blit copyFromTexture:cur toTexture:hudlessBeforeHud];
                 [blit endEncoding];
@@ -1118,7 +1054,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
             p.rasterHud( cmd, accumIsPing ? ping : pong );
             if( !profiling )
             {
-                enc       = [cmd computeCommandEncoder];
+                enc       = MetalProfiler::Compute( cmd );
                 enc.label = @"RTGL1 post processing";
             }
         }
@@ -1179,14 +1115,14 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
                 [enc endEncoding];
                 enc = nil;
             }
-            id< MTLBlitCommandEncoder > blit = [cmd blitCommandEncoder];
+            id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
             blit.label                       = @"Hudless";
             [blit copyFromTexture:result toTexture:withHud];
             [blit copyFromTexture:hudlessBeforeHud toTexture:other];
             [blit endEncoding];
             if( !profiling )
             {
-                enc       = [cmd computeCommandEncoder];
+                enc       = MetalProfiler::Compute( cmd );
                 enc.label = @"RTGL1 post processing";
             }
 
@@ -1200,10 +1136,6 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
                 [enc endEncoding];
                 enc = nil;
             }
-            else
-            {
-                PrintProfile( cmd );
-            }
             prevPresented = withHud;
             return prevPresented;
         }
@@ -1212,10 +1144,6 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
     if( !profiling )
     {
         [enc endEncoding];
-    }
-    else
-    {
-        PrintProfile( cmd );
     }
 
     // the latest target: each pass flips 'accumIsPing'

@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "MetalScene.h"
+#include "MetalProfiler.h"
 
 #include "MetalComputePipelines.h"
 #include "MetalTextureManager.h"
@@ -687,7 +688,7 @@ void RTGL1::MetalScene::SubmitStatic()
     id< MTLCommandBuffer > cmd = [queue commandBuffer];
     cmd.label                  = @"Static geometry";
 
-    id< MTLAccelerationStructureCommandEncoder > enc = [cmd accelerationStructureCommandEncoder];
+    id< MTLAccelerationStructureCommandEncoder > enc = MetalProfiler::AccelerationStructure( cmd );
     enc.label                                        = @"Build static BLAS";
 
     if( replacementsChanged )
@@ -817,7 +818,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     // dynamic BLAS-es
     if( std::ranges::any_of( dynamicGeoms, []( const auto& g ) { return !g.empty(); } ) )
     {
-        id< MTLAccelerationStructureCommandEncoder > enc = [cmd accelerationStructureCommandEncoder];
+        id< MTLAccelerationStructureCommandEncoder > enc = MetalProfiler::AccelerationStructure( cmd );
         enc.label                                        = @"Build dynamic BLAS";
         for( uint32_t gi = 0; gi < GroupCount; gi++ )
         {
@@ -1085,7 +1086,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     f.scratchTlas = scratch;
 
     // a separate encoder, so that the TLAS build waits for the BLAS builds
-    id< MTLAccelerationStructureCommandEncoder > enc = [cmd accelerationStructureCommandEncoder];
+    id< MTLAccelerationStructureCommandEncoder > enc = MetalProfiler::AccelerationStructure( cmd );
     enc.label                                        = @"Build TLAS";
     [enc buildAccelerationStructure:f.tlas descriptor:tlasDesc scratchBuffer:f.scratchTlas scratchBufferOffset:0];
     [enc endEncoding];

@@ -24,6 +24,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include "MetalDevice.h"
+#include "MetalProfiler.h"
 
 #include "MetalComputePipelines.h"
 #include "MetalFluid.h"
@@ -1639,7 +1640,7 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
             pass.colorAttachments[ 0 ].loadAction  = MTLLoadActionDontCare;
             pass.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
 
-            id< MTLRenderCommandEncoder > enc = [pc renderCommandEncoderWithDescriptor:pass];
+            id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( pc, pass );
             enc.label                         = label;
             [enc setRenderPipelineState:pipeline];
             [enc setFragmentTexture:src atIndex:0];
@@ -1657,7 +1658,7 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
             ch            = uint32_t( d.texture.height );
             captureBuffer = [dev newBufferWithLength:size_t( cw ) * ch * 4 options:MTLResourceStorageModeShared];
 
-            id< MTLBlitCommandEncoder > b = [pc blitCommandEncoder];
+            id< MTLBlitCommandEncoder > b = MetalProfiler::Blit( pc );
             b.label                       = @"Capture";
             [b copyFromTexture:d.texture
                          sourceSlice:0
@@ -1878,6 +1879,7 @@ RTGL1::MetalDevice::MetalDevice( const RgInstanceCreateInfo* pInfo )
     }
 
     impl->library = LoadShaderLibrary( impl->device );
+    MetalProfiler::Init( impl->device );
     {
         NSError* error    = nil;
         impl->skyOnly = [impl->device newComputePipelineStateWithFunction:GetFunction( impl->library, @"SkyOnly" )
@@ -2129,10 +2131,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         impl->cpu.sincePrint = Impl::CpuProfile::Ms( impl->cpu.lastPrint, tDraw );
         impl->cpu.lastPrint  = tDraw;
     }
-    if( impl->pathTracer )
-    {
-        impl->pathTracer->printProfileNow = impl->cpu.printNow;
-    }
+    MetalProfiler::BeginFrame( impl->cpu.printNow );
 
     // the same as VulkanDevice::DrawFrame: a scene can modify some parameters
     auto modified            = RgDrawFrameInfo{ *pInfo };
@@ -2177,13 +2176,10 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             impl->rtShaders->BeginFrame( impl->frameIndex );
         }
 
-        // Debug: with RTGL1_METAL_PROFILE=1, the acceleration structures are built
-        // in a separate command buffer, to print its GPU time
         static const bool profile = [] {
             const char* e = std::getenv( "RTGL1_METAL_PROFILE" );
             return e && e[ 0 ] == '1';
         }();
-        id< MTLCommandBuffer > cmdScene = profile ? [impl->queue commandBuffer] : cmd;
 
         const CGSize   drawableSizeForAspect = impl->layer.drawableSize;
         const auto     camera                = impl->sceneManager->GetCamera(
@@ -2191,21 +2187,13 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
         const auto tBuild   = Impl::CpuProfile::Clock::now();
         const bool hasScene = camera && !pInfo->disableRayTracedGeometry &&
-                              impl->scene->Build( cmdScene,
+                              impl->scene->Build( cmd,
                                                   INSTANCE_MASK_WORLD_0 | INSTANCE_MASK_WORLD_1 | INSTANCE_MASK_WORLD_2 );
         impl->cpu.sceneBuild += Impl::CpuProfile::Ms( tBuild, Impl::CpuProfile::Clock::now() );
 
         if( profile )
         {
             const bool printNow = impl->cpu.printNow;
-            [cmdScene addCompletedHandler:^( id< MTLCommandBuffer > c ) {
-              if( printNow )
-              {
-                  debug::Warning( "Metal profile: {:>8.3f} ms  Acceleration structures",
-                               ( c.GPUEndTime - c.GPUStartTime ) * 1000.0 );
-              }
-            }];
-            [cmdScene commit];
             [cmd addCompletedHandler:^( id< MTLCommandBuffer > c ) {
               // frames in flight overlap on the GPU, so the time between the frames' ends is the frame time
               static CFTimeInterval prevEnd = 0, sum = 0;
@@ -2381,31 +2369,16 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
             if( impl->uniform.skyType == SKY_TYPE_RASTERIZED_GEOMETRY )
             {
-                // Debug: with RTGL1_METAL_PROFILE=1, in a separate command buffer, to print its GPU time;
-                // committed now, so it's still executed before 'cmd'
-                id< MTLCommandBuffer > cmdSky = profile ? [impl->queue commandBuffer] : cmd;
                 const auto             tSky   = Impl::CpuProfile::Clock::now();
 
                 // Doom 64 RT: the volumetric cloud map, marched once, read by both sky passes
-                impl->pathTracer->ProcessClouds( cmdSky, b, impl->frameIndex, impl->uniform.cloudParams0[ 0 ] > 0.5f );
+                impl->pathTracer->ProcessClouds( cmd, b, impl->frameIndex, impl->uniform.cloudParams0[ 0 ] > 0.5f );
                 const auto tClouds = Impl::CpuProfile::Clock::now();
-                impl->rasterizer->RenderSkyCubemap( cmdSky, *impl->rtShaders, b );
+                impl->rasterizer->RenderSkyCubemap( cmd, *impl->rtShaders, b );
 
                 impl->cpu.skyCubemap += Impl::CpuProfile::Ms( tClouds, Impl::CpuProfile::Clock::now() );
                 impl->cpu.clouds += Impl::CpuProfile::Ms( tSky, tClouds );
                 impl->cpu.skyDraws += impl->rasterizer->DrawCount( MetalRasterizer::Type::Sky );
-                if( profile )
-                {
-                    const bool printNow = impl->cpu.printNow;
-                    [cmdSky addCompletedHandler:^( id< MTLCommandBuffer > c ) {
-                      if( printNow )
-                      {
-                          debug::Warning( "Metal profile: {:>8.3f} ms  Clouds + sky cubemap",
-                                          ( c.GPUEndTime - c.GPUStartTime ) * 1000.0 );
-                      }
-                    }];
-                    [cmdSky commit];
-                }
             }
         }
 
@@ -2626,7 +2599,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                             hudless = toPresent;
                         }
                         {
-                            id< MTLBlitCommandEncoder > blit = [cmd blitCommandEncoder];
+                            id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
                             blit.label                       = @"Frame interpolation - Copy color";
                             [blit copyFromTexture:hudless toTexture:cur];
                             // the actual frame with HUD; a copy, as presented after the next frame might have started
@@ -2639,7 +2612,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                         hudParams.height = height;
                         impl->rasterizer->DrawToSwapchain( cmd, hudParams, fg.uiCoverage, true );
                         {
-                            id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+                            id< MTLComputeCommandEncoder > enc = MetalProfiler::Compute( cmd );
                             enc.label                          = @"Frame interpolation - UI";
                             [enc setComputePipelineState:fg.uiPipeline];
                             [enc setTexture:toPresent atIndex:0];
@@ -2710,7 +2683,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         else
         {
             // nothing to trace, or no RTGL1 shaders
-            id< MTLComputeCommandEncoder > enc = [cmd computeCommandEncoder];
+            id< MTLComputeCommandEncoder > enc = MetalProfiler::Compute( cmd );
             enc.label                          = @"Sky only";
             [enc setComputePipelineState:impl->skyOnly];
             [enc setBuffer:impl->globalUniform[ impl->frameIndex ] offset:0 atIndex:MTL_BINDING_GLOBAL_UNIFORM];
@@ -2734,6 +2707,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             {
                 debug::Warning( "Metal backend: capture is not supported with HDR output" );
             }
+            MetalProfiler::EndFrame( cmd );
             impl->PresentAsync( cmd,
                                 asyncPresentReal,
                                 generated,
@@ -2762,7 +2736,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                 pass.colorAttachments[ 0 ].loadAction  = MTLLoadActionDontCare;
                 pass.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
 
-                id< MTLRenderCommandEncoder > enc = [pc renderCommandEncoderWithDescriptor:pass];
+                id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( pc, pass );
                 enc.label                         = @"Blit to swapchain";
                 [enc setRenderPipelineState:impl->blit[ impl->hdr ? 1 : 0 ]];
                 [enc setFragmentTexture:toPresent atIndex:0];
@@ -2796,7 +2770,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                     captureBuffer = [impl->device newBufferWithLength:size_t( captureWidth ) * captureHeight * 4
                                                               options:MTLResourceStorageModeShared];
 
-                    id< MTLBlitCommandEncoder > blit = [pc blitCommandEncoder];
+                    id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( pc );
                     blit.label                       = @"Capture";
                     [blit copyFromTexture:drawable.texture
                                  sourceSlice:0
@@ -2820,6 +2794,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                 }
             }
 
+            MetalProfiler::EndFrame( pc );
             dispatch_semaphore_t sem = impl->frameSemaphore;
             [pc addCompletedHandler:^( id< MTLCommandBuffer > c ) {
               if( c.status == MTLCommandBufferStatusError )
