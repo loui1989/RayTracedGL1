@@ -196,32 +196,35 @@ id< MTLLibrary > RTGL1::MetalComputePipelines::CompileLibrarySource( id< MTLDevi
     return lib;
 }
 
-id< MTLFunction > RTGL1::MetalComputePipelines::GetFunction( const char* shaderName, const Constants& constants )
+id< MTLLibrary > RTGL1::MetalComputePipelines::LoadLibrary( const std::string& stem, NSError* __strong& error )
 {
-    NSError* error = nil;
-
-    id< MTLLibrary > lib = libraries[ shaderName ];
-    if( !lib )
+    if( auto found = libraries.find( stem ); found != libraries.end() )
     {
-        const auto path = folder / ( std::string{ shaderName } + ".metallib" );
-        if( std::filesystem::exists( path ) )
-        {
-            lib = [device newLibraryWithURL:[NSURL fileURLWithPath:@( path.c_str() )] error:&error];
-        }
-        else
-        {
-            // built without Xcode's Metal toolchain (CompileShadersMetal.py --msl-only): compile the MSL now
-            lib = CompileLibrarySource( device, folder / ( std::string{ shaderName } + ".metal" ), error );
-        }
-        if( !lib )
-        {
-            throw RgException( RG_RESULT_ERROR_CANT_FIND_SHADER,
-                               "Can't load " + path.string() + ": " +
-                                   ( error ? error.localizedDescription.UTF8String : "no .metallib or .metal" ) );
-        }
-        libraries[ shaderName ] = lib;
+        return found->second;
     }
 
+    id< MTLLibrary > lib  = nil;
+    const auto       path = folder / ( stem + ".metallib" );
+    if( std::filesystem::exists( path ) )
+    {
+        lib = [device newLibraryWithURL:[NSURL fileURLWithPath:@( path.c_str() )] error:&error];
+    }
+    else
+    {
+        // built without Xcode's Metal toolchain (CompileShadersMetal.py --msl-only): compile the MSL now
+        lib = CompileLibrarySource( device, folder / ( stem + ".metal" ), error );
+    }
+    if( lib )
+    {
+        libraries[ stem ] = lib;
+    }
+    return lib;
+}
+
+MTLFunctionConstantValues* RTGL1::MetalComputePipelines::MakeConstantValues( id< MTLLibrary >  lib,
+                                                                            const char*       shaderName,
+                                                                            const Constants&  constants )
+{
     // the declared types of the function constants: a value is the 32 bits of it (e.g. std::bit_cast of a float)
     std::map< uint32_t, MTLDataType > types;
     if( !constants.empty() )
@@ -262,8 +265,24 @@ id< MTLFunction > RTGL1::MetalComputePipelines::GetFunction( const char* shaderN
             default: [values setConstantValue:&value type:MTLDataTypeUInt atIndex:id]; break;
         }
     }
+    return values;
+}
 
-    id< MTLFunction > fn = [lib newFunctionWithName:@( shaderName ) constantValues:values error:&error];
+id< MTLFunction > RTGL1::MetalComputePipelines::GetFunction( const char* shaderName, const Constants& constants )
+{
+    NSError* error = nil;
+
+    id< MTLLibrary > lib = LoadLibrary( shaderName, error );
+    if( !lib )
+    {
+        throw RgException( RG_RESULT_ERROR_CANT_FIND_SHADER,
+                           std::string{ "Can't load " } + shaderName + ": " +
+                               ( error ? error.localizedDescription.UTF8String : "no .metallib or .metal" ) );
+    }
+
+    id< MTLFunction > fn = [lib newFunctionWithName:@( shaderName )
+                                     constantValues:MakeConstantValues( lib, shaderName, constants )
+                                              error:&error];
     if( !fn )
     {
         throw RgException( RG_RESULT_ERROR_CANT_FIND_SHADER,
@@ -335,32 +354,9 @@ void RTGL1::MetalComputePipelines::ParseBindings( NSArray< id< MTLBinding > >* b
     }
 }
 
-const RTGL1::MetalComputePipelines::Pipeline& RTGL1::MetalComputePipelines::Get( const char*      shaderName,
-                                                                                 const Constants& constants )
+RTGL1::MetalComputePipelines::Pipeline RTGL1::MetalComputePipelines::FinishPipeline(
+    const char* shaderName, id< MTLComputePipelineState > pso, MTLComputePipelineReflection* reflection )
 {
-    const std::string key = MakeKey( shaderName, constants );
-    if( auto found = pipelines.find( key ); found != pipelines.end() )
-    {
-        return found->second;
-    }
-
-    NSError* error = nil;
-
-    id< MTLFunction > fn = GetFunction( shaderName, constants );
-
-    MTLComputePipelineReflection* reflection = nil;
-    id< MTLComputePipelineState > pso =
-        [device newComputePipelineStateWithFunction:fn
-                                            options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
-                                         reflection:&reflection
-                                              error:&error];
-    if( !pso )
-    {
-        throw RgException( RG_RESULT_GRAPHICS_API_ERROR,
-                           std::string{ "Can't create pipeline " } + shaderName + ": " +
-                               error.localizedDescription.UTF8String );
-    }
-
     Pipeline p{ .pso = pso };
 
     // written by CompileShadersMetal.py: the shader's local_size
@@ -382,8 +378,125 @@ const RTGL1::MetalComputePipelines::Pipeline& RTGL1::MetalComputePipelines::Get(
         p.pushConstantsIndex = sb.pushConstantsIndex;
         p.pushConstantsSize  = sb.pushConstantsSize;
     }
+    return p;
+}
 
-    return pipelines.emplace( key, std::move( p ) ).first->second;
+// The intersector version of a ray tracing shader (MslIntersector.py): <name>.isect.metal(lib),
+// the alpha test as an intersection function in a function table. nullopt if there's none,
+// or if it fails: then the ray query version is used.
+// Debug: RTGL1_METAL_INTERSECTOR=0, to always use the ray query versions.
+std::optional< RTGL1::MetalComputePipelines::Pipeline > RTGL1::MetalComputePipelines::TryIntersectorPipeline(
+    const char* shaderName, const Constants& constants )
+{
+    static const bool enabled = [] {
+        const char* e = std::getenv( "RTGL1_METAL_INTERSECTOR" );
+        return !( e && e[ 0 ] == '0' );
+    }();
+    const std::string stem = std::string{ shaderName } + ".isect";
+    if( !enabled || ( !std::filesystem::exists( folder / ( stem + ".metallib" ) ) &&
+                      !std::filesystem::exists( folder / ( stem + ".metal" ) ) ) )
+    {
+        return std::nullopt;
+    }
+
+    auto l_fail = [ & ]( const char* what, NSError* error ) -> std::optional< Pipeline > {
+        debug::Warning( "Metal backend: the intersector version of {} {}, ray queries are used instead: {}",
+                        shaderName,
+                        what,
+                        error ? error.localizedDescription.UTF8String : "(no info)" );
+        return std::nullopt;
+    };
+
+    NSError*         error = nil;
+    id< MTLLibrary > lib   = LoadLibrary( stem, error );
+    if( !lib )
+    {
+        return l_fail( "didn't compile", error );
+    }
+
+    MTLFunctionConstantValues* values = MakeConstantValues( lib, shaderName, constants );
+
+    id< MTLFunction > fn = [lib newFunctionWithName:@( shaderName ) constantValues:values error:&error];
+    if( !fn )
+    {
+        return l_fail( "has no kernel", error );
+    }
+    id< MTLFunction > isect = [lib newFunctionWithName:@"rtglAlphaTest" constantValues:values error:&error];
+    if( !isect )
+    {
+        return l_fail( "has no intersection function", error );
+    }
+
+    MTLComputePipelineDescriptor* desc = [MTLComputePipelineDescriptor new];
+    desc.computeFunction               = fn;
+    desc.label                         = @( shaderName );
+    MTLLinkedFunctions* linked         = [MTLLinkedFunctions linkedFunctions];
+    linked.functions                   = @[ isect ];
+    desc.linkedFunctions               = linked;
+
+    MTLComputePipelineReflection* reflection = nil;
+    id< MTLComputePipelineState > pso =
+        [device newComputePipelineStateWithDescriptor:desc
+                                              options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+                                           reflection:&reflection
+                                                error:&error];
+    if( !pso )
+    {
+        return l_fail( "has no pipeline", error );
+    }
+
+    MTLIntersectionFunctionTableDescriptor* td = [MTLIntersectionFunctionTableDescriptor new];
+    td.functionCount                           = 1;
+    id< MTLIntersectionFunctionTable > table   = [pso newIntersectionFunctionTableWithDescriptor:td];
+    id< MTLFunctionHandle >            handle  = [pso functionHandleWithFunction:isect];
+    if( !table || !handle )
+    {
+        return l_fail( "has no intersection function table", nil );
+    }
+    [table setFunction:handle atIndex:0];
+
+    Pipeline p = FinishPipeline( shaderName, pso, reflection );
+    p.ftable   = table;
+
+    if( const char* e = std::getenv( "RTGL1_METAL_PROFILE" ); e && e[ 0 ] == '1' )
+    {
+        debug::Warning( "Metal backend: {} traces rays with the intersector", shaderName );
+    }
+    return p;
+}
+
+const RTGL1::MetalComputePipelines::Pipeline& RTGL1::MetalComputePipelines::Get( const char*      shaderName,
+                                                                                 const Constants& constants )
+{
+    const std::string key = MakeKey( shaderName, constants );
+    if( auto found = pipelines.find( key ); found != pipelines.end() )
+    {
+        return found->second;
+    }
+
+    if( auto isect = TryIntersectorPipeline( shaderName, constants ) )
+    {
+        return pipelines.emplace( key, std::move( *isect ) ).first->second;
+    }
+
+    NSError* error = nil;
+
+    id< MTLFunction > fn = GetFunction( shaderName, constants );
+
+    MTLComputePipelineReflection* reflection = nil;
+    id< MTLComputePipelineState > pso =
+        [device newComputePipelineStateWithFunction:fn
+                                            options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+                                         reflection:&reflection
+                                              error:&error];
+    if( !pso )
+    {
+        throw RgException( RG_RESULT_GRAPHICS_API_ERROR,
+                           std::string{ "Can't create pipeline " } + shaderName + ": " +
+                               error.localizedDescription.UTF8String );
+    }
+
+    return pipelines.emplace( key, FinishPipeline( shaderName, pso, reflection ) ).first->second;
 }
 
 id< MTLResource > RTGL1::MetalComputePipelines::GetDummy( const Member& m )
@@ -610,6 +723,11 @@ void RTGL1::MetalComputePipelines::Bind( id< MTLComputeCommandEncoder > enc,
 
     computeResidency.Reset( enc, bindings );
 
+    if( p.ftable )
+    {
+        [enc setIntersectionFunctionTable:p.ftable atBufferIndex:IntersectionFunctionTableIndex];
+    }
+
     std::vector< id< MTLResource > > used[ 3 ];
     FillArgumentBuffers(
         p.sets,
@@ -733,6 +851,7 @@ void RTGL1::MetalComputePipelines::BindRender( id< MTLRenderCommandEncoder > enc
     if( renderResidency.Reset( enc, bindings ) )
     {
         renderArgumentBuffers.clear();
+        boundRenderPipeline = nullptr;
     }
 
     // many draws in a row have the same pipeline: skip making its key
@@ -749,7 +868,13 @@ void RTGL1::MetalComputePipelines::BindRender( id< MTLRenderCommandEncoder > enc
     }
     const RenderPipeline& p = *pp;
 
-    [enc setRenderPipelineState:p.pso];
+    // the same pipeline as the previous draw of this encoder, with the same resources:
+    // only the push constants (each state change costs GPU time, and sky draws come by hundreds)
+    const bool sameAsBound = boundRenderPipeline == pp;
+    if( !sameAsBound )
+    {
+        [enc setRenderPipelineState:p.pso];
+    }
 
     if( p.vertex.pushConstantsIndex )
     {
@@ -761,6 +886,12 @@ void RTGL1::MetalComputePipelines::BindRender( id< MTLRenderCommandEncoder > enc
         auto data = PadPushConstants( pushConstants, p.fragment.pushConstantsSize );
         [enc setFragmentBytes:data.data() length:data.size() atIndex:*p.fragment.pushConstantsIndex];
     }
+
+    if( sameAsBound )
+    {
+        return;
+    }
+    boundRenderPipeline = pp;
 
     // the same pipeline with the same resources on this encoder: reuse its argument buffers
     if( auto found = renderArgumentBuffers.find( pp ); found != renderArgumentBuffers.end() )

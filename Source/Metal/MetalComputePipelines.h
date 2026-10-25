@@ -195,7 +195,11 @@ private:
         // GLSL's push_constant block (SPIRV-Cross makes it a plain buffer argument)
         std::optional< NSUInteger >   pushConstantsIndex;
         NSUInteger                    pushConstantsSize{ 0 };
+        // the intersector version of a ray tracing shader: its alpha test function
+        id< MTLIntersectionFunctionTable > ftable{ nil };
     };
+    // MslIntersector.py's INTERSECTION_FUNCTION_TABLE_INDEX
+    static constexpr NSUInteger IntersectionFunctionTableIndex = 29;
 
     struct StageBindings
     {
@@ -212,6 +216,11 @@ private:
     };
 
     id< MTLFunction > GetFunction( const char* shaderName, const Constants& constants );
+    // <stem>.metallib, or <stem>.metal compiled now; nil if neither
+    id< MTLLibrary >  LoadLibrary( const std::string& stem, NSError* __strong& error );
+    static MTLFunctionConstantValues* MakeConstantValues( id< MTLLibrary > lib, const char* shaderName, const Constants& constants );
+    Pipeline FinishPipeline( const char* shaderName, id< MTLComputePipelineState > pso, MTLComputePipelineReflection* reflection );
+    std::optional< Pipeline > TryIntersectorPipeline( const char* shaderName, const Constants& constants );
     static void       ParseBindings( NSArray< id< MTLBinding > >* bindings, StageBindings& dst );
 
     const Pipeline&       Get( const char* shaderName, const Constants& constants );
@@ -259,6 +268,8 @@ private:
     std::unordered_map< const void*, std::vector< ArgumentBufferBinding > > renderArgumentBuffers;
     RenderDesc                                                              lastRenderDesc{};
     const void*                                                             lastRenderPipeline{ nullptr };
+    // the pipeline whose state and argument buffers are set on renderResidency's encoder
+    const void*                                                             boundRenderPipeline{ nullptr };
 
     // a placeholder for a member that has no resource in the binding table
     id< MTLResource > GetDummy( const Member& m );

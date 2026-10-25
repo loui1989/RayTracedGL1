@@ -36,6 +36,7 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace
 {
@@ -191,10 +192,13 @@ RTGL1::MetalRasterizer::MetalRasterizer( id< MTLDevice >  _device,
         skyCubemap.label = @"Sky cubemap";
     }
     {
+        // a layer per cubemap face: the faces are drawn in one pass
         auto* d        = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:DepthFormat
                                                                      width:skyCubemapSize
                                                                     height:skyCubemapSize
                                                                  mipmapped:NO];
+        d.textureType  = MTLTextureType2DArray;
+        d.arrayLength  = 6;
         d.usage        = MTLTextureUsageRenderTarget;
         d.storageMode  = MTLStorageModeMemoryless;
         skyDepth       = [device newTextureWithDescriptor:d];
@@ -377,7 +381,7 @@ void RTGL1::MetalRasterizer::EnsureDepth( id< MTLTexture > __strong& depth, uint
     depth.label   = @"Raster depth";
 }
 
-void RTGL1::MetalRasterizer::EncodeDraw( id< MTLRenderCommandEncoder > enc, const DrawInfo& d )
+void RTGL1::MetalRasterizer::EncodeDraw( id< MTLRenderCommandEncoder > enc, const DrawInfo& d, uint32_t instances )
 {
     const FrameData&       f    = frames[ frameIndex ];
     const MTLPrimitiveType type = ( d.pipelineState & DRAW_AS_LINES ) ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle;
@@ -390,13 +394,13 @@ void RTGL1::MetalRasterizer::EncodeDraw( id< MTLRenderCommandEncoder > enc, cons
                          indexType:MTLIndexTypeUInt32
                        indexBuffer:f.indices
                  indexBufferOffset:d.firstIndex * sizeof( uint32_t )
-                     instanceCount:1
+                     instanceCount:instances
                         baseVertex:d.firstVertex
                       baseInstance:0];
     }
     else
     {
-        [enc drawPrimitives:type vertexStart:d.firstVertex vertexCount:d.vertexCount];
+        [enc drawPrimitives:type vertexStart:d.firstVertex vertexCount:d.vertexCount instanceCount:instances];
     }
 }
 
@@ -443,6 +447,8 @@ void RTGL1::MetalRasterizer::DrawAll( id< MTLRenderCommandEncoder >     enc,
                   offset:0
                  atIndex:MetalComputePipelines::RasterVertexBufferIndex];
 
+    id< MTLDepthStencilState >   lastDepth = nil;
+    std::optional< MTLViewport > lastViewport;
     for( const DrawInfo& d : draws[ size_t( type ) ] )
     {
         const bool translucent = d.pipelineState & TRANSLUCENT;
@@ -512,12 +518,25 @@ void RTGL1::MetalRasterizer::DrawAll( id< MTLRenderCommandEncoder >     enc,
 
         params.shaders.BindRender(
             enc, desc, params.bindings, { reinterpret_cast< const uint8_t* >( &push ), sizeof( push ) } );
+        // only the changes: hundreds of sky draws in a row have the same states
         if( depthFormat != MTLPixelFormatInvalid )
         {
-            [enc setDepthStencilState:params.shaders.GetDepthState( d.pipelineState & DEPTH_TEST,
-                                                                    d.pipelineState & DEPTH_WRITE )];
+            id< MTLDepthStencilState > depth =
+                params.shaders.GetDepthState( d.pipelineState & DEPTH_TEST, d.pipelineState & DEPTH_WRITE );
+            if( depth != lastDepth )
+            {
+                [enc setDepthStencilState:depth];
+                lastDepth = depth;
+            }
         }
-        [enc setViewport:d.viewport ? ToMetal( *d.viewport ) : defaultViewport];
+        {
+            const MTLViewport vp = d.viewport ? ToMetal( *d.viewport ) : defaultViewport;
+            if( !lastViewport || std::memcmp( &*lastViewport, &vp, sizeof( vp ) ) != 0 )
+            {
+                [enc setViewport:vp];
+                lastViewport = vp;
+            }
+        }
 
         EncodeDraw( enc, d );
     }
@@ -885,63 +904,67 @@ bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >   cmd,
 
     const auto size = uint32_t( skyCubemap.width );
 
-    for( uint32_t face = 0; face < 6; face++ )
+    // the 6 faces in one pass: each draw has 6 instances, an instance is a face
+    // (RsRasterizerMultiview.vert writes the layer); a pass per face cost ~1.5 ms of GPU time each,
+    // with hundreds of small sky draws
+    auto* pass                             = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[ 0 ].texture     = skyCubemap;
+    pass.colorAttachments[ 0 ].loadAction  = MTLLoadActionClear;
+    pass.colorAttachments[ 0 ].clearColor  = MTLClearColorMake( 0, 0, 0, 0 );
+    pass.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
+    pass.depthAttachment.texture           = skyDepth;
+    pass.depthAttachment.loadAction        = MTLLoadActionClear;
+    pass.depthAttachment.clearDepth        = 1.0;
+    pass.depthAttachment.storeAction       = MTLStoreActionDontCare;
+    pass.renderTargetArrayLength           = 6;
+
+    id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
+    enc.label                         = @"Rasterized sky to cubemap";
+
+    [enc setVertexBuffer:frames[ frameIndex ].vertices offset:0 atIndex:MetalComputePipelines::RasterVertexBufferIndex];
+    [enc setViewport:MTLViewport{ 0, 0, double( size ), double( size ), 0, 1 }];
+
+    id< MTLDepthStencilState > lastDepth = nil;
+    for( const DrawInfo& d : draws[ size_t( Type::Sky ) ] )
     {
-        auto* pass                             = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[ 0 ].texture     = skyCubemap;
-        pass.colorAttachments[ 0 ].slice       = face;
-        pass.colorAttachments[ 0 ].loadAction  = MTLLoadActionClear;
-        pass.colorAttachments[ 0 ].clearColor  = MTLClearColorMake( 0, 0, 0, 0 );
-        pass.colorAttachments[ 0 ].storeAction = MTLStoreActionStore;
-        pass.depthAttachment.texture           = skyDepth;
-        pass.depthAttachment.loadAction        = MTLLoadActionClear;
-        pass.depthAttachment.clearDepth        = 1.0;
-        pass.depthAttachment.storeAction       = MTLStoreActionDontCare;
+        const bool translucent = d.pipelineState & TRANSLUCENT;
+        const bool additive    = d.pipelineState & ADDITIVE;
 
-        id< MTLRenderCommandEncoder > enc = MetalProfiler::Render( cmd, pass );
-        enc.label                         = @"Rasterized sky to cubemap face";
+        // RenderCubemap::InitPipelines: RasterizerPipelines with "VertDefaultMultiview", "FragSkyCubemap"
+        auto desc = MetalComputePipelines::RenderDesc{
+            .vertexShader      = "RsRasterizerMultiview_vert",
+            .fragmentShader    = "RsSkyCubemap_frag",
+            .vertexConstants   = { { 0, vertexColorGamma ? 1u : 0u } },
+            .fragmentConstants = { { 0, ( d.pipelineState & ALPHA_TEST ) ? 1u : 0u } },
+            .depthFormat       = DepthFormat,
+            .lines             = !!( d.pipelineState & DRAW_AS_LINES ),
+        };
+        desc.colorFormats[ 0 ] = skyCubemap.pixelFormat;
+        desc.blends[ 0 ]       = MetalComputePipelines::Blend{
+                  additive || translucent,
+                  translucent ? MTLBlendFactorSourceAlpha : MTLBlendFactorOne,
+                  translucent ? ( additive ? MTLBlendFactorOne : MTLBlendFactorOneMinusSourceAlpha ) : MTLBlendFactorOne,
+        };
 
-        [enc setVertexBuffer:frames[ frameIndex ].vertices
-                      offset:0
-                     atIndex:MetalComputePipelines::RasterVertexBufferIndex];
-        [enc setViewport:MTLViewport{ 0, 0, double( size ), double( size ), 0, 1 }];
+        auto push = RasterizedMultiviewPushConst{
+            .model        = {},
+            .packedColor  = d.colorFactor_base,
+            .textureIndex = d.texture_base,
+            .skyCloudMode = d.skyCloudMode,
+        };
+        Matrix::ToMat4Transposed( push.model, d.transform );
 
-        for( const DrawInfo& d : draws[ size_t( Type::Sky ) ] )
+        shaders.BindRender( enc, desc, bindings, { reinterpret_cast< const uint8_t* >( &push ), sizeof( push ) } );
+        id< MTLDepthStencilState > depth = shaders.GetDepthState( d.pipelineState & DEPTH_TEST, d.pipelineState & DEPTH_WRITE );
+        if( depth != lastDepth )
         {
-            const bool translucent = d.pipelineState & TRANSLUCENT;
-            const bool additive    = d.pipelineState & ADDITIVE;
-
-            // RenderCubemap::InitPipelines: RasterizerPipelines with "VertDefaultMultiview", "FragSkyCubemap"
-            auto desc = MetalComputePipelines::RenderDesc{
-                .vertexShader      = "RsRasterizerMultiview_vert",
-                .fragmentShader    = "RsSkyCubemap_frag",
-                .vertexConstants   = { { 0, vertexColorGamma ? 1u : 0u }, { 1, face } },
-                .fragmentConstants = { { 0, ( d.pipelineState & ALPHA_TEST ) ? 1u : 0u } },
-                .depthFormat       = DepthFormat,
-                .lines             = !!( d.pipelineState & DRAW_AS_LINES ),
-            };
-            desc.colorFormats[ 0 ] = skyCubemap.pixelFormat;
-            desc.blends[ 0 ]       = MetalComputePipelines::Blend{
-                      additive || translucent,
-                      translucent ? MTLBlendFactorSourceAlpha : MTLBlendFactorOne,
-                      translucent ? ( additive ? MTLBlendFactorOne : MTLBlendFactorOneMinusSourceAlpha ) : MTLBlendFactorOne,
-            };
-
-            auto push = RasterizedMultiviewPushConst{
-                .model        = {},
-                .packedColor  = d.colorFactor_base,
-                .textureIndex = d.texture_base,
-                .skyCloudMode = d.skyCloudMode,
-            };
-            Matrix::ToMat4Transposed( push.model, d.transform );
-
-            shaders.BindRender( enc, desc, bindings, { reinterpret_cast< const uint8_t* >( &push ), sizeof( push ) } );
-            [enc setDepthStencilState:shaders.GetDepthState( d.pipelineState & DEPTH_TEST, d.pipelineState & DEPTH_WRITE )];
-
-            EncodeDraw( enc, d );
+            [enc setDepthStencilState:depth];
+            lastDepth = depth;
         }
-        [enc endEncoding];
+
+        EncodeDraw( enc, d, 6 );
     }
+    [enc endEncoding];
     return true;
 }
 

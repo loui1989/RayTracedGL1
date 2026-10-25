@@ -31,6 +31,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
+import MslIntersector
+
 def entry_name( filename ):
     base, ext = os.path.splitext( filename )
     # vertex and fragment shaders might have the same base name (RsDecal.vert, RsDecal.frag)
@@ -145,15 +148,38 @@ def main():
         threads = os.path.join( args.output, entry + ".threads" ) if stage == "comp" else "-"
         run( [ args.spirv_to_msl, spv, msl, entry, threads ] )
 
+        # the intersector version of a ray tracing shader (MslIntersector.py), <entry>.isect.*:
+        # used instead, if it compiles at run time / here
+        with open( msl, "r" ) as f:
+            isectSrc = MslIntersector.rewrite_for_intersector( f.read() )
+        isect = os.path.join( args.build, entry + ".isect.metal" )
+        for stale in ( entry + ".isect.metal", entry + ".isect.metallib" ):
+            if os.path.exists( os.path.join( args.output, stale ) ):
+                os.remove( os.path.join( args.output, stale ) )
+        if isectSrc:
+            with open( isect, "w" ) as f:
+                f.write( isectSrc )
+
         if mslOnly:
             shutil.copyfile( msl, os.path.join( args.output, entry + ".metal" ) )
+            if isectSrc:
+                shutil.copyfile( isect, os.path.join( args.output, entry + ".isect.metal" ) )
             stale = os.path.join( args.output, entry + ".metallib" )
             if os.path.exists( stale ):
                 os.remove( stale )
-            print( "Translated " + filename )
+            print( "Translated " + filename + ( " (+ intersector version)" if isectSrc else "" ) )
         else:
             run( [ "xcrun", "-sdk", "macosx", "metal", "-std=metal3.1", "-O3", "-c", msl, "-o", air ] )
             run( [ "xcrun", "-sdk", "macosx", "metallib", air, "-o", os.path.join( args.output, entry + ".metallib" ) ] )
+            if isectSrc:
+                try:
+                    isectAir = os.path.join( args.build, entry + ".isect.air" )
+                    run( [ "xcrun", "-sdk", "macosx", "metal", "-std=metal3.1", "-O3", "-c", isect, "-o", isectAir ] )
+                    run( [ "xcrun", "-sdk", "macosx", "metallib", isectAir, "-o",
+                           os.path.join( args.output, entry + ".isect.metallib" ) ] )
+                except ToolError as e:
+                    print( "Note: the intersector version of " + filename + " didn't compile, the ray query one is used\n" +
+                           "\n".join( str( e ).splitlines()[ :6 ] ) )
             print( "Compiled " + filename )
       except ToolError as e:
         failed.append( filename )

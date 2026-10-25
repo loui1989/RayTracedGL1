@@ -206,7 +206,7 @@ private:
                   std::optional< float >            classic = std::nullopt,
                   bool                              coverageAlpha = false );
 
-    void EncodeDraw( id< MTLRenderCommandEncoder > enc, const DrawInfo& d );
+    void EncodeDraw( id< MTLRenderCommandEncoder > enc, const DrawInfo& d, uint32_t instances = 1 );
 
 private:
     id< MTLDevice > device;

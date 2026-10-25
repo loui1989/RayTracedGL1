@@ -170,7 +170,8 @@ add_custom_command(
             --glslang ${GLSLANG_VALIDATOR}
             ${MetalMslOnlyFlag}
     COMMAND ${CMAKE_COMMAND} -E touch ${RtglGlslShadersStamp}
-    DEPENDS ${RtglGlslShaderDependencies} "${CMAKE_SOURCE_DIR}/Source/Metal/CompileShadersMetal.py" SpirvToMsl
+    DEPENDS ${RtglGlslShaderDependencies} "${CMAKE_SOURCE_DIR}/Source/Metal/CompileShadersMetal.py"
+            "${CMAKE_SOURCE_DIR}/Source/Metal/MslIntersector.py" SpirvToMsl
     COMMENT "Compiling RTGL1 GLSL shaders for Metal"
     VERBATIM
 )

@@ -21,9 +21,10 @@
 #version 460
 
 #ifdef METAL
-// Metal: a cubemap face per pass (MetalRasterizer::RenderSkyCubemap), its index is a function constant
-layout( constant_id = 1 ) const uint metalCubemapFace = 0;
-#define gl_ViewIndex metalCubemapFace
+// Metal: the 6 cubemap faces in one pass (MetalRasterizer::RenderSkyCubemap), as 6 instances,
+// each to its layer of the cubemap
+#extension GL_ARB_shader_viewport_layer_array : require
+#define gl_ViewIndex gl_InstanceIndex
 #else
 #extension GL_EXT_multiview : require
 #endif
@@ -67,4 +68,7 @@ void main()
 
     const mat4 viewProj = globalUniform.viewProjCubemap[gl_ViewIndex];
     gl_Position = viewProj * skyPos;
+#ifdef METAL
+    gl_Layer = gl_InstanceIndex;
+#endif
 }
