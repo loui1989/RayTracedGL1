@@ -966,6 +966,22 @@ void main()
                               !toReflect && !toRefract && !isPortal;
 
 
+        // Debug: RTGL1_METAL_DEBUG_POLISH (stylizedWaterDebug 3): magenta -- polished, as bright as
+        // its mirror mask; green -- the polished flag, but not polished (it reflects / refracts)
+        if( globalUniform.stylizedWaterDebug > 2.5 && i == 0 && isPolishedFromFlags( h.geometryInstanceFlags ) )
+        {
+            const ivec2 regPix = getRegularPixFromCheckerboardPix( pix );
+            imageStore( framebufAlbedo, regPix, vec4( 0.0 ) );
+            imageStore( framebufScreenEmisRT,
+                        regPix,
+                        vec4( polished ? vec3( 1, 0, 1 ) * clamp( h.polish / 1.75, 0.0, 1.0 ) + vec3( 0.02 )
+                                       : vec3( 0, 1, 0 ),
+                              0.0 ) );
+            imageStoreNormal( pix, h.normal );
+            imageStore( framebufThroughput, pix, vec4( vec3( 1.0 ), -1.0 ) );
+            return;
+        }
+
         if (!toReflect && !toRefract && !isPortal && !polished)
         {
             break;

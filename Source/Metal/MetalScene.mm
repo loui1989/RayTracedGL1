@@ -1065,6 +1065,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
             .staticGeometries  = 0,
             .tlasInstances     = instances.size(),
             .geometryInfos     = geomInfos.size(),
+            .polishedGeometries = size_t( std::ranges::count_if(
+                geomInfos, []( const ShGeometryInstance& g ) { return ( g.flags & GEOM_INST_FLAG_RESERVED_6 ) != 0; } ) ),
         };
         for( const auto& g : dynamicGeoms )
         {

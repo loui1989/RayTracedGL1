@@ -730,6 +730,12 @@ void FillUniform( RTGL1::ShGlobalUniform* gu, const RgDrawFrameInfo& drawInfo, c
         memcpy( gu->lavaTint, params.lavaTint.data, 3 * sizeof( float ) );
         gu->lavaTint[ 3 ] = 0.0f;
         gu->stylizedWaterDebug     = std::max( 0.0f, params.stylizedWaterDebug );
+        // Debug: RTGL1_METAL_DEBUG_POLISH=1, polished surfaces in magenta (as bright as their mirror
+        // mask), green where the polished flag is there but the mirror isn't used (see RaygenPrimary.inl)
+        if( static const bool dbg = std::getenv( "RTGL1_METAL_DEBUG_POLISH" ) != nullptr; dbg )
+        {
+            gu->stylizedWaterDebug = 3.0f;
+        }
         gu->stylizedWaterReflMin   = std::clamp( params.stylizedWaterReflMin, 0.0f, 1.0f );
         gu->waterCausticGain       = std::max( 0.0f, params.waterCausticGain );
         gu->waterCausticScale      = std::max( 0.0f, params.waterCausticScale );
@@ -2839,9 +2845,9 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         {
             const auto& st = impl->scene->lastStats;
             debug::Warning( "Metal profile: scene: {} dynamic geometries ({} triangles, {} vertices), "
-                            "{} static geometries, {} TLAS instances, {} geometry infos",
+                            "{} static geometries, {} TLAS instances, {} geometry infos ({} polished)",
                             st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
-                            st.staticGeometries, st.tlasInstances, st.geometryInfos );
+                            st.staticGeometries, st.tlasInstances, st.geometryInfos, st.polishedGeometries );
         }
         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
         c.clouds = c.skyCubemap = c.skyAlbedo = 0;

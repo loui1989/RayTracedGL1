@@ -103,6 +103,7 @@ public:
     struct Stats
     {
         size_t dynamicGeometries, dynamicTriangles, dynamicVertices, staticGeometries, tlasInstances, geometryInfos;
+        size_t polishedGeometries;
     };
     Stats lastStats{};
 
