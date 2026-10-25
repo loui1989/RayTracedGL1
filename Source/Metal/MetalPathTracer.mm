@@ -286,9 +286,9 @@ void RTGL1::MetalPathTracer::PrintProfile( id< MTLCommandBuffer > cmd )
           // Apple GPUs' timestamps are in nanoseconds
           const double ms = double( ts[ i * 2 + 1 ].timestamp - ts[ i * 2 ].timestamp ) / 1e6;
           total += ms;
-          debug::Info( "Metal profile: {:>8.3f} ms  {}", ms, names[ i ].UTF8String );
+          debug::Warning( "Metal profile: {:>8.3f} ms  {}", ms, names[ i ].UTF8String );
       }
-      debug::Info( "Metal profile: {:>8.3f} ms  total", total );
+      debug::Warning( "Metal profile: {:>8.3f} ms  total", total );
     }];
 }
 

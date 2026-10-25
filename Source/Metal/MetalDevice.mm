@@ -53,6 +53,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -1589,6 +1590,22 @@ struct RTGL1::MetalDevice::Impl
         return vsyncHalfRate && layer.displaySyncEnabled ? RefreshInterval() * 2.0 - 0.001 : 0.0;
     }
     bool frameInterpolationWarned{ false };
+
+    // Debug: RTGL1_METAL_PROFILE=1, the CPU time of the frame's parts, printed every 120 frames
+    struct CpuProfile
+    {
+        bool     enabled{ false };
+        using Clock = std::chrono::steady_clock;
+        Clock::time_point startFrameEnd{};
+        double   waitFrame{ 0 }, startFrame{ 0 }, betweenFrames{ 0 }, uploads{ 0 }, sceneBuild{ 0 },
+                 render{ 0 }, drawFrame{ 0 };
+        uint64_t primitives{ 0 }, frames{ 0 };
+
+        static double Ms( Clock::time_point a, Clock::time_point b )
+        {
+            return std::chrono::duration< double, std::milli >( b - a ).count();
+        }
+    } cpu;
 };
 
 void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
@@ -1797,6 +1814,10 @@ RTGL1::MetalDevice::MetalDevice( const RgInstanceCreateInfo* pInfo )
                            "Metal backend requires pMetalSurfaceCreateInfo with a CAMetalLayer" );
     }
 
+    impl->cpu.enabled = []() {
+        const char* e = std::getenv( "RTGL1_METAL_PROFILE" );
+        return e && e[ 0 ] == '1';
+    }();
     impl->pfnPrint       = pInfo->pfnPrint;
     impl->pUserPrintData = pInfo->pUserPrintData;
 
@@ -2001,8 +2022,11 @@ void RTGL1::MetalDevice::StartFrame( const RgStartFrameInfo* pInfo )
         throw RgException( RG_RESULT_FRAME_WASNT_ENDED );
     }
 
+    const auto tWait = Impl::CpuProfile::Clock::now();
     dispatch_semaphore_wait( impl->frameSemaphore, DISPATCH_TIME_FOREVER );
     impl->frameStarted = true;
+    const auto tStart = Impl::CpuProfile::Clock::now();
+    impl->cpu.waitFrame += Impl::CpuProfile::Ms( tWait, tStart );
 
     // follow the window size, so the application doesn't need to resize the drawable
     CGSize size  = impl->layer.bounds.size;
@@ -2076,6 +2100,9 @@ void RTGL1::MetalDevice::StartFrame( const RgStartFrameInfo* pInfo )
         // SHIPPING_HACK
         impl->uniform.volumeAllowTintUnderwater && impl->uniform.cameraMediaType == RG_MEDIA_TYPE_WATER,
         Utils::PackColorFromFloat( impl->uniform.volumeUnderwaterColor ) );
+
+    impl->cpu.startFrameEnd = Impl::CpuProfile::Clock::now();
+    impl->cpu.startFrame += Impl::CpuProfile::Ms( tStart, impl->cpu.startFrameEnd );
 }
 
 void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
@@ -2088,6 +2115,9 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
     {
         throw RgException( RG_RESULT_FRAME_WASNT_STARTED );
     }
+
+    const auto tDraw = Impl::CpuProfile::Clock::now();
+    impl->cpu.betweenFrames += Impl::CpuProfile::Ms( impl->cpu.startFrameEnd, tDraw );
 
     // the same as VulkanDevice::DrawFrame: a scene can modify some parameters
     auto modified            = RgDrawFrameInfo{ *pInfo };
@@ -2144,9 +2174,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         const auto     camera                = impl->sceneManager->GetCamera(
             impl->camera, float( drawableSizeForAspect.width / std::max( 1.0, drawableSizeForAspect.height ) ) );
 
+        const auto tBuild   = Impl::CpuProfile::Clock::now();
         const bool hasScene = camera && !pInfo->disableRayTracedGeometry &&
                               impl->scene->Build( cmdScene,
                                                   INSTANCE_MASK_WORLD_0 | INSTANCE_MASK_WORLD_1 | INSTANCE_MASK_WORLD_2 );
+        impl->cpu.sceneBuild += Impl::CpuProfile::Ms( tBuild, Impl::CpuProfile::Clock::now() );
 
         if( profile )
         {
@@ -2154,7 +2186,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             [cmdScene addCompletedHandler:^( id< MTLCommandBuffer > c ) {
               if( frame % 120 == 0 )
               {
-                  debug::Info( "Metal profile: {:>8.3f} ms  Acceleration structures",
+                  debug::Warning( "Metal profile: {:>8.3f} ms  Acceleration structures",
                                ( c.GPUEndTime - c.GPUStartTime ) * 1000.0 );
               }
             }];
@@ -2171,7 +2203,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
               prevEnd = c.GPUEndTime;
               if( frame % 120 == 0 && count > 0 )
               {
-                  debug::Info( "Metal profile: {:>8.3f} ms  GPU frame time (average)", sum / count * 1000.0 );
+                  debug::Warning( "Metal profile: {:>8.3f} ms  GPU frame time (average)", sum / count * 1000.0 );
                   sum   = 0;
                   count = 0;
               }
@@ -2424,6 +2456,13 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                                         camera ? camera->cameraFar : 10000.0f );
             }
 
+            const auto tRender = Impl::CpuProfile::Clock::now();
+            struct RenderTimer
+            {
+                Impl&                              impl;
+                Impl::CpuProfile::Clock::time_point t;
+                ~RenderTimer() { impl.cpu.render += Impl::CpuProfile::Ms( t, Impl::CpuProfile::Clock::now() ); }
+            } renderTimer{ *impl, tRender };
             toPresent = impl->pathTracer->Render(
                 cmd,
                 MetalPathTracer::Params{
@@ -2763,6 +2802,24 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         }
     }
 
+    impl->cpu.drawFrame += Impl::CpuProfile::Ms( tDraw, Impl::CpuProfile::Clock::now() );
+    if( impl->cpu.enabled && ++impl->cpu.frames % 120 == 0 )
+    {
+        auto& c = impl->cpu;
+        const double n = 120.0;
+        debug::Warning( "Metal profile (CPU, ms per frame): waiting for a frame slot {:.2f}, StartFrame {:.2f}, "
+                        "game + uploads {:.2f} (uploads {:.2f}, {:.0f} primitives), DrawFrame {:.2f} "
+                        "(acceleration structures {:.2f}, path tracer encoding {:.2f})",
+                        c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n,
+                        double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n );
+        c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
+        c.primitives = 0;
+    }
+    else if( !impl->cpu.enabled )
+    {
+        impl->cpu = {};
+    }
+
     impl->frameCounter++;
     impl->frameId++;
     if( const char* spin = std::getenv( "RTGL1_METAL_DEBUG_SPIN" ) )
@@ -2779,6 +2836,17 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 void RTGL1::MetalDevice::UploadMeshPrimitive( const RgMeshInfo*          pMesh,
                                               const RgMeshPrimitiveInfo* pPrimitive )
 {
+    struct UploadTimer
+    {
+        Impl&                               impl;
+        Impl::CpuProfile::Clock::time_point t{ Impl::CpuProfile::Clock::now() };
+        ~UploadTimer()
+        {
+            impl.cpu.uploads += Impl::CpuProfile::Ms( t, Impl::CpuProfile::Clock::now() );
+            impl.cpu.primitives++;
+        }
+    } uploadTimer{ *impl };
+
     if( pPrimitive == nullptr )
     {
         throw RgException( RG_RESULT_WRONG_FUNCTION_ARGUMENT, "Argument is null" );
