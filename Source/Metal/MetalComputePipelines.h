@@ -33,6 +33,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace RTGL1
@@ -65,8 +66,12 @@ public:
     };
     const Entry* Find( const std::string& name ) const;
 
+    // changes with every Set*, unique across all tables: if equal, the contents are the same
+    uint64_t Version() const { return version; }
+
 private:
     std::unordered_map< std::string, Entry > entries;
+    uint64_t                                 version{ 0 };
 };
 
 // RTGL1's GLSL shaders, compiled to Metal by CompileShadersMetal.py
@@ -139,6 +144,8 @@ public:
         // RasterizedDataCollector::GetVertexLayout, at RasterVertexBufferIndex; otherwise, no vertex input
         bool rasterVertexLayout{ true };
         bool lines{ false };
+
+        bool operator==( const RenderDesc& ) const = default;
     };
     static constexpr NSUInteger RasterVertexBufferIndex = 30;
 
@@ -220,7 +227,38 @@ private:
     void FillArgumentBuffers( const std::vector< ArgumentSet >& sets,
                               const MetalBindingTable&          bindings,
                               SetBufferFunc&&                   setBuffer,
-                              std::vector< id< MTLResource > > ( &used )[ 3 ] );
+                              std::vector< id< MTLResource > > ( &used )[ 3 ],
+                              std::unordered_set< const void* >* residentExtras );
+
+    // Resources already made resident on an encoder: useResources of the bindless textures
+    // (thousands) for each draw / dispatch made the CPU the bottleneck
+    struct EncoderResidency
+    {
+        id                                enc{ nil };
+        uint64_t                          bindingsVersion{ 0 };
+        std::unordered_set< const void* > resident[ 3 ];
+        // binding table entries, which 'extraResources' are resident
+        std::unordered_set< const void* > residentExtras;
+
+        // returns true, if 'enc' or the binding table's contents changed
+        bool Reset( id e, const MetalBindingTable& bindings );
+        // removes the resources that are resident already
+        void Filter( std::vector< id< MTLResource > > ( &used )[ 3 ] );
+    };
+    EncoderResidency computeResidency;
+    EncoderResidency renderResidency;
+
+    // BindRender: the argument buffers of each pipeline, for the current encoder and binding table
+    struct ArgumentBufferBinding
+    {
+        bool            fragment;
+        NSUInteger      index;
+        id< MTLBuffer > buffer;
+        NSUInteger      offset;
+    };
+    std::unordered_map< const void*, std::vector< ArgumentBufferBinding > > renderArgumentBuffers;
+    RenderDesc                                                              lastRenderDesc{};
+    const void*                                                             lastRenderPipeline{ nullptr };
 
     // a placeholder for a member that has no resource in the binding table
     id< MTLResource > GetDummy( const Member& m );

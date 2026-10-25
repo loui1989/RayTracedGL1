@@ -1601,7 +1601,8 @@ struct RTGL1::MetalDevice::Impl
         bool              printNow{ false };
         double            sincePrint{ 0 }; // ms, between the last two prints
         double   waitFrame{ 0 }, startFrame{ 0 }, betweenFrames{ 0 }, uploads{ 0 }, sceneBuild{ 0 },
-                 render{ 0 }, drawFrame{ 0 };
+                 render{ 0 }, drawFrame{ 0 }, clouds{ 0 }, skyCubemap{ 0 }, skyAlbedo{ 0 };
+        uint64_t skyDraws{ 0 };
         uint64_t primitives{ 0 }, frames{ 0 };
 
         static double Ms( Clock::time_point a, Clock::time_point b )
@@ -2380,9 +2381,31 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
             if( impl->uniform.skyType == SKY_TYPE_RASTERIZED_GEOMETRY )
             {
+                // Debug: with RTGL1_METAL_PROFILE=1, in a separate command buffer, to print its GPU time;
+                // committed now, so it's still executed before 'cmd'
+                id< MTLCommandBuffer > cmdSky = profile ? [impl->queue commandBuffer] : cmd;
+                const auto             tSky   = Impl::CpuProfile::Clock::now();
+
                 // Doom 64 RT: the volumetric cloud map, marched once, read by both sky passes
-                impl->pathTracer->ProcessClouds( cmd, b, impl->frameIndex, impl->uniform.cloudParams0[ 0 ] > 0.5f );
-                impl->rasterizer->RenderSkyCubemap( cmd, *impl->rtShaders, b );
+                impl->pathTracer->ProcessClouds( cmdSky, b, impl->frameIndex, impl->uniform.cloudParams0[ 0 ] > 0.5f );
+                const auto tClouds = Impl::CpuProfile::Clock::now();
+                impl->rasterizer->RenderSkyCubemap( cmdSky, *impl->rtShaders, b );
+
+                impl->cpu.skyCubemap += Impl::CpuProfile::Ms( tClouds, Impl::CpuProfile::Clock::now() );
+                impl->cpu.clouds += Impl::CpuProfile::Ms( tSky, tClouds );
+                impl->cpu.skyDraws += impl->rasterizer->DrawCount( MetalRasterizer::Type::Sky );
+                if( profile )
+                {
+                    const bool printNow = impl->cpu.printNow;
+                    [cmdSky addCompletedHandler:^( id< MTLCommandBuffer > c ) {
+                      if( printNow )
+                      {
+                          debug::Warning( "Metal profile: {:>8.3f} ms  Clouds + sky cubemap",
+                                          ( c.GPUEndTime - c.GPUStartTime ) * 1000.0 );
+                      }
+                    }];
+                    [cmdSky commit];
+                }
             }
         }
 
@@ -2411,11 +2434,13 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             // draw rasterized sky to albedo before tracing primary rays
             if( impl->uniform.skyType == SKY_TYPE_RASTERIZED_GEOMETRY && !pInfo->disableRasterization )
             {
+                const auto tSky = Impl::CpuProfile::Clock::now();
                 impl->rasterizer->DrawSkyToAlbedo(
                     cmd,
                     rasterParams,
                     impl->framebuffers->Get( FB_IMAGE_INDEX_ALBEDO, impl->frameIndex ),
                     pnext::get< RgDrawFrameSkyParams >( *pInfo ).skyViewerPosition );
+                impl->cpu.skyAlbedo += Impl::CpuProfile::Ms( tSky, Impl::CpuProfile::Clock::now() );
             }
 
             // Debug: RTGL1_METAL_DEBUG_FLUID_SPAWN=<count>, spawn fluid in front of the camera each frame
@@ -2825,9 +2850,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                         n * 1000.0 / std::max( 1.0, c.sincePrint ), c.sincePrint / 1000.0 );
         debug::Warning( "Metal profile (CPU, ms per frame): waiting for a frame slot {:.2f}, StartFrame {:.2f}, "
                         "game + uploads {:.2f} (uploads {:.2f}, {:.0f} primitives), DrawFrame {:.2f} "
-                        "(acceleration structures {:.2f}, path tracer encoding {:.2f})",
+                        "(acceleration structures {:.2f}, path tracer encoding {:.2f}, clouds {:.2f}, "
+                        "sky cubemap {:.2f}, sky to albedo {:.2f}; {:.0f} sky draws)",
                         c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n,
-                        double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n );
+                        double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n,
+                        c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n );
         if( impl->scene )
         {
             const auto& st = impl->scene->lastStats;
@@ -2837,6 +2864,8 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                             st.staticGeometries, st.tlasInstances, st.geometryInfos );
         }
         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
+        c.clouds = c.skyCubemap = c.skyAlbedo = 0;
+        c.skyDraws = 0;
         c.primitives = 0;
         c.frames     = 0;
     }

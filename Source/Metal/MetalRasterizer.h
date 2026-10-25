@@ -148,7 +148,8 @@ public:
                               uint32_t                      height,
                               MTLPixelFormat                format );
 
-    bool HasDraws( Type type ) const { return !draws[ size_t( type ) ].empty(); }
+    bool   HasDraws( Type type ) const { return !draws[ size_t( type ) ].empty(); }
+    size_t DrawCount( Type type ) const { return draws[ size_t( type ) ].size(); }
 
 private:
     // RasterizedDataCollector.h

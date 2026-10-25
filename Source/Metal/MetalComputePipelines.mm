@@ -25,6 +25,7 @@
 #include "Generated/ShaderCommonC.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <fstream>
 
@@ -75,24 +76,37 @@ std::string MakeKey( const char* shaderName, const RTGL1::MetalComputePipelines:
 
 
 
+namespace
+{
+uint64_t NextBindingTableVersion()
+{
+    static std::atomic< uint64_t > counter{ 0 };
+    return ++counter;
+}
+}
+
 void RTGL1::MetalBindingTable::SetTexture( const std::string& name, id< MTLTexture > texture )
 {
+    version = NextBindingTableVersion();
     entries[ name ] = Entry{ .resource = texture };
 }
 
 void RTGL1::MetalBindingTable::SetSampler( const std::string& name, id< MTLSamplerState > sampler )
 {
+    version = NextBindingTableVersion();
     entries[ name ] = Entry{ .sampler = sampler };
 }
 
 void RTGL1::MetalBindingTable::SetBuffer( const std::string& name, id< MTLBuffer > buffer, NSUInteger offset )
 {
+    version = NextBindingTableVersion();
     entries[ name ] = Entry{ .resource = buffer, .offset = offset };
 }
 
 void RTGL1::MetalBindingTable::SetAccelerationStructure(
     const std::string& name, id< MTLAccelerationStructure > tlas, std::span< const id< MTLAccelerationStructure > > blases )
 {
+    version = NextBindingTableVersion();
     entries[ name ] = Entry{
         .resource       = tlas,
         .extraResources = { blases.begin(), blases.end() },
@@ -103,6 +117,7 @@ void RTGL1::MetalBindingTable::SetArgumentBuffer( const std::string&            
                                                   id< MTLBuffer >                      buffer,
                                                   std::span< const id< MTLResource > > resources )
 {
+    version = NextBindingTableVersion();
     entries[ name ] = Entry{
         .resource       = buffer,
         .extraResources = { resources.begin(), resources.end() },
@@ -406,8 +421,24 @@ template< typename SetBufferFunc >
 void RTGL1::MetalComputePipelines::FillArgumentBuffers( const std::vector< ArgumentSet >& sets,
                                                         const MetalBindingTable&          bindings,
                                                         SetBufferFunc&&                   setBuffer,
-                                                        std::vector< id< MTLResource > > ( &used )[ 3 ] )
+                                                        std::vector< id< MTLResource > > ( &used )[ 3 ],
+                                                        std::unordered_set< const void* >* residentExtras )
 {
+    // the extra resources of an entry, if not resident on the encoder yet
+    auto l_useExtras = [ & ]( const MetalBindingTable::Entry* e ) {
+        if( residentExtras && !residentExtras->insert( e ).second )
+        {
+            return;
+        }
+        for( id< MTLResource > r : e->extraResources )
+        {
+            if( r )
+            {
+                used[ 0 ].push_back( r );
+            }
+        }
+    };
+
     auto l_use = [ &used ]( id< MTLResource > r, MTLResourceUsage usage ) {
         if( r )
         {
@@ -431,10 +462,7 @@ void RTGL1::MetalComputePipelines::FillArgumentBuffers( const std::vector< Argum
             if( const auto* e = bindings.Find( set.members[ 0 ].name ) )
             {
                 setBuffer( set.bufferIndex, static_cast< id< MTLBuffer > >( e->resource ), NSUInteger{ 0 } );
-                for( id< MTLResource > r : e->extraResources )
-                {
-                    l_use( r, MTLResourceUsageRead );
-                }
+                l_useExtras( e );
                 continue;
             }
         }
@@ -491,10 +519,7 @@ void RTGL1::MetalComputePipelines::FillArgumentBuffers( const std::vector< Argum
                     auto as = static_cast< id< MTLAccelerationStructure > >( e->resource );
                     WriteHandle( up.ptr, m.offset, ToHandle( as.gpuResourceID ) );
                     l_use( as, MTLResourceUsageRead );
-                    for( id< MTLResource > r : e->extraResources )
-                    {
-                        l_use( r, MTLResourceUsageRead );
-                    }
+                    l_useExtras( e );
                     break;
                 }
                 case MTLDataTypeArray: {
@@ -539,6 +564,39 @@ std::vector< uint8_t > PadPushConstants( std::span< const uint8_t > src, NSUInte
 }
 }
 
+bool RTGL1::MetalComputePipelines::EncoderResidency::Reset( id e, const MetalBindingTable& bindings )
+{
+    if( enc != e )
+    {
+        enc = e;
+        for( auto& r : resident )
+        {
+            r.clear();
+        }
+        residentExtras.clear();
+        bindingsVersion = bindings.Version();
+        return true;
+    }
+    if( bindingsVersion != bindings.Version() )
+    {
+        // the resources made resident stay resident, but the entries might be different
+        residentExtras.clear();
+        bindingsVersion = bindings.Version();
+        return true;
+    }
+    return false;
+}
+
+void RTGL1::MetalComputePipelines::EncoderResidency::Filter( std::vector< id< MTLResource > > ( &used )[ 3 ] )
+{
+    for( int i = 0; i < 3; i++ )
+    {
+        std::erase_if( used[ i ], [ & ]( id< MTLResource > r ) {
+            return !resident[ i ].insert( ( __bridge const void* )r ).second;
+        } );
+    }
+}
+
 void RTGL1::MetalComputePipelines::Bind( id< MTLComputeCommandEncoder > enc,
                                          const Pipeline&                p,
                                          const MetalBindingTable&       bindings,
@@ -550,6 +608,8 @@ void RTGL1::MetalComputePipelines::Bind( id< MTLComputeCommandEncoder > enc,
         [enc setBytes:data.data() length:data.size() atIndex:*p.pushConstantsIndex];
     }
 
+    computeResidency.Reset( enc, bindings );
+
     std::vector< id< MTLResource > > used[ 3 ];
     FillArgumentBuffers(
         p.sets,
@@ -557,7 +617,9 @@ void RTGL1::MetalComputePipelines::Bind( id< MTLComputeCommandEncoder > enc,
         [ enc ]( NSUInteger index, id< MTLBuffer > buffer, NSUInteger offset ) {
             [enc setBuffer:buffer offset:offset atIndex:index];
         },
-        used );
+        used,
+        &computeResidency.residentExtras );
+    computeResidency.Filter( used );
 
     for( int i = 0; i < 3; i++ )
     {
@@ -667,7 +729,26 @@ void RTGL1::MetalComputePipelines::BindRender( id< MTLRenderCommandEncoder > enc
                                                const MetalBindingTable&      bindings,
                                                std::span< const uint8_t >    pushConstants )
 {
-    const RenderPipeline& p = GetRender( desc );
+    // a new encoder, or other resources: the argument buffers must be filled again
+    if( renderResidency.Reset( enc, bindings ) )
+    {
+        renderArgumentBuffers.clear();
+    }
+
+    // many draws in a row have the same pipeline: skip making its key
+    const RenderPipeline* pp = nullptr;
+    if( lastRenderPipeline && desc == lastRenderDesc )
+    {
+        pp = static_cast< const RenderPipeline* >( lastRenderPipeline );
+    }
+    else
+    {
+        pp                 = &GetRender( desc );
+        lastRenderDesc     = desc;
+        lastRenderPipeline = pp;
+    }
+    const RenderPipeline& p = *pp;
+
     [enc setRenderPipelineState:p.pso];
 
     if( p.vertex.pushConstantsIndex )
@@ -681,21 +762,45 @@ void RTGL1::MetalComputePipelines::BindRender( id< MTLRenderCommandEncoder > enc
         [enc setFragmentBytes:data.data() length:data.size() atIndex:*p.fragment.pushConstantsIndex];
     }
 
+    // the same pipeline with the same resources on this encoder: reuse its argument buffers
+    if( auto found = renderArgumentBuffers.find( pp ); found != renderArgumentBuffers.end() )
+    {
+        for( const ArgumentBufferBinding& a : found->second )
+        {
+            if( a.fragment )
+            {
+                [enc setFragmentBuffer:a.buffer offset:a.offset atIndex:a.index];
+            }
+            else
+            {
+                [enc setVertexBuffer:a.buffer offset:a.offset atIndex:a.index];
+            }
+        }
+        return;
+    }
+
+    auto& args = renderArgumentBuffers[ pp ];
+
     std::vector< id< MTLResource > > used[ 3 ];
     FillArgumentBuffers(
         p.vertex.sets,
         bindings,
-        [ enc ]( NSUInteger index, id< MTLBuffer > buffer, NSUInteger offset ) {
+        [ enc, &args ]( NSUInteger index, id< MTLBuffer > buffer, NSUInteger offset ) {
             [enc setVertexBuffer:buffer offset:offset atIndex:index];
+            args.push_back( { .fragment = false, .index = index, .buffer = buffer, .offset = offset } );
         },
-        used );
+        used,
+        &renderResidency.residentExtras );
     FillArgumentBuffers(
         p.fragment.sets,
         bindings,
-        [ enc ]( NSUInteger index, id< MTLBuffer > buffer, NSUInteger offset ) {
+        [ enc, &args ]( NSUInteger index, id< MTLBuffer > buffer, NSUInteger offset ) {
             [enc setFragmentBuffer:buffer offset:offset atIndex:index];
+            args.push_back( { .fragment = true, .index = index, .buffer = buffer, .offset = offset } );
         },
-        used );
+        used,
+        &renderResidency.residentExtras );
+    renderResidency.Filter( used );
 
     for( int i = 0; i < 3; i++ )
     {
