@@ -125,6 +125,36 @@ constexpr RgTransform IdentityTransform = { {
     { 0, 0, 1, 0 },
 } };
 
+// Raze RT: what a BLAS sees of a geometry -- its positions, indices and transform
+uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint32_t* idx, uint32_t indexCount, const RgTransform& t )
+{
+    uint64_t h   = 0x9E3779B97F4A7C15ull ^ ( uint64_t( vertexCount ) << 32 ) ^ indexCount;
+    auto     mix = [ &h ]( uint32_t w ) {
+        h ^= w;
+        h *= 0xBF58476D1CE4E5B9ull;
+        h ^= h >> 31;
+    };
+    for( uint32_t i = 0; i < vertexCount; i++ )
+    {
+        uint32_t p[ 3 ];
+        memcpy( p, v[ i ].position, sizeof( p ) );
+        mix( p[ 0 ] );
+        mix( p[ 1 ] );
+        mix( p[ 2 ] );
+    }
+    for( uint32_t i = 0; i < indexCount; i++ )
+    {
+        mix( idx[ i ] );
+    }
+    uint32_t m[ 12 ];
+    memcpy( m, t.matrix, sizeof( m ) );
+    for( uint32_t w : m )
+    {
+        mix( w );
+    }
+    return h ? h : 1;
+}
+
 uint32_t FloatToUint8( float f )
 {
     return uint32_t( std::clamp( f, 0.0f, 1.0f ) * 255.0f );
@@ -381,6 +411,12 @@ bool RTGL1::MetalScene::AddDynamic( const RgMeshInfo&          mesh,
         .noMotionVectors = !!( prim.flags & RG_MESH_PRIMITIVE_NO_MOTION_VECTORS ),
         .alphaTested     = group.passThrough == PassThrough::AlphaTested,
         .bakedTransform  = mesh.transform,
+        .contentKey      = ContentKey( &dynamicStorage.vertices[ range->firstVertex ],
+                                  range->vertexCount,
+                                  &dynamicStorage.indices[ range->firstIndex ],
+                                  range->indexCount,
+                                  mesh.transform ),
+        .triangles       = range->indexCount / 3,
     } );
     frameGeomCount++;
     return true;
@@ -563,6 +599,40 @@ void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder > 
                                    bool                                         fastBuild,
                                    NSString*                                    label )
 {
+    std::vector< const Geometry* > ptrs;
+    ptrs.reserve( geoms.size() );
+    for( const Geometry& g : geoms )
+    {
+        ptrs.push_back( &g );
+    }
+    BuildBlas( enc, dst, ptrs, vertices, indices, bakeTransforms, fastBuild, label );
+}
+
+void RTGL1::MetalScene::RetireStable( StableGroup& sg )
+{
+    auto old = Retired{ .resources = {}, .framesLeft = RingSize + 1 };
+    old.resources.push_back( sg.blas.blas );
+    old.resources.push_back( sg.blas.scratch );
+    old.resources.push_back( sg.blas.transforms );
+    std::erase( old.resources, nil );
+    if( !old.resources.empty() )
+    {
+        retired.push_back( std::move( old ) );
+    }
+    sg.blas      = {};
+    sg.keys      = {};
+    sg.triangles = 0;
+}
+
+void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder > enc,
+                                   BuiltBlas&                                   dst,
+                                   const std::vector< const Geometry* >&        geoms,
+                                   id< MTLBuffer >                              vertices,
+                                   id< MTLBuffer >                              indices,
+                                   bool                                         bakeTransforms,
+                                   bool                                         fastBuild,
+                                   NSString*                                    label )
+{
     if( geoms.empty() )
     {
         dst.blas = nil;
@@ -573,9 +643,9 @@ void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder > 
     {
         std::vector< MTLPackedFloat4x3 > transforms;
         transforms.reserve( geoms.size() );
-        for( const Geometry& g : geoms )
+        for( const Geometry* gp : geoms )
         {
-            transforms.push_back( ToPackedFloat4x3( g.bakedTransform ) );
+            transforms.push_back( ToPackedFloat4x3( gp->bakedTransform ) );
         }
         Upload( device, dst.transforms, transforms, @"BLAS transforms" );
     }
@@ -585,7 +655,7 @@ void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder > 
 
     for( size_t i = 0; i < geoms.size(); i++ )
     {
-        const Geometry& g = geoms[ i ];
+        const Geometry& g = *geoms[ i ];
 
         auto* d = [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
         // indices are relative to the vertex buffer offset, as on Vulkan
@@ -815,6 +885,127 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         Upload( device, f.texCoordLayers[ l ], dynamicStorage.texCoordLayers[ l ], @"Dynamic tex coords" );
     }
 
+    // Raze RT: the stable part of the dynamic geometry (see StableGroup), and the rest
+    static const bool stableOn = !std::getenv( "RTGL1_METAL_NO_STABLE" );
+    // a geometry joins after coming unchanged this many frames in a row (a second: an
+    // animation's frames -- a voxel fire's -- come and go faster, and each one that had
+    // joined made a rebuild when it went)...
+    constexpr uint32_t StableMinAge = 60;
+    // ...and only when there are this many triangles to keep
+    constexpr size_t StableMinTriangles = 2000;
+    // a kept BLAS takes in more stable geometry at most this often, when it's 5% more
+    constexpr uint32_t StableAbsorbFrames = 120;
+
+    frameCounter++;
+    {
+        std::unordered_map< uint64_t, uint32_t > age;
+        age.reserve( keyAge.size() + 256 );
+        for( const auto& g : dynamicGeoms )
+        {
+            for( const Geometry& geom : g )
+            {
+                auto it                = keyAge.find( geom.contentKey );
+                age[ geom.contentKey ] = it != keyAge.end() ? std::min( it->second + 1, 1u << 30 ) : 1u;
+            }
+        }
+        keyAge = std::move( age );
+    }
+
+    std::array< std::vector< const Geometry* >, GroupCount > stableLists, volatileLists;
+    std::array< bool, GroupCount >                           stableBuildNow{}, stableBuildFast{};
+    for( uint32_t gi = 0; gi < GroupCount; gi++ )
+    {
+        const auto&  geoms = dynamicGeoms[ gi ];
+        StableGroup& sg    = stable[ gi ];
+
+        std::vector< uint8_t > used( geoms.size(), 0 );
+        auto&                  st    = stableLists[ gi ];
+        bool                   valid = stableOn && !sg.keys.empty();
+        if( valid )
+        {
+            std::unordered_map< uint64_t, std::vector< uint32_t > > byKey;
+            byKey.reserve( geoms.size() );
+            for( uint32_t i = 0; i < geoms.size(); i++ )
+            {
+                byKey[ geoms[ i ].contentKey ].push_back( i );
+            }
+            st.reserve( sg.keys.size() );
+            for( uint64_t k : sg.keys )
+            {
+                auto it = byKey.find( k );
+                if( it == byKey.end() || it->second.empty() )
+                {
+                    // one of them has changed or gone: the kept BLAS shows it as it was
+                    valid = false;
+                    break;
+                }
+                const uint32_t i = it->second.back();
+                it->second.pop_back();
+                used[ i ] = 1;
+                st.push_back( &geoms[ i ] );
+            }
+        }
+        if( !valid )
+        {
+            if( !sg.keys.empty() )
+            {
+                RetireStable( sg );
+            }
+            st.clear();
+            std::fill( used.begin(), used.end(), uint8_t( 0 ) );
+        }
+
+        // the geometries that could join it
+        size_t candidates = 0;
+        if( stableOn )
+        {
+            for( uint32_t i = 0; i < geoms.size(); i++ )
+            {
+                if( !used[ i ] && keyAge[ geoms[ i ].contentKey ] >= StableMinAge )
+                {
+                    candidates += geoms[ i ].triangles;
+                }
+            }
+        }
+        const bool rebuild = stableOn && candidates >= StableMinTriangles &&
+                             ( sg.keys.empty() || ( frameCounter - sg.builtFrame >= StableAbsorbFrames &&
+                                                    candidates * 20 >= sg.triangles ) );
+        if( rebuild )
+        {
+            // built for tracing; but when it keeps changing (it was built less than a second
+            // ago), for building: a slow build every few frames would cost more than it saves
+            stableBuildFast[ gi ] = sg.builtFrame != 0 && frameCounter - sg.builtFrame < 60;
+            RetireStable( sg );
+            for( uint32_t i = 0; i < geoms.size(); i++ )
+            {
+                if( !used[ i ] && keyAge[ geoms[ i ].contentKey ] >= StableMinAge )
+                {
+                    used[ i ] = 1;
+                    st.push_back( &geoms[ i ] );
+                }
+            }
+            sg.keys.reserve( st.size() );
+            for( const Geometry* g : st )
+            {
+                sg.keys.push_back( g->contentKey );
+                sg.triangles += g->triangles;
+            }
+            sg.builtFrame        = frameCounter;
+            stableBuildNow[ gi ] = true;
+            stableRebuilds++;
+        }
+
+        auto& vol = volatileLists[ gi ];
+        vol.reserve( geoms.size() - st.size() );
+        for( uint32_t i = 0; i < geoms.size(); i++ )
+        {
+            if( !used[ i ] )
+            {
+                vol.push_back( &geoms[ i ] );
+            }
+        }
+    }
+
     // dynamic BLAS-es
     if( std::ranges::any_of( dynamicGeoms, []( const auto& g ) { return !g.empty(); } ) )
     {
@@ -822,7 +1013,12 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         enc.label                                        = @"Build dynamic BLAS";
         for( uint32_t gi = 0; gi < GroupCount; gi++ )
         {
-            BuildBlas( enc, f.dynamicBlas[ gi ], dynamicGeoms[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS" );
+            BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS" );
+            if( stableBuildNow[ gi ] )
+            {
+                // from this frame's vertices: the kept geometries are the same in every frame it is used
+                BuildBlas( enc, stable[ gi ].blas, stableLists[ gi ], f.vertices, f.indices, true, stableBuildFast[ gi ], @"Stable BLAS" );
+            }
         }
         [enc endEncoding];
     }
@@ -973,7 +1169,11 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     for( uint32_t gi = 0; gi < GroupCount; gi++ )
     {
         const auto group = Group{ Visibility( gi / 3 ), PassThrough( gi % 3 ) };
-        addInstance( f.dynamicBlas[ gi ].blas, group, 0, IdentityTransform, toPointers( dynamicGeoms[ gi ] ) );
+        if( !stableLists[ gi ].empty() )
+        {
+            addInstance( stable[ gi ].blas.blas, group, 0, IdentityTransform, stableLists[ gi ] );
+        }
+        addInstance( f.dynamicBlas[ gi ].blas, group, 0, IdentityTransform, volatileLists[ gi ] );
     }
 
     // GeomInfoManager: match with the previous frame, by unique IDs
@@ -1076,6 +1276,12 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         {
             lastStats.staticGeometries += g.size();
         }
+        for( uint32_t gi = 0; gi < GroupCount; gi++ )
+        {
+            lastStats.stableGeometries += stableLists[ gi ].size();
+            lastStats.stableTriangles += stable[ gi ].triangles;
+        }
+        lastStats.stableRebuilds = stableRebuilds;
     }
     tlasDesc.instanceDescriptorBuffer = f.instances;
     tlasDesc.instanceDescriptorType   = MTLAccelerationStructureInstanceDescriptorTypeUserID;

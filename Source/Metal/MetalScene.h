@@ -36,6 +36,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace RTGL1
 {
@@ -104,6 +105,8 @@ public:
     {
         size_t dynamicGeometries, dynamicTriangles, dynamicVertices, staticGeometries, tlasInstances, geometryInfos;
         size_t polishedGeometries;
+        // Raze RT: the kept (stable) part of the dynamic geometry, and its rebuilds since the last stats
+        size_t stableGeometries, stableTriangles, stableRebuilds;
     };
     Stats lastStats{};
 
@@ -170,6 +173,9 @@ private:
         bool               noMotionVectors;
         bool               alphaTested;
         RgTransform        bakedTransform;
+        // Raze RT: what the BLAS sees of it (positions, indices, transform), for the stable geometry
+        uint64_t           contentKey{ 0 };
+        uint32_t           triangles{ 0 };
     };
     static ShGeometryInstance MakeGeomInfo( const RgMeshInfo&          mesh,
                                             const RgMeshPrimitiveInfo& prim,
@@ -255,6 +261,30 @@ private:
                     bool                                         bakeTransforms,
                     bool                                         fastBuild,
                     NSString*                                    label );
+    void BuildBlas( id< MTLAccelerationStructureCommandEncoder > enc,
+                    BuiltBlas&                                   dst,
+                    const std::vector< const Geometry* >&        geoms,
+                    id< MTLBuffer >                              vertices,
+                    id< MTLBuffer >                              indices,
+                    bool                                         bakeTransforms,
+                    bool                                         fastBuild,
+                    NSString*                                    label );
+
+    // Raze RT: stable geometry. A game that sends all of its world as dynamic geometry every
+    // frame (Raze: a Build map's walls and floors) had all of it rebuilt into a BLAS each frame,
+    // built for speed of building, not of tracing. The geometries that come again unchanged
+    // (by contentKey) for a few frames go into a BLAS of their own, built for tracing and kept;
+    // it is used for as long as all of its geometries come again. Its geometry infos are this
+    // frame's (the shaders read the vertices of this frame's dynamic buffers, the same ones).
+    // RTGL1_METAL_NO_STABLE=1 turns it off.
+    struct StableGroup
+    {
+        std::vector< uint64_t > keys; // of its geometries, in the BLAS order
+        BuiltBlas               blas;
+        size_t                  triangles{ 0 };
+        uint32_t                builtFrame{ 0 };
+    };
+    void RetireStable( StableGroup& sg );
 
 private:
     id< MTLDevice >       device;
@@ -310,6 +340,12 @@ private:
     };
     rgl::unordered_map< PrimitiveUniqueID, PrevInfo > prevInfos;
     uint32_t                                          prevGeomCount{ 0 };
+
+    // Raze RT: stable geometry (see StableGroup)
+    std::array< StableGroup, GroupCount >    stable;
+    std::unordered_map< uint64_t, uint32_t > keyAge; // a content key -> frames in a row it came
+    uint32_t                                 frameCounter{ 0 };
+    size_t                                   stableRebuilds{ 0 };
 };
 
 }
