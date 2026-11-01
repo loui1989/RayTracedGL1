@@ -835,6 +835,17 @@ void RTGL1::VulkanDevice::FillUniform( RTGL1::ShGlobalUniform* gu,
             gu->smokeShape[ i * 4 ] =
                 params.pShape ? std::max( 0.001f, params.pShape[ i ].data[ 0 ] )
                               : std::max( 0.001f, params.pPuffs[ i ].data[ 3 ] );
+            // Raze RT: the axis (shape.yzw) Smoke.h stretches a puff along -- it was never
+            // copied, so every puff was a ball round shape.x. Sent for a clearing (negative
+            // density: a bullet's track is a long one along the shot); zero for the rest,
+            // which keeps the smoke's puffs the balls they have always been.
+            {
+                const bool  stretched = params.pShape && params.pAlbedoDensity[ i ].data[ 3 ] < 0.0f;
+                for( int k = 1; k < 4; k++ )
+                {
+                    gu->smokeShape[ i * 4 + k ] = stretched ? params.pShape[ i ].data[ k ] : 0.0f;
+                }
+            }
         }
         // Doom64-RT: proves the pNext link and the uniform copy, which is the one
         // step the engine-side log cannot see. If stage C says "sent" and this
