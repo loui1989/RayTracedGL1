@@ -1258,6 +1258,18 @@ void main()
             rayDir = refractionDir;
             throughput *= (1 - F);
 
+            // Raze RT: glass takes the colour of its texture, texel by texel -- its hue
+            // filters the light that goes through it (stained glass), and its darker
+            // texels (the leading of a leaded window, a pane's frosting) let less
+            // through, so the picture stays. A pale, even pane stays clear. (Linear
+            // albedo: a mid-tone texel is about 0.2.)
+            if( newRayMedia == MEDIA_TYPE_GLASS )
+            {
+                const float m    = max( max( h.albedo.r, h.albedo.g ), h.albedo.b );
+                const vec3  hue  = h.albedo / max( m, 0.002 );
+                throughput *= mix( vec3( 1.0 ), hue, 0.9 ) * smoothstep( 0.015, 0.22, m );
+            }
+
             if( ( h.geometryInstanceFlags & GEOM_INST_FLAG_THIN_MEDIA ) != 0 )
             {
                 // simulate media, knowing its width along normal
