@@ -3205,10 +3205,12 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             const auto& st = impl->scene->lastStats;
             debug::Warning( "Metal profile: scene: {} dynamic geometries ({} triangles, {} vertices), "
                             "{} static geometries, {} TLAS instances, {} geometry infos ({} polished); "
-                            "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far",
+                            "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far; "
+                            "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles)",
                             st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
                             st.staticGeometries, st.tlasInstances, st.geometryInfos, st.polishedGeometries,
-                            st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds );
+                            st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds,
+                            st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles );
         }
         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
         c.clouds = c.skyCubemap = c.skyAlbedo = 0;

@@ -107,6 +107,8 @@ public:
         size_t polishedGeometries;
         // Raze RT: the kept (stable) part of the dynamic geometry, and its rebuilds since the last stats
         size_t stableGeometries, stableTriangles, stableRebuilds, stableCells;
+        // models instanced with their kept BLAS (modelBlas), the rest rebuilt each frame
+        size_t instancedModels, modelBlases, modelBuilds, volatileGeometries, volatileTriangles;
     };
     Stats lastStats{};
 
@@ -182,6 +184,8 @@ private:
         uint32_t           triangles{ 0 };
         // and which piece of the map it is in (see StableGroup)
         int64_t            cell{ 0 };
+        // its shape alone (0: not transformed), see modelBlas
+        uint64_t           localKey{ 0 };
     };
     static ShGeometryInstance MakeGeomInfo( const RgMeshInfo&          mesh,
                                             const RgMeshPrimitiveInfo& prim,
@@ -355,6 +359,18 @@ private:
     std::unordered_map< uint64_t, uint32_t > keyAge; // a content key -> frames in a row it came
     uint32_t                                 frameCounter{ 0 };
     size_t                                   stableRebuilds{ 0 };
+    // Raze RT: a model that moves but keeps its shape (a spinning voxel pickup, a swinging
+    // door's voxel) changed its content key every frame: rebuilt with the dynamic BLAS each
+    // frame. By its shape alone (Geometry::localKey): a BLAS in its own space, kept while it
+    // is seen, a TLAS instance with its transform for each one of it
+    struct ModelBlas
+    {
+        BuiltBlas blas;
+        uint32_t  lastFrame{ 0 };
+    };
+    std::array< std::unordered_map< uint64_t, ModelBlas >, GroupCount > modelBlas;
+    std::unordered_map< uint64_t, uint32_t >                             localAge;
+    size_t                                                               modelBuilds{ 0 };
 };
 
 }
