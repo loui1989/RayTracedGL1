@@ -1238,7 +1238,13 @@ void traceDirectIllumination( uint            seed,
 
     #if LIGHT_SAMPLE_METHOD == LIGHT_SAMPLE_METHOD_DIRECT
         // Raze RT: through glass, its colour
-        if (visibility > 0.0 && globalUniform.sunLeakDebugMul > 0.5)
+        // (only a spot light's or the sun's: Raze RT puts a window's light outside it as a spot
+        // -- the balls in rooms, a fire's flames, never shine through glass, and testing
+        // every one of them against the world doubled the direct light's cost by a fire)
+        if (visibility > 0.0 && globalUniform.sunLeakDebugMul > 0.5 &&
+            (reservoir.selected == LIGHT_ARRAY_DIRECTIONAL_LIGHT_OFFSET ||
+             lightSources[reservoir.selected].lightType == LIGHT_TYPE_SPOT ||
+             lightSources[reservoir.selected].lightType == LIGHT_TYPE_DIRECTIONAL))
         {
             const vec3 gt = glassTransmittance(surf.position + surf.toViewerDir * RAY_ORIGIN_LEAK_BIAS, light.position);
             out_diffuse  *= gt;
