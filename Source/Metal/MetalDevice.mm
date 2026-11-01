@@ -1525,6 +1525,8 @@ struct RTGL1::MetalDevice::Impl
         // the GPU time of the last frame that finished, and the fraction it was rendered at
         std::shared_ptr< std::atomic< double > > gpuTime{ std::make_shared< std::atomic< double > >( 0.0 ) };
         std::shared_ptr< std::atomic< float > >  gpuTimeScale{ std::make_shared< std::atomic< float > >( 1.0f ) };
+        // the GPU end of the latest finished frame (see the completed handler)
+        std::shared_ptr< std::atomic< double > > gpuLastEnd{ std::make_shared< std::atomic< double > >( 0.0 ) };
         // the size of the frame last rendered with each frame index (its framebuffers' content: the
         // _Prev ones of the next frame), and the framebuffers' size it was in; the latter also the
         // last frame's
@@ -2409,7 +2411,8 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                     d.gpuTime->store( 0.0 );
                 }
 
-                const double budget = 0.92 / fps;
+                // (a little under the frame time of the target: 0.92 left ~8% unused)
+                const double budget = 0.95 / fps;
                 const double g      = d.gpuTime->load();
                 const float  sUsed  = d.gpuTimeScale->load();
 
@@ -2562,11 +2565,21 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                 {
                     auto gpuTime      = d.gpuTime;
                     auto gpuTimeScale = d.gpuTimeScale;
+                    auto gpuLastEnd   = d.gpuLastEnd;
                     const float s     = float( renderWidth ) / float( allocWidth );
                     [cmd addCompletedHandler:^( id< MTLCommandBuffer > c ) {
                       if( c.status == MTLCommandBufferStatusCompleted && c.GPUEndTime > c.GPUStartTime )
                       {
-                          gpuTime->store( std::min( c.GPUEndTime - c.GPUStartTime, 0.25 ) );
+                          // a frame's start to its end overstates its cost when the frames
+                          // overlap on the GPU (the next one begins while this one's upscaling
+                          // and presenting finish): 15.8 ms each at 72 fps (13.9 ms apart) kept
+                          // the size at its smallest for a 60 fps target. The time from the
+                          // previous frame's end is what a GPU-bound frame costs; when the GPU
+                          // waits between frames, that is longer than the frame, then its span
+                          const double span = c.GPUEndTime - c.GPUStartTime;
+                          const double prev = gpuLastEnd->exchange( c.GPUEndTime );
+                          const double gap  = prev > 0 && c.GPUEndTime > prev ? c.GPUEndTime - prev : span;
+                          gpuTime->store( std::min( std::min( span, gap ), 0.25 ) );
                           gpuTimeScale->store( s );
                       }
                     }];
