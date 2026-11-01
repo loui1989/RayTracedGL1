@@ -1533,6 +1533,23 @@ struct RTGL1::MetalDevice::Impl
         Size     at[ MAX_FRAMES_IN_FLIGHT ]{};
         uint32_t allocWidth{ 0 }, allocHeight{ 0 };
         bool     wasActive{ false };
+
+        // the test (RTGL1_DYNRES_TEST, Raze RT's rt_dynres_test): the size held at a few steps
+        // from the largest to the smallest, the GPU time measured at each
+        struct Test
+        {
+            bool                  on{ false };
+            int                   step{ 0 };
+            int                   frames{ 0 };
+            std::vector< double > samples;
+            struct Result
+            {
+                float    scale;
+                uint32_t width, height;
+                double   median, low, high;
+            };
+            std::vector< Result > results;
+        } test;
     } dyn;
     // MTLFXFrameInterpolator: RgFrameGenerationMode, with the MetalFX temporal upscaling
     bool frameInterpolationAvailable{ false };
@@ -2390,7 +2407,123 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                 const double budget = 0.92 / fps;
                 const double g      = d.gpuTime->load();
                 const float  sUsed  = d.gpuTimeScale->load();
-                if( g > 1e-4 )
+
+                // the test: instead of the controller
+                constexpr int TestSteps = 8, TestWarmup = 30, TestSamples = 90;
+                auto          testScale = [ & ]( int step ) {
+                    return 1.0f - ( 1.0f - sMin ) * float( step ) / float( TestSteps - 1 );
+                };
+                if( !d.test.on && std::getenv( "RTGL1_DYNRES_TEST" ) )
+                {
+                    unsetenv( "RTGL1_DYNRES_TEST" );
+                    d.test = {};
+                    d.test.on = true;
+                    debug::Warning( "Dynamic resolution test: {} sizes from {}x{} down to {:.0f}% of it, about {} s -- hold still",
+                                    TestSteps,
+                                    allocWidth,
+                                    allocHeight,
+                                    sMin * 100.0f,
+                                    TestSteps * ( TestWarmup + TestSamples ) / std::max( 30, int( fps ) ) );
+                }
+                if( d.test.on )
+                {
+                    auto&       t = d.test;
+                    const float s = testScale( t.step );
+                    // (a measurement of a frame at this step's size, after its warm-up)
+                    if( t.frames >= TestWarmup && g > 1e-4 && std::abs( sUsed - float( std::max( 2u, uint32_t( float( allocWidth ) * s + 0.5f ) & ~1u ) ) / float( allocWidth ) ) < 1e-4f )
+                    {
+                        t.samples.push_back( g );
+                    }
+                    t.frames++;
+                    if( int( t.samples.size() ) >= TestSamples || t.frames > ( TestWarmup + TestSamples ) * 4 )
+                    {
+                        std::sort( t.samples.begin(), t.samples.end() );
+                        const size_t n = t.samples.size();
+                        if( n > 0 )
+                        {
+                            t.results.push_back( { s,
+                                                   std::max( 2u, uint32_t( float( allocWidth ) * s + 0.5f ) & ~1u ),
+                                                   std::max( 2u, uint32_t( float( allocHeight ) * s + 0.5f ) ),
+                                                   t.samples[ n / 2 ],
+                                                   t.samples[ n / 10 ],
+                                                   t.samples[ ( n * 9 ) / 10 ] } );
+                        }
+                        t.samples.clear();
+                        t.frames = 0;
+                        t.step++;
+                    }
+                    if( t.step >= TestSteps )
+                    {
+                        // GPU time = fixed + per pixel: least squares over the medians
+                        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+                        const double k = double( t.results.size() );
+                        for( const auto& r : t.results )
+                        {
+                            const double mp = double( r.width ) * r.height / 1e6;
+                            sx += mp, sy += r.median * 1000.0, sxx += mp * mp, sxy += mp * r.median * 1000.0;
+                        }
+                        const double den   = k * sxx - sx * sx;
+                        const double perMp = den > 1e-9 ? ( k * sxy - sx * sy ) / den : 0.0;
+                        const double fixed = k > 0 ? ( sy - perMp * sx ) / k : 0.0;
+                        debug::Warning( "Dynamic resolution test: render size, GPU frame time (median; 10%..90%)" );
+                        for( const auto& r : t.results )
+                        {
+                            const double mp = double( r.width ) * r.height / 1e6;
+                            debug::Warning( "  {:>3.0f}%  {:>4}x{:<4} {:.2f} MP   {:6.2f} ms  ({:.2f} .. {:.2f})   {:5.1f} fps",
+                                            r.scale * 100.0f,
+                                            r.width,
+                                            r.height,
+                                            mp,
+                                            r.median * 1000.0,
+                                            r.low * 1000.0,
+                                            r.high * 1000.0,
+                                            r.median > 0 ? 1.0 / r.median : 0.0 );
+                        }
+                        if( t.results.size() >= 2 )
+                        {
+                            const auto&  a      = t.results.front();
+                            const auto&  b      = t.results.back();
+                            const double pixRat = double( b.width ) * b.height / ( double( a.width ) * a.height );
+                            const double timRat = b.median / std::max( a.median, 1e-6 );
+                            debug::Warning( "  fit: {:.2f} ms fixed (whatever the size) + {:.2f} ms per million pixels", fixed, perMp );
+                            debug::Warning( "  smallest vs largest: {:.0f}% of the pixels took {:.0f}% of the time "
+                                            "(scaling efficiency {:.0f}%: 100% = time falls as the pixels do)",
+                                            pixRat * 100.0,
+                                            timRat * 100.0,
+                                            ( 1.0 - timRat ) / std::max( 1.0 - pixRat, 1e-6 ) * 100.0 );
+                            // the largest size the fit says is within the controller's budget
+                            const double budgetMs = budget * 1000.0;
+                            const double allocMp  = double( allocWidth ) * allocHeight / 1e6;
+                            if( fixed >= budgetMs || perMp <= 1e-6 )
+                            {
+                                debug::Warning( "  target {} fps ({:.1f} ms with the margin): {}",
+                                                int( fps ),
+                                                budgetMs,
+                                                fixed >= budgetMs ? "out of reach at any size (the fixed part alone is over it)"
+                                                                  : "the size does not matter here" );
+                            }
+                            else
+                            {
+                                const double fitScale = std::sqrt( ( budgetMs - fixed ) / perMp / allocMp );
+                                debug::Warning( "  target {} fps ({:.1f} ms with the margin): the largest size that fits is about {:.0f}% ({}x{}){}",
+                                                int( fps ),
+                                                budgetMs,
+                                                std::min( fitScale, 1.0 ) * 100.0,
+                                                uint32_t( allocWidth * std::min( fitScale, 1.0 ) ),
+                                                uint32_t( allocHeight * std::min( fitScale, 1.0 ) ),
+                                                fitScale >= 1.0 ? " -- the largest, with room to spare"
+                                                : fitScale < sMin ? " -- below the lowest scale: the target is missed there"
+                                                                  : "" );
+                            }
+                        }
+                        t.on = false;
+                    }
+                    else
+                    {
+                        d.scale = testScale( t.step );
+                    }
+                }
+                else if( g > 1e-4 )
                 {
                     const float desired = std::clamp( float( double( sUsed ) * std::sqrt( budget / g ) ), sMin, 1.0f );
                     // (a small difference is left alone: the measurement is noisy)
