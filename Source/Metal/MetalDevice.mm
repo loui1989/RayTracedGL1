@@ -1366,7 +1366,9 @@ void FillUniform( RTGL1::ShGlobalUniform* gu, const RgDrawFrameInfo& drawInfo, c
         gu->svgfIndirAntilag = !!illum.svgfIndirAntilag;
 
         gu->directSamples         = std::clamp( illum.directSamples, 1u, 8u );
-        gu->indirectSamples       = std::clamp( illum.indirectSamples, 1u, 8u );
+        // (Raze RT: 0 -- the bounce light traced for half of the pixels each frame, in a
+        // checkerboard that alternates; see RtRaygenIndirect.inl)
+        gu->indirectSamples       = illum.indirectSamples == 0 ? 0u : std::clamp( illum.indirectSamples, 1u, 8u );
         // 32 -> 64 (2026-08-17): pure loop bound in calcInitialReservoir, no
         // rays traced, no fixed-size arrays -- and scenes dense with small
         // emitters (the stripe-bulb rooms) genuinely need more candidates to
@@ -2852,6 +2854,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                     .indirectIlluminationMaxAlbedoLayers = impl->indirectIlluminationMaxAlbedoLayers,
                     .lightmapLayerIndex                  = impl->lightmapLayerIndex,
                     .reflectRefractMaxDepth              = impl->uniform.reflectRefractMaxDepth,
+                    .indirectHalfRate                    = impl->uniform.indirectSamples == 0,
                     .volumetricMaxHistoryLength =
                         pInfo->resetHistory ? 0 : pnext::get< RgDrawFrameVolumetricParams >( *pInfo ).maxHistoryLength,
                     .globalUniform = impl->globalUniform[ impl->frameIndex ],

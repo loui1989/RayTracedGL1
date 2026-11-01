@@ -83,6 +83,8 @@ public:
 
         // the same as ShGlobalUniform, to choose the passes on CPU
         uint32_t reflectRefractMaxDepth;
+        // Raze RT: the bounce light's rays for half of the pixels (ShGlobalUniform::indirectSamples 0)
+        bool     indirectHalfRate = false;
         float    volumetricMaxHistoryLength;
 
         id< MTLBuffer >  globalUniform;

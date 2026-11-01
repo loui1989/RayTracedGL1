@@ -606,7 +606,8 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
     EndPass( enc );
 
     BeginPass( cmd, enc, @"Indirect illumination - Init" );
-    shaders.Dispatch( enc, "RtRaygenIndirectInit", indirectConstants, b, p.width, p.height );
+    // (half rate: a thread a pixel of the checkerboard, every thread busy)
+    shaders.Dispatch( enc, "RtRaygenIndirectInit", indirectConstants, b, p.indirectHalfRate ? ( p.width + 1 ) / 2 : p.width, p.height );
     EndPass( enc );
 
     // PathTracer::TraceVolumetric
