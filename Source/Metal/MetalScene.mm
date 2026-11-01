@@ -126,36 +126,70 @@ constexpr RgTransform IdentityTransform = { {
 } };
 
 // Raze RT: what a BLAS sees of a geometry -- its positions, indices and transform
-// (and 'local': without the transform -- the shape alone, 0 for an untransformed geometry)
+// (and 'local': without the transform -- the shape alone, 0 for an untransformed geometry).
+// Four independent lanes of 64-bit words: one chain of a multiply per 32-bit word took
+// ~2 ms a frame over a few voxel models' 300k vertices; this, ~0.4 ms
+namespace
+{
+inline uint64_t KeyMix( uint64_t h, uint64_t w )
+{
+    h ^= w;
+    h *= 0xBF58476D1CE4E5B9ull;
+    return h ^ ( h >> 29 );
+}
+}
 uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint32_t* idx, uint32_t indexCount, const RgTransform& t, uint64_t* local = nullptr )
 {
-    uint64_t h   = 0x9E3779B97F4A7C15ull ^ ( uint64_t( vertexCount ) << 32 ) ^ indexCount;
-    auto     mix = [ &h ]( uint32_t w ) {
-        h ^= w;
-        h *= 0xBF58476D1CE4E5B9ull;
-        h ^= h >> 31;
-    };
-    for( uint32_t i = 0; i < vertexCount; i++ )
+    uint64_t a = 0x9E3779B97F4A7C15ull ^ ( uint64_t( vertexCount ) << 32 ) ^ indexCount;
+    uint64_t b = 0xC2B2AE3D27D4EB4Full, c = 0x165667B19E3779F9ull, d = 0x27D4EB2F165667C5ull;
+
+    uint32_t i = 0;
+    for( ; i + 2 <= vertexCount; i += 2 )
     {
-        uint32_t p[ 3 ];
-        memcpy( p, v[ i ].position, sizeof( p ) );
-        mix( p[ 0 ] );
-        mix( p[ 1 ] );
-        mix( p[ 2 ] );
+        uint64_t xy0, xy1;
+        uint32_t z0, z1;
+        memcpy( &xy0, &v[ i ].position[ 0 ], 8 );
+        memcpy( &z0, &v[ i ].position[ 2 ], 4 );
+        memcpy( &xy1, &v[ i + 1 ].position[ 0 ], 8 );
+        memcpy( &z1, &v[ i + 1 ].position[ 2 ], 4 );
+        a = KeyMix( a, xy0 );
+        b = KeyMix( b, uint64_t( z0 ) | ( uint64_t( z1 ) << 32 ) );
+        c = KeyMix( c, xy1 );
     }
-    for( uint32_t i = 0; i < indexCount; i++ )
+    for( ; i < vertexCount; i++ )
     {
-        mix( idx[ i ] );
+        uint64_t xy;
+        uint32_t z;
+        memcpy( &xy, &v[ i ].position[ 0 ], 8 );
+        memcpy( &z, &v[ i ].position[ 2 ], 4 );
+        a = KeyMix( a, xy );
+        d = KeyMix( d, z );
     }
+    uint32_t j = 0;
+    for( ; j + 8 <= indexCount; j += 8 )
+    {
+        uint64_t w[ 4 ];
+        memcpy( w, idx + j, sizeof( w ) );
+        a = KeyMix( a, w[ 0 ] );
+        b = KeyMix( b, w[ 1 ] );
+        c = KeyMix( c, w[ 2 ] );
+        d = KeyMix( d, w[ 3 ] );
+    }
+    for( ; j < indexCount; j++ )
+    {
+        d = KeyMix( d, idx[ j ] );
+    }
+    uint64_t h = KeyMix( KeyMix( KeyMix( a, b ), c ), d );
+
     if( local )
     {
         *local = memcmp( &t, &IdentityTransform, sizeof( t ) ) != 0 ? ( h | 1 ) : 0;
     }
-    uint32_t m[ 12 ];
+    uint64_t m[ 6 ];
     memcpy( m, t.matrix, sizeof( m ) );
-    for( uint32_t w : m )
+    for( uint64_t w : m )
     {
-        mix( w );
+        h = KeyMix( h, w );
     }
     return h ? h : 1;
 }

@@ -1685,6 +1685,9 @@ struct RTGL1::MetalDevice::Impl
         double            sincePrint{ 0 }; // ms, between the last two prints
         double   waitFrame{ 0 }, startFrame{ 0 }, betweenFrames{ 0 }, uploads{ 0 }, sceneBuild{ 0 },
                  render{ 0 }, drawFrame{ 0 }, clouds{ 0 }, skyCubemap{ 0 }, skyAlbedo{ 0 };
+        // Raze RT: of the uploads, adding to the scene (copies, content keys, geometry infos)
+        double   sceneAdd{ 0 };
+        uint64_t uploadVerts{ 0 };
         uint64_t skyDraws{ 0 }, skyReused{ 0 };
         uint64_t primitives{ 0 }, frames{ 0 };
 
@@ -3193,11 +3196,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         debug::Warning( "Metal profile: {:.1f} fps over the last {:.1f} s",
                         n * 1000.0 / std::max( 1.0, c.sincePrint ), c.sincePrint / 1000.0 );
         debug::Warning( "Metal profile (CPU, ms per frame): waiting for a frame slot {:.2f}, StartFrame {:.2f}, "
-                        "game + uploads {:.2f} (uploads {:.2f}, {:.0f} primitives), DrawFrame {:.2f} "
+                        "game + uploads {:.2f} (uploads {:.2f}: scene {:.2f}, {:.0f} primitives, {:.0f}k vertices), DrawFrame {:.2f} "
                         "(acceleration structures {:.2f}, path tracer encoding {:.2f}, clouds {:.2f}, "
                         "sky cubemap {:.2f}, sky to albedo {:.2f}; {:.0f} sky draws, sky cubemap kept {:.0f}% of frames)",
-                        c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n,
-                        double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n,
+                        c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n, c.sceneAdd / n,
+                        double( c.primitives ) / n, double( c.uploadVerts ) / n / 1000.0, c.drawFrame / n, c.sceneBuild / n, c.render / n,
                         c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n,
                         100.0 * double( c.skyReused ) / n );
         if( impl->scene )
@@ -3214,6 +3217,8 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         }
         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
+        c.sceneAdd    = 0;
+        c.uploadVerts = 0;
         c.skyDraws = 0;
         c.skyReused = 0;
         c.primitives = 0;
@@ -3387,7 +3392,15 @@ void RTGL1::MetalDevice::UploadMeshPrimitive( const RgMeshInfo*          pMesh,
     }
 
     // upload a primitive, potentially loading replacements
-    impl->sceneManager->UploadPrimitive( impl->frameIndex, mesh, prim );
+    {
+        const auto tScene = impl->cpu.enabled ? Impl::CpuProfile::Clock::now() : Impl::CpuProfile::Clock::time_point{};
+        impl->sceneManager->UploadPrimitive( impl->frameIndex, mesh, prim );
+        if( impl->cpu.enabled )
+        {
+            impl->cpu.sceneAdd += Impl::CpuProfile::Ms( tScene, Impl::CpuProfile::Clock::now() );
+            impl->cpu.uploadVerts += prim.vertexCount;
+        }
+    }
 
     if( impl->lightmapScreenCoverage > 0 )
     {
