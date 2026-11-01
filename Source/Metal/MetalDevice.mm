@@ -203,8 +203,41 @@ void OnFrameCompleted( id< MTLCommandBuffer > c, std::atomic< double >& gpuFrame
         {
             RTGL1::debug::Error( "Metal backend: command buffer failed: {}",
                                  c.error ? c.error.localizedDescription.UTF8String : "(no info)" );
+            // which one, how long it ran, and which of its passes did not finish (a GPU
+            // timeout: the pass that hung)
+            RTGL1::debug::Error( "Metal backend:   '{}', GPU time {:.3f} s",
+                                 c.label ? c.label.UTF8String : "?",
+                                 c.GPUEndTime > c.GPUStartTime ? c.GPUEndTime - c.GPUStartTime : 0.0 );
+            NSArray* infos = c.error ? c.error.userInfo[ MTLCommandBufferEncoderInfoErrorKey ] : nil;
+            if( [infos isKindOfClass:[NSArray class]] )
+            {
+                int done = 0;
+                for( id< MTLCommandBufferEncoderInfo > e in infos )
+                {
+                    if( e.errorState == MTLCommandEncoderErrorStateCompleted )
+                    {
+                        done++;
+                        continue;
+                    }
+                    const char* st = e.errorState == MTLCommandEncoderErrorStateFaulted    ? "FAULTED"
+                                     : e.errorState == MTLCommandEncoderErrorStateAffected ? "affected"
+                                     : e.errorState == MTLCommandEncoderErrorStatePending  ? "pending"
+                                                                                           : "unknown";
+                    NSString* sp = e.debugSignposts.count > 0 ? [e.debugSignposts componentsJoinedByString:@" / "] : @"";
+                    RTGL1::debug::Error( "Metal backend:     pass '{}' {} {}", e.label ? e.label.UTF8String : "?", st, sp.UTF8String );
+                }
+                RTGL1::debug::Error( "Metal backend:     ({} passes before it completed)", done );
+            }
         }
     }
+}
+
+// a command buffer that, when it fails, says which of its passes did
+id< MTLCommandBuffer > NewCommandBuffer( id< MTLCommandQueue > q )
+{
+    MTLCommandBufferDescriptor* d = [MTLCommandBufferDescriptor new];
+    d.errorOptions                = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+    return [q commandBufferWithDescriptor:d];
 }
 
 // bgra8 is the swapchain image, sRGB-encoded
@@ -1638,7 +1671,7 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
       OnFrameCompleted( c, *frameTime );
 
       dispatch_async( dq, ^{
-        id< MTLCommandBuffer > pc = [q commandBuffer];
+        id< MTLCommandBuffer > pc = NewCommandBuffer( q );
         pc.label                  = @"RTGL1 present";
 
         auto l_blit = [ & ]( id< CAMetalDrawable > drawable, id< MTLTexture > src, NSString* label ) {
@@ -2159,7 +2192,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
     @autoreleasepool
     {
-        id< MTLCommandBuffer > cmd = [impl->queue commandBuffer];
+        id< MTLCommandBuffer > cmd = NewCommandBuffer( impl->queue );
         cmd.label                  = @"RTGL1 frame";
 
         const CGSize   drawableSize = impl->layer.drawableSize;
@@ -2736,7 +2769,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             }];
             [cmd commit];
 
-            id< MTLCommandBuffer > pc = [impl->queue commandBuffer];
+            id< MTLCommandBuffer > pc = NewCommandBuffer( impl->queue );
             pc.label                  = @"RTGL1 present";
 
             // acquire the drawable as late as possible
