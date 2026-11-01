@@ -290,14 +290,25 @@ layout(set = DESC_SET_LENS_FLARES, binding = BINDING_LENS_FLARES_DRAW_CMDS) buff
 
 #define CHECKERBOARD_SEPARATOR_DIVISOR 2
 
+// Raze RT, dynamic resolution: the render size can change from one frame to the next
+// (the framebuffers are made for the largest, a frame uses their top left part). The
+// previous frame's size: what its framebuffers (the _Prev ones, the histories) are laid
+// out by (in two spare fields; 0 without dynamic resolution: the frame's own).
+#define RG_PREV_RENDER_WIDTH  ( globalUniform._padlava1 > 0.5 ? globalUniform._padlava1 : globalUniform.renderWidth )
+#define RG_PREV_RENDER_HEIGHT ( globalUniform._padlava > 0.5 ? globalUniform._padlava : globalUniform.renderHeight )
+
 #ifdef DESC_SET_GLOBAL_UNIFORM
 #ifdef DESC_SET_FRAMEBUFFERS
+// (the screen position is in the checkerboarded layout: a half is a screen of half the
+// width, the odd half's x is past the separator -- as a fraction 1..2 of the half's
+// width, which carries over to the previous frame's halves when the sizes differ)
 vec2 getPrevScreenPos(const vec2 motionCurToPrev, const ivec2 pix)
 {
     const vec2 screenSize = vec2(globalUniform.renderWidth / float(CHECKERBOARD_SEPARATOR_DIVISOR), globalUniform.renderHeight);
     const vec2 invScreenSize = vec2(1.0 / screenSize.x, 1.0 / screenSize.y);
+    const vec2 prevScreenSize = vec2(RG_PREV_RENDER_WIDTH / float(CHECKERBOARD_SEPARATOR_DIVISOR), RG_PREV_RENDER_HEIGHT);
    
-    return ((vec2(pix) + vec2(0.5)) * invScreenSize + motionCurToPrev) * screenSize;
+    return ((vec2(pix) + vec2(0.5)) * invScreenSize + motionCurToPrev) * prevScreenSize;
 }
 
 vec2 getPrevScreenPos(sampler2D motionSampler, const ivec2 pix)
@@ -379,6 +390,41 @@ ivec3 getCheckerboardedRenderArea(const ivec2 checkerboardPix)
         CHECKERBOARD_FULL_HEIGHT
     );
 }
+
+#ifdef DESC_SET_GLOBAL_UNIFORM
+// The same, in the previous frame's framebuffers (its size, dynamic resolution): where
+// a reprojected pixel of the current one's half may be
+ivec3 getCheckerboardedRenderArea_Prev(const ivec2 checkerboardPix)
+{
+    const int sepPrev = int(RG_PREV_RENDER_WIDTH) / CHECKERBOARD_SEPARATOR_DIVISOR;
+    const int isOdd = isCheckerboardPixOdd(checkerboardPix);
+
+    return ivec3((isOdd + 0) * sepPrev, (isOdd + 1) * sepPrev, int(RG_PREV_RENDER_HEIGHT));
+}
+
+// a pixel of the previous frame's checkerboarded layout to its regular one, and back
+ivec2 getRegularPixFromCheckerboardPix_Prev(const ivec2 checkerboardPix)
+{
+    const int sep = int(RG_PREV_RENDER_WIDTH) / CHECKERBOARD_SEPARATOR_DIVISOR;
+    const int isOdd = int(checkerboardPix.x >= sep);
+
+    int x = checkerboardPix.x - isOdd * sep;
+
+    return ivec2(x * 2 + (isOdd + checkerboardPix.y) % 2, checkerboardPix.y);
+}
+
+ivec2 getCheckerboardPix_Prev(const ivec2 pix)
+{
+    return ivec2(isRegularPixOdd(pix) * (int(RG_PREV_RENDER_WIDTH) / CHECKERBOARD_SEPARATOR_DIVISOR) + pix.x / 2, pix.y);
+}
+
+// a regular pixel of this frame to the previous frame's, at the same place on the screen
+ivec2 getRegularPixScaledToPrev(const ivec2 regularPix)
+{
+    const vec2 k = vec2(RG_PREV_RENDER_WIDTH / globalUniform.renderWidth, RG_PREV_RENDER_HEIGHT / globalUniform.renderHeight);
+    return ivec2(floor((vec2(regularPix) + 0.5) * k));
+}
+#endif // DESC_SET_GLOBAL_UNIFORM
 #endif // CHECKERBOARD_FULL_HEIGHT
 #endif // CHECKERBOARD_FULL_WIDTH
 

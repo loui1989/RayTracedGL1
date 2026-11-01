@@ -425,6 +425,7 @@ void main()
 
     // assuming that pix is checkerboarded
     const ivec3 chRenderArea = getCheckerboardedRenderArea( pix );
+    const ivec3 chRenderAreaPrev = getCheckerboardedRenderArea_Prev( pix ); // (the temporal taps')
     const float motionZ           = texelFetch( framebufMotion_Sampler, pix, 0 ).z;
     const float depthCur          = texelFetch( framebufDepthWorld_Sampler, pix, 0 ).r;
     const vec2  posPrev           = getPrevScreenPos( framebufMotion_Sampler, pix );
@@ -455,7 +456,7 @@ void main()
             const vec3  normalPrev = texelFetchNormal_Prev( pp );
 
             if( !testSurfaceForReuseIndirect(
-                    chRenderArea, pp, depthCur, depthPrev - motionZ, surf.normal, normalPrev ) )
+                    chRenderAreaPrev, pp, depthCur, depthPrev - motionZ, surf.normal, normalPrev ) )
             {
                 continue;
             }

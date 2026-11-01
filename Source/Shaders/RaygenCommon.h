@@ -762,6 +762,7 @@ Reservoir selectLight_Direct(const ivec2 pix, uint seed, uint saltBase,
     const float SPATIAL_RADIUS  = globalUniform.restirSpatialRadius;
 
     const ivec3 chRenderArea = getCheckerboardedRenderArea(pix); // assuming that pix is checkerboarded
+    const ivec3 chRenderAreaPrev = getCheckerboardedRenderArea_Prev(pix); // (the temporal tap's: the previous frame's size)
     const float motionZ = texelFetch(framebufMotion_Sampler, pix, 0).z;
     const float depthCur = texelFetch(framebufDepthWorld_Sampler, pix, 0).r;
     const vec2 posPrev = getPrevScreenPos(framebufMotion_Sampler, pix);
@@ -804,7 +805,7 @@ Reservoir selectLight_Direct(const ivec2 pix, uint seed, uint saltBase,
             const float depthPrev = texelFetch(framebufDepthWorld_Prev_Sampler, pp, 0).r;
             const vec3 normalPrev = texelFetchNormal_Prev(pp);
 
-            if (!testSurfaceForReuse(chRenderArea, pp, 
+            if (!testSurfaceForReuse(chRenderAreaPrev, pp, 
                                      depthCur, depthPrev - motionZ,
                                      surf.normal, normalPrev))
             {

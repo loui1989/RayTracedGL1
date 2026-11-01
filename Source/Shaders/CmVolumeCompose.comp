@@ -157,7 +157,15 @@ void main()
                     vec2( globalUniform.jitterX, globalUniform.jitterY ) /
                         vec2( globalUniform.renderWidth, globalUniform.renderHeight );
 
-    vec4 v = textureLod( framebufScattering_Sampler, uv, 0.0 );
+    // (the frame is the texture's top left part, dynamic resolution: the UV in the texture,
+    // kept half a texel inside the frame so the filter takes nothing from outside it)
+    vec4 v;
+    {
+        const vec2 frameSize = vec2( globalUniform.renderWidth, globalUniform.renderHeight );
+        const vec2 texSize   = vec2( textureSize( framebufScattering_Sampler, 0 ) );
+        const vec2 k         = frameSize / texSize;
+        v = textureLod( framebufScattering_Sampler, clamp( uv * k, 0.5 / texSize, k - 0.5 / texSize ), 0.0 );
+    }
 
     // Doom64-RT: NO FOG ON THE GUN -- the postcomp twin of the override in
     // CmPrepareFinal. The scattering buffer under a first-person pixel holds
