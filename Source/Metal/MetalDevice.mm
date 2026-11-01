@@ -1509,6 +1509,31 @@ struct RTGL1::MetalDevice::Impl
     // MTLFXTemporalDenoisedScaler: RG_DENOISER_METALFX
     bool metalFXDenoiserAvailable{ false };
     float metalFXDenoiserMinScale{ 1.0f }, metalFXDenoiserMaxScale{ 1.0f };
+    // the MetalFX temporal scaler's range of input content scales (dynamic resolution)
+    float metalFXScalerMinScale{ 1.0f }, metalFXScalerMaxScale{ 2.0f };
+
+    // Raze RT, dynamic resolution: the frame is rendered at a size that follows the GPU's
+    // frame time (RTGL1_DYNRES_FPS, its target frame rate; RTGL1_DYNRES_MIN, the smallest
+    // size, a fraction of the output's), into framebuffers made for the size asked for
+    // (RgStartFrameRenderResolutionParams, the largest it may be)
+    struct DynamicResolution
+    {
+        // the frame's size, a fraction of the framebuffers' (width and height)
+        float scale{ 1.0f };
+        // the GPU time of the last frame that finished, and the fraction it was rendered at
+        std::shared_ptr< std::atomic< double > > gpuTime{ std::make_shared< std::atomic< double > >( 0.0 ) };
+        std::shared_ptr< std::atomic< float > >  gpuTimeScale{ std::make_shared< std::atomic< float > >( 1.0f ) };
+        // the size of the frame last rendered with each frame index (its framebuffers' content: the
+        // _Prev ones of the next frame), and the framebuffers' size it was in; the latter also the
+        // last frame's
+        struct Size
+        {
+            uint32_t width{ 0 }, height{ 0 }, allocWidth{ 0 }, allocHeight{ 0 };
+        };
+        Size     at[ MAX_FRAMES_IN_FLIGHT ]{};
+        uint32_t allocWidth{ 0 }, allocHeight{ 0 };
+        bool     wasActive{ false };
+    } dyn;
     // MTLFXFrameInterpolator: RgFrameGenerationMode, with the MetalFX temporal upscaling
     bool frameInterpolationAvailable{ false };
     bool effectWipeIsUsed{ false };
@@ -1886,6 +1911,14 @@ RTGL1::MetalDevice::MetalDevice( const RgInstanceCreateInfo* pInfo )
     impl->hardwareRayTracing = [impl->device supportsFamily:MTLGPUFamilyApple9];
     impl->metalFXAvailable   = [MTLFXTemporalScalerDescriptor supportsDevice:impl->device];
     impl->metalFXDenoiserAvailable = impl->metalFXAvailable && MetalPathTracer::IsMetalFXDenoiserSupported( impl->device );
+    if( impl->metalFXAvailable )
+    {
+        impl->metalFXScalerMinScale = [MTLFXTemporalScalerDescriptor supportedInputContentMinScaleForDevice:impl->device];
+        impl->metalFXScalerMaxScale = [MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice:impl->device];
+        debug::Info( "Metal backend: MetalFX temporal scaler: input content scale {} .. {}",
+                     impl->metalFXScalerMinScale,
+                     impl->metalFXScalerMaxScale );
+    }
     if( @available( macOS 26.0, * ) )
     {
         if( impl->metalFXDenoiserAvailable )
@@ -2260,8 +2293,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
         const auto res = rtPath ? CalculateRenderResolution( impl->resolution, width, height, impl->metalFXAvailable )
                                 : RenderResolution{ width, height, false };
-        const uint32_t renderWidth  = res.width;
-        const uint32_t renderHeight = res.height;
+        // (dynamic resolution: the framebuffers' size, the frame's is chosen below)
+        const uint32_t allocWidth   = res.width;
+        const uint32_t allocHeight  = res.height;
+        uint32_t       renderWidth  = res.width;
+        uint32_t       renderHeight = res.height;
 
         // RG_DENOISER_METALFX: denoises and upscales, so only with the MetalFX upscaling
         // (Doom 64 RT's macOS menu asks for it as Ray Reconstruction with the MetalFX upscaler)
@@ -2317,6 +2353,104 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                 impl->fg.inputWidth = impl->fg.inputHeight = impl->fg.outputWidth = impl->fg.outputHeight = 0;
             }
         }
+        // Raze RT, dynamic resolution: the frame's size, from the GPU time of the latest finished
+        // frame, toward the target frame rate. Pixels cost about the same each, so the size
+        // that fits is the measured one scaled by the square root of budget / time; it goes
+        // down quickly (a heavy room, an explosion) and back up slowly (no pumping). Not with
+        // the MetalFX denoiser or frame interpolation (fixed sizes), nor without ray tracing.
+        float dynScaleMin = 0, dynScaleMax = 0;
+        {
+            const char* fpsEnv  = std::getenv( "RTGL1_DYNRES_FPS" );
+            const char* minEnv  = std::getenv( "RTGL1_DYNRES_MIN" );
+            const double fps    = fpsEnv ? std::atof( fpsEnv ) : 0.0;
+            // (MetalFX upscales by its own range of factors: the size asked for must be in it)
+            const bool scalerFits =
+                !res.temporalUpscaling ||
+                ( float( width ) / float( allocWidth ) <= impl->metalFXScalerMaxScale * 0.99f &&
+                  float( height ) / float( allocHeight ) <= impl->metalFXScalerMaxScale * 0.99f );
+            const bool  active  = rtPath && fps > 1.0 && !metalFXDenoiser && !frameInterpolation && allocWidth >= 64 &&
+                                 allocHeight >= 64 && scalerFits;
+            auto& d = impl->dyn;
+            if( active )
+            {
+                // the smallest: a fraction of the output, not smaller than MetalFX can upscale
+                double minOut = minEnv ? std::clamp( std::atof( minEnv ), 0.2, 1.0 ) : 0.4;
+                if( res.temporalUpscaling )
+                {
+                    minOut = std::max( minOut, 1.0 / double( std::max( 1.0f, impl->metalFXScalerMaxScale ) ) + 0.01 );
+                }
+                const float sMin = std::clamp( float( minOut * double( width ) / double( allocWidth ) ), 0.05f, 1.0f );
+
+                if( !d.wasActive || d.allocWidth != allocWidth || d.allocHeight != allocHeight )
+                {
+                    d.scale = 1.0f;
+                    d.gpuTime->store( 0.0 );
+                }
+
+                const double budget = 0.92 / fps;
+                const double g      = d.gpuTime->load();
+                const float  sUsed  = d.gpuTimeScale->load();
+                if( g > 1e-4 )
+                {
+                    const float desired = std::clamp( float( double( sUsed ) * std::sqrt( budget / g ) ), sMin, 1.0f );
+                    // (a small difference is left alone: the measurement is noisy)
+                    if( std::abs( desired - d.scale ) > 0.015f * d.scale )
+                    {
+                        d.scale += ( desired - d.scale ) * ( desired < d.scale ? 0.35f : 0.06f );
+                    }
+                }
+                d.scale = std::clamp( d.scale, sMin, 1.0f );
+
+                auto l_size = [ & ]( float s, uint32_t& w, uint32_t& h ) {
+                    w = std::min( allocWidth, std::max( 2u, uint32_t( float( allocWidth ) * s + 0.5f ) & ~1u ) ); // (even: checkerboarding)
+                    h = std::min( allocHeight, std::max( 2u, uint32_t( float( allocHeight ) * s + 0.5f ) ) );
+                };
+                l_size( d.scale, renderWidth, renderHeight );
+
+                if( res.temporalUpscaling )
+                {
+                    // the scaler's range: output / input, from the framebuffers' size to the
+                    // smallest frame, on both axes, as the sizes are rounded (a little margin)
+                    uint32_t minW, minH;
+                    l_size( sMin, minW, minH );
+                    const float lo = std::min( float( width ) / float( allocWidth ), float( height ) / float( allocHeight ) );
+                    const float hi = std::max( float( width ) / float( minW ), float( height ) / float( minH ) );
+                    dynScaleMin    = std::max( impl->metalFXScalerMinScale, lo * 0.995f );
+                    dynScaleMax    = std::min( impl->metalFXScalerMaxScale, hi * 1.005f );
+                    dynScaleMax    = std::max( dynScaleMax, dynScaleMin );
+                }
+
+                // the frame's GPU time, to the next frames: with the size it was rendered at
+                {
+                    auto gpuTime      = d.gpuTime;
+                    auto gpuTimeScale = d.gpuTimeScale;
+                    const float s     = float( renderWidth ) / float( allocWidth );
+                    [cmd addCompletedHandler:^( id< MTLCommandBuffer > c ) {
+                      if( c.status == MTLCommandBufferStatusCompleted && c.GPUEndTime > c.GPUStartTime )
+                      {
+                          gpuTime->store( std::min( c.GPUEndTime - c.GPUStartTime, 0.25 ) );
+                          gpuTimeScale->store( s );
+                      }
+                    }];
+                }
+            }
+            if( active != d.wasActive )
+            {
+                debug::Info( "Metal backend: dynamic resolution {}", active ? "on" : "off" );
+            }
+            if( active && profile && impl->cpu.printNow )
+            {
+                debug::Warning( "Metal profile: dynamic resolution {}x{} of {}x{} ({:.0f}%), last GPU frame {:.2f} ms",
+                                renderWidth,
+                                renderHeight,
+                                allocWidth,
+                                allocHeight,
+                                double( d.scale ) * 100.0,
+                                d.gpuTime->load() * 1000.0 );
+            }
+            d.wasActive = active;
+        }
+
         // the generated frame to present before the current one
         id< MTLTexture > generated = nil;
         // if not null, present asynchronously: this (a copy of the current frame), after 'generated'
@@ -2325,9 +2459,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         // RenderResolutionHelper::GetMipLodBias: sharper textures, if upscaling
         // (with Doom 64 RT's offset, RgDrawFrameTexturesParams::mipLodBiasOffset; the same bias is in the
         // uniform, texFilterParams, for the three-point filtering)
-        impl->textures->SetMipLodBias(
-            FillUniformCtx::Res{ renderWidth, renderHeight, width, height, res.temporalUpscaling }.GetMipLodBias(
-                pnext::get< RgDrawFrameTexturesParams >( *pInfo ).mipLodBiasOffset ) );
+        // (by the framebuffers' size, not the frame's: with dynamic resolution, that would
+        // change the samplers of all textures every few frames; the uniform gets the same)
+        const float mipLodBias = FillUniformCtx::Res{ allocWidth, allocHeight, width, height, res.temporalUpscaling }
+                                     .GetMipLodBias( pnext::get< RgDrawFrameTexturesParams >( *pInfo ).mipLodBiasOffset );
+        impl->textures->SetMipLodBias( mipLodBias );
 
         // global uniform
         {
@@ -2389,6 +2525,34 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
             gu.fluidEnabled = impl->fluid && impl->fluid->Active();
             RG_SET_VEC3_A( gu.fluidColor, impl->fluidColor.data );
+            gu.texFilterParams[ 1 ] = mipLodBias;
+
+            // Raze RT, dynamic resolution: the previous frame's size, by which its framebuffers
+            // (the _Prev ones, the histories) are laid out -- in two spare fields, read by the
+            // shaders' RG_PREV_RENDER_WIDTH / HEIGHT. 0: the same as this frame's.
+            // (by frame index: a frame that was not rendered left the framebuffers of its index as
+            // they were; also when dynamic resolution has just gone off -- the histories are of the
+            // smaller size)
+            {
+                auto&       d    = impl->dyn;
+                const auto& prev = d.at[ ( impl->frameIndex + MAX_FRAMES_IN_FLIGHT - 1 ) % MAX_FRAMES_IN_FLIGHT ];
+                if( prev.width == 0 || prev.allocWidth != allocWidth || prev.allocHeight != allocHeight )
+                {
+                    gu._padlava1 = 0;
+                    gu._padlava  = 0;
+                }
+                else
+                {
+                    gu._padlava1 = float( prev.width );
+                    gu._padlava  = float( prev.height );
+                }
+                if( rtPath && !( pInfo->presentPrevFrame && impl->pathTracer->GetPrevPresented() ) ) // (a frame that is rendered)
+                {
+                    d.at[ impl->frameIndex ] = { renderWidth, renderHeight, allocWidth, allocHeight };
+                    d.allocWidth             = allocWidth;
+                    d.allocHeight            = allocHeight;
+                }
+            }
 
             memcpy( impl->globalUniform[ impl->frameIndex ].contents, &gu, sizeof( gu ) );
         }
@@ -2432,7 +2596,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         }
         else if( rtPath )
         {
-            impl->framebuffers->PrepareForSize( renderWidth, renderHeight, width, height );
+            impl->framebuffers->PrepareForSize( allocWidth, allocHeight, width, height );
 
             MetalBindingTable& b = impl->bindings;
             impl->framebuffers->Bind( b, impl->frameIndex );
@@ -2446,6 +2610,8 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                 .jitter     = { impl->uniform.jitterX, impl->uniform.jitterY },
                 .width      = renderWidth,
                 .height     = renderHeight,
+                .allocWidth  = allocWidth,
+                .allocHeight = allocHeight,
             };
 
             // draw rasterized sky to albedo before tracing primary rays
@@ -2525,6 +2691,10 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                     .frameIndex                          = impl->frameIndex,
                     .width                               = renderWidth,
                     .height                              = renderHeight,
+                    .allocWidth                          = allocWidth,
+                    .allocHeight                         = allocHeight,
+                    .dynScaleMin                         = dynScaleMin,
+                    .dynScaleMax                         = dynScaleMax,
                     .currentTime                         = float( pInfo->currentTime ),
                     .primaryRaysMaxAlbedoLayers          = impl->primaryRaysMaxAlbedoLayers,
                     .indirectIlluminationMaxAlbedoLayers = impl->indirectIlluminationMaxAlbedoLayers,
@@ -2584,9 +2754,15 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                         [ & ]( id< MTLCommandBuffer > c, id< MTLTexture > target ) {
                             if( !pInfo->disableRasterization && impl->lightmapScreenCoverage > 0 )
                             {
-                                auto classicParams   = rasterParams;
-                                classicParams.width  = uint32_t( target.width );
-                                classicParams.height = uint32_t( target.height );
+                                // (into the final image, without MetalFX: the frame's size -- the
+                                // texture is the framebuffers', bigger with dynamic resolution)
+                                const bool intoFinal =
+                                    target == impl->framebuffers->Get( FB_IMAGE_INDEX_FINAL, impl->frameIndex );
+                                auto classicParams        = rasterParams;
+                                classicParams.width       = intoFinal ? renderWidth : uint32_t( target.width );
+                                classicParams.height      = intoFinal ? renderHeight : uint32_t( target.height );
+                                classicParams.allocWidth  = intoFinal ? allocWidth : 0;
+                                classicParams.allocHeight = intoFinal ? allocHeight : 0;
                                 impl->rasterizer->DrawClassic( c,
                                                                classicParams,
                                                                target,

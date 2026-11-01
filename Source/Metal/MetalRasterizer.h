@@ -94,8 +94,13 @@ public:
         const float*             view;
         const float*             projection;
         RgFloat2D                jitter;
+        // the frame's size: the viewport
         uint32_t                 width;
         uint32_t                 height;
+        // Raze RT, dynamic resolution: the framebuffers' (the frame is their top left part),
+        // so the depth buffer that goes with them; 0: the frame's
+        uint32_t                 allocWidth  = 0;
+        uint32_t                 allocHeight = 0;
     };
 
     // Rasterizer::DrawSkyToAlbedo

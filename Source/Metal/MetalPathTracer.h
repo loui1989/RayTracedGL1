@@ -65,8 +65,16 @@ public:
     struct Params
     {
         uint32_t frameIndex;
+        // the size the frame is rendered at
         uint32_t width;
         uint32_t height;
+        // Raze RT, dynamic resolution: the framebuffers' size (the largest a frame may be;
+        // 0: the frame's), and the MetalFX scaler's range of scale factors, output / input
+        // (from the framebuffers' size to the smallest frame; 0: a fixed size)
+        uint32_t allocWidth  = 0;
+        uint32_t allocHeight = 0;
+        float    dynScaleMin = 0;
+        float    dynScaleMax = 0;
         float    currentTime;
 
         uint32_t primaryRaysMaxAlbedoLayers;
@@ -147,7 +155,8 @@ public:
 private:
     void PrepareReservoirs( uint32_t width, uint32_t height );
     // id< MTLFXTemporalScaler >
-    id   PrepareTemporalScaler( uint32_t inputWidth, uint32_t inputHeight, uint32_t outputWidth, uint32_t outputHeight );
+    id   PrepareTemporalScaler( uint32_t inputWidth, uint32_t inputHeight, uint32_t outputWidth, uint32_t outputHeight,
+                                float dynScaleMin = 0, float dynScaleMax = 0 );
     // id< MTLFXTemporalDenoisedScaler >, and the guide images of the input size
     id   PrepareDenoisedScaler( uint32_t inputWidth, uint32_t inputHeight, uint32_t outputWidth, uint32_t outputHeight );
     void BeginPass( id< MTLCommandBuffer > cmd, __strong id< MTLComputeCommandEncoder >& enc, NSString* name );
@@ -169,6 +178,7 @@ private:
     id                            temporalScaler{ nil };
     uint32_t                      scalerInputWidth{ 0 }, scalerInputHeight{ 0 };
     uint32_t                      scalerOutputWidth{ 0 }, scalerOutputHeight{ 0 };
+    float                         scalerDynMin{ 0 }, scalerDynMax{ 0 };
     bool                          scalerNeedsReset{ true };
 
     // MetalFX temporal denoised scaler, recreated on resize; with its guides (CmComposeUnfiltered)

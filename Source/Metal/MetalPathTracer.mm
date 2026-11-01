@@ -232,10 +232,13 @@ void RTGL1::MetalPathTracer::EndPass( __strong id< MTLComputeCommandEncoder >& e
 id RTGL1::MetalPathTracer::PrepareTemporalScaler( uint32_t inputWidth,
                                                  uint32_t inputHeight,
                                                  uint32_t outputWidth,
-                                                 uint32_t outputHeight )
+                                                 uint32_t outputHeight,
+                                                 float    dynScaleMin,
+                                                 float    dynScaleMax )
 {
     if( temporalScaler && scalerInputWidth == inputWidth && scalerInputHeight == inputHeight &&
-        scalerOutputWidth == outputWidth && scalerOutputHeight == outputHeight )
+        scalerOutputWidth == outputWidth && scalerOutputHeight == outputHeight && scalerDynMin == dynScaleMin &&
+        scalerDynMax == dynScaleMax )
     {
         return temporalScaler;
     }
@@ -254,6 +257,14 @@ id RTGL1::MetalPathTracer::PrepareTemporalScaler( uint32_t inputWidth,
     // FB_IMAGE_INDEX_REACTIVITY, as for FSR2
     d.reactiveMaskTextureEnabled     = YES;
     d.reactiveMaskTextureFormat      = MTLPixelFormatR8Unorm;
+    // Raze RT, dynamic resolution: the frame is the input textures' top left part, of a size
+    // that changes (inputContentWidth / Height); the scaler keeps its history across it
+    if( dynScaleMax > 0 )
+    {
+        d.inputContentPropertiesEnabled = YES;
+        d.inputContentMinScale          = dynScaleMin;
+        d.inputContentMaxScale          = dynScaleMax;
+    }
 
     temporalScaler = [d newTemporalScalerWithDevice:device];
     if( !temporalScaler )
@@ -264,9 +275,12 @@ id RTGL1::MetalPathTracer::PrepareTemporalScaler( uint32_t inputWidth,
     scalerInputHeight  = inputHeight;
     scalerOutputWidth  = outputWidth;
     scalerOutputHeight = outputHeight;
+    scalerDynMin       = dynScaleMin;
+    scalerDynMax       = dynScaleMax;
     scalerNeedsReset   = true;
 
-    debug::Info( "Metal backend: MetalFX temporal scaling {}x{} -> {}x{}", inputWidth, inputHeight, outputWidth, outputHeight );
+    debug::Info( "Metal backend: MetalFX temporal scaling {}x{} -> {}x{}{}", inputWidth, inputHeight, outputWidth, outputHeight,
+                 dynScaleMax > 0 ? " (dynamic resolution)" : "" );
     return temporalScaler;
 }
 
@@ -479,7 +493,8 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
     const uint32_t frameIndex = p.frameIndex;
     const uint32_t prevFrame  = ( frameIndex + MAX_FRAMES_IN_FLIGHT - 1 ) % MAX_FRAMES_IN_FLIGHT;
 
-    PrepareReservoirs( p.width, p.height );
+    // (by pixel, in rows of the framebuffers' width: dynamic resolution)
+    PrepareReservoirs( p.allocWidth ? p.allocWidth : p.width, p.allocHeight ? p.allocHeight : p.height );
 
     const bool metalFXDenoiser = p.metalFXDenoiser && p.upscaler == Upscaler::MetalFX;
     if( metalFXDenoiser != wasMetalFXDenoiser )
@@ -837,7 +852,11 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         }
         else
         {
-            id< MTLFXTemporalScaler > scaler = PrepareTemporalScaler( p.width, p.height, p.upscaledWidth, p.upscaledHeight );
+            // (dynamic resolution: the input textures are the framebuffers, the frame their top left part)
+            id< MTLFXTemporalScaler > scaler =
+                p.dynScaleMax > 0 ? PrepareTemporalScaler( p.allocWidth, p.allocHeight, p.upscaledWidth, p.upscaledHeight,
+                                                           p.dynScaleMin, p.dynScaleMax )
+                                  : PrepareTemporalScaler( p.width, p.height, p.upscaledWidth, p.upscaledHeight );
             scaler.colorTexture       = final;
             scaler.depthTexture       = framebuffers.Get( FB_IMAGE_INDEX_DEPTH_NDC, frameIndex );
             scaler.motionTexture      = framebuffers.Get( FB_IMAGE_INDEX_MOTION_DLSS, frameIndex );

@@ -552,7 +552,7 @@ void RTGL1::MetalRasterizer::DrawSkyToAlbedo( id< MTLCommandBuffer > cmd,
         return;
     }
     UploadGeometry();
-    EnsureDepth( renderDepth, params.width, params.height );
+    EnsureDepth( renderDepth, params.allocWidth ? params.allocWidth : params.width, params.allocHeight ? params.allocHeight : params.height );
 
     float skyView[ 16 ];
     Matrix::SetNewViewerPosition( skyView, params.view, skyViewerPosition.data );
@@ -694,7 +694,7 @@ void RTGL1::MetalRasterizer::DrawToFinal( id< MTLCommandBuffer > cmd,
         return;
     }
     UploadGeometry();
-    EnsureDepth( renderDepth, params.width, params.height );
+    EnsureDepth( renderDepth, params.allocWidth ? params.allocWidth : params.width, params.allocHeight ? params.allocHeight : params.height );
 
     // DepthCopying: the ray traced depth to the depth buffer
     {
@@ -774,7 +774,8 @@ void RTGL1::MetalRasterizer::DrawClassic( id< MTLCommandBuffer > cmd,
         return;
     }
     UploadGeometry();
-    EnsureDepth( classicDepth, params.width, params.height );
+    // (the target's size: the framebuffers', if it is the final image with dynamic resolution)
+    EnsureDepth( classicDepth, params.allocWidth ? params.allocWidth : params.width, params.allocHeight ? params.allocHeight : params.height );
 
     auto l_pass = [ & ]( NSString* label ) {
         auto* pass                             = [MTLRenderPassDescriptor renderPassDescriptor];
