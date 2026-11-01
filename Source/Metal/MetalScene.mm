@@ -155,6 +155,36 @@ uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint3
     return h ? h : 1;
 }
 
+// Raze RT: the piece of the map a geometry is in, for the kept BLAS-es (MetalScene::StableGroup):
+// a cell of this many metres, by the middle of its bounds
+constexpr float StableCellSize = 24.0f;
+int64_t StableCell( const RTGL1::ShVertex* v, uint32_t vertexCount, const RgTransform& t )
+{
+    if( vertexCount == 0 )
+    {
+        return 0;
+    }
+    float lo[ 3 ] = { v[ 0 ].position[ 0 ], v[ 0 ].position[ 1 ], v[ 0 ].position[ 2 ] };
+    float hi[ 3 ] = { lo[ 0 ], lo[ 1 ], lo[ 2 ] };
+    for( uint32_t i = 1; i < vertexCount; i++ )
+    {
+        for( int k = 0; k < 3; k++ )
+        {
+            lo[ k ] = std::min( lo[ k ], v[ i ].position[ k ] );
+            hi[ k ] = std::max( hi[ k ], v[ i ].position[ k ] );
+        }
+    }
+    const float c[ 3 ] = { ( lo[ 0 ] + hi[ 0 ] ) * 0.5f, ( lo[ 1 ] + hi[ 1 ] ) * 0.5f, ( lo[ 2 ] + hi[ 2 ] ) * 0.5f };
+    int64_t     key    = 0;
+    for( int r = 0; r < 3; r++ )
+    {
+        const float w = t.matrix[ r ][ 0 ] * c[ 0 ] + t.matrix[ r ][ 1 ] * c[ 1 ] + t.matrix[ r ][ 2 ] * c[ 2 ] + t.matrix[ r ][ 3 ];
+        const auto  q = int64_t( std::floor( std::clamp( w / StableCellSize, -1.0e6f, 1.0e6f ) ) ) & 0x1FFFFF;
+        key           = ( key << 21 ) | q;
+    }
+    return key;
+}
+
 uint32_t FloatToUint8( float f )
 {
     return uint32_t( std::clamp( f, 0.0f, 1.0f ) * 255.0f );
@@ -421,6 +451,7 @@ bool RTGL1::MetalScene::AddDynamic( const RgMeshInfo&          mesh,
                                   range->indexCount,
                                   mesh.transform ),
         .triangles       = range->indexCount / 3,
+        .cell            = StableCell( &dynamicStorage.vertices[ range->firstVertex ], range->vertexCount, mesh.transform ),
     } );
     frameGeomCount++;
     return true;
@@ -915,92 +946,143 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         keyAge = std::move( age );
     }
 
-    std::array< std::vector< const Geometry* >, GroupCount > stableLists, volatileLists;
-    std::array< bool, GroupCount >                           stableBuildNow{}, stableBuildFast{};
+    // a cell's few triangles stay with the rest (a BLAS of its own is not worth it)
+    constexpr size_t StableCellMinTriangles = 200;
+    (void)StableMinTriangles;
+
+    struct CellWork
+    {
+        StableGroup*                   sg;
+        std::vector< const Geometry* > list;
+        bool                           buildNow;
+        bool                           fast;
+    };
+    std::array< std::vector< CellWork >, GroupCount >        cellWork;
+    std::array< std::vector< const Geometry* >, GroupCount > volatileLists;
     for( uint32_t gi = 0; gi < GroupCount; gi++ )
     {
-        const auto&  geoms = dynamicGeoms[ gi ];
-        StableGroup& sg    = stable[ gi ];
+        const auto& geoms = dynamicGeoms[ gi ];
+        auto&       cells = stable[ gi ];
 
         std::vector< uint8_t > used( geoms.size(), 0 );
-        auto&                  st    = stableLists[ gi ];
-        bool                   valid = stableOn && !sg.keys.empty();
-        if( valid )
-        {
-            std::unordered_map< uint64_t, std::vector< uint32_t > > byKey;
-            byKey.reserve( geoms.size() );
-            for( uint32_t i = 0; i < geoms.size(); i++ )
-            {
-                byKey[ geoms[ i ].contentKey ].push_back( i );
-            }
-            st.reserve( sg.keys.size() );
-            for( uint64_t k : sg.keys )
-            {
-                auto it = byKey.find( k );
-                if( it == byKey.end() || it->second.empty() )
-                {
-                    // one of them has changed or gone: the kept BLAS shows it as it was
-                    valid = false;
-                    break;
-                }
-                const uint32_t i = it->second.back();
-                it->second.pop_back();
-                used[ i ] = 1;
-                st.push_back( &geoms[ i ] );
-            }
-        }
-        if( !valid )
-        {
-            if( !sg.keys.empty() )
-            {
-                RetireStable( sg );
-            }
-            st.clear();
-            std::fill( used.begin(), used.end(), uint8_t( 0 ) );
-        }
-
-        // the geometries that could join it
-        size_t candidates = 0;
+        std::unordered_map< int64_t, std::vector< uint32_t > > byCell;
         if( stableOn )
         {
             for( uint32_t i = 0; i < geoms.size(); i++ )
+            {
+                byCell[ geoms[ i ].cell ].push_back( i );
+            }
+        }
+        // a kept cell with nothing in it this frame: gone
+        for( auto it = cells.begin(); it != cells.end(); )
+        {
+            if( !byCell.contains( it->first ) )
+            {
+                RetireStable( it->second );
+                it = cells.erase( it );
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        for( const auto& [ cell, idxs ] : byCell )
+        {
+            auto         cit = cells.find( cell );
+            StableGroup* sg  = cit != cells.end() ? &cit->second : nullptr;
+
+            std::vector< const Geometry* > st;
+            std::vector< uint32_t >        taken;
+            bool                           valid = sg && !sg->keys.empty();
+            if( valid )
+            {
+                std::unordered_map< uint64_t, std::vector< uint32_t > > byKey;
+                byKey.reserve( idxs.size() );
+                for( uint32_t i : idxs )
+                {
+                    byKey[ geoms[ i ].contentKey ].push_back( i );
+                }
+                st.reserve( sg->keys.size() );
+                for( uint64_t k : sg->keys )
+                {
+                    auto it = byKey.find( k );
+                    if( it == byKey.end() || it->second.empty() )
+                    {
+                        // one of them has changed or gone: the kept BLAS shows it as it was
+                        valid = false;
+                        break;
+                    }
+                    const uint32_t i = it->second.back();
+                    it->second.pop_back();
+                    taken.push_back( i );
+                    st.push_back( &geoms[ i ] );
+                }
+            }
+            if( valid )
+            {
+                for( uint32_t i : taken )
+                {
+                    used[ i ] = 1;
+                }
+            }
+            else
+            {
+                if( sg && !sg->keys.empty() )
+                {
+                    RetireStable( *sg );
+                }
+                st.clear();
+            }
+
+            // the geometries of the cell that could join it
+            size_t candidates = 0;
+            for( uint32_t i : idxs )
             {
                 if( !used[ i ] && keyAge[ geoms[ i ].contentKey ] >= StableMinAge )
                 {
                     candidates += geoms[ i ].triangles;
                 }
             }
-        }
-        const bool rebuild = stableOn && candidates >= StableMinTriangles &&
-                             ( sg.keys.empty() || ( frameCounter - sg.builtFrame >= StableAbsorbFrames &&
-                                                    candidates * 20 >= sg.triangles ) );
-        if( rebuild )
-        {
-            // built for tracing; but when it keeps changing (it was built less than a second
-            // ago), for building: a slow build every few frames would cost more than it saves
-            stableBuildFast[ gi ] = sg.builtFrame != 0 && frameCounter - sg.builtFrame < 60;
-            RetireStable( sg );
-            for( uint32_t i = 0; i < geoms.size(); i++ )
+            const bool rebuild = candidates >= StableCellMinTriangles &&
+                                 ( !sg || sg->keys.empty() ||
+                                   ( frameCounter - sg->builtFrame >= StableAbsorbFrames && candidates * 20 >= sg->triangles ) );
+            bool fast = false;
+            if( rebuild )
             {
-                if( !used[ i ] && keyAge[ geoms[ i ].contentKey ] >= StableMinAge )
+                if( !sg )
                 {
-                    used[ i ] = 1;
-                    st.push_back( &geoms[ i ] );
+                    sg = &cells[ cell ];
                 }
+                // built for tracing; but when it keeps changing (it was built less than a second
+                // ago), for building: a slow build every few frames would cost more than it saves
+                fast = sg->builtFrame != 0 && frameCounter - sg->builtFrame < 60;
+                RetireStable( *sg );
+                for( uint32_t i : idxs )
+                {
+                    if( !used[ i ] && keyAge[ geoms[ i ].contentKey ] >= StableMinAge )
+                    {
+                        used[ i ] = 1;
+                        st.push_back( &geoms[ i ] );
+                    }
+                }
+                sg->keys.reserve( st.size() );
+                for( const Geometry* g : st )
+                {
+                    sg->keys.push_back( g->contentKey );
+                    sg->triangles += g->triangles;
+                }
+                sg->builtFrame = frameCounter;
+                stableRebuilds++;
             }
-            sg.keys.reserve( st.size() );
-            for( const Geometry* g : st )
+            if( !st.empty() )
             {
-                sg.keys.push_back( g->contentKey );
-                sg.triangles += g->triangles;
+                cellWork[ gi ].push_back( CellWork{ sg, std::move( st ), rebuild, fast } );
             }
-            sg.builtFrame        = frameCounter;
-            stableBuildNow[ gi ] = true;
-            stableRebuilds++;
         }
 
         auto& vol = volatileLists[ gi ];
-        vol.reserve( geoms.size() - st.size() );
+        vol.reserve( geoms.size() );
         for( uint32_t i = 0; i < geoms.size(); i++ )
         {
             if( !used[ i ] )
@@ -1018,10 +1100,13 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         for( uint32_t gi = 0; gi < GroupCount; gi++ )
         {
             BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS" );
-            if( stableBuildNow[ gi ] )
+            for( const CellWork& cw : cellWork[ gi ] )
             {
-                // from this frame's vertices: the kept geometries are the same in every frame it is used
-                BuildBlas( enc, stable[ gi ].blas, stableLists[ gi ], f.vertices, f.indices, true, stableBuildFast[ gi ], @"Stable BLAS" );
+                if( cw.buildNow )
+                {
+                    // from this frame's vertices: the kept geometries are the same in every frame it is used
+                    BuildBlas( enc, cw.sg->blas, cw.list, f.vertices, f.indices, true, cw.fast, @"Stable BLAS" );
+                }
             }
         }
         [enc endEncoding];
@@ -1178,9 +1263,9 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     for( uint32_t gi = 0; gi < GroupCount; gi++ )
     {
         const auto group = Group{ Visibility( gi / PassThroughCount ), PassThrough( gi % PassThroughCount ) };
-        if( !stableLists[ gi ].empty() )
+        for( const CellWork& cw : cellWork[ gi ] )
         {
-            addInstance( stable[ gi ].blas.blas, group, 0, IdentityTransform, stableLists[ gi ] );
+            addInstance( cw.sg->blas.blas, group, 0, IdentityTransform, cw.list );
         }
         addInstance( f.dynamicBlas[ gi ].blas, group, 0, IdentityTransform, volatileLists[ gi ] );
     }
@@ -1287,8 +1372,12 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         }
         for( uint32_t gi = 0; gi < GroupCount; gi++ )
         {
-            lastStats.stableGeometries += stableLists[ gi ].size();
-            lastStats.stableTriangles += stable[ gi ].triangles;
+            for( const CellWork& cw : cellWork[ gi ] )
+            {
+                lastStats.stableGeometries += cw.list.size();
+                lastStats.stableTriangles += cw.sg->triangles;
+                lastStats.stableCells++;
+            }
         }
         lastStats.stableRebuilds = stableRebuilds;
     }

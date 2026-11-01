@@ -106,7 +106,7 @@ public:
         size_t dynamicGeometries, dynamicTriangles, dynamicVertices, staticGeometries, tlasInstances, geometryInfos;
         size_t polishedGeometries;
         // Raze RT: the kept (stable) part of the dynamic geometry, and its rebuilds since the last stats
-        size_t stableGeometries, stableTriangles, stableRebuilds;
+        size_t stableGeometries, stableTriangles, stableRebuilds, stableCells;
     };
     Stats lastStats{};
 
@@ -180,6 +180,8 @@ private:
         // Raze RT: what the BLAS sees of it (positions, indices, transform), for the stable geometry
         uint64_t           contentKey{ 0 };
         uint32_t           triangles{ 0 };
+        // and which piece of the map it is in (see StableGroup)
+        int64_t            cell{ 0 };
     };
     static ShGeometryInstance MakeGeomInfo( const RgMeshInfo&          mesh,
                                             const RgMeshPrimitiveInfo& prim,
@@ -280,6 +282,9 @@ private:
     // (by contentKey) for a few frames go into a BLAS of their own, built for tracing and kept;
     // it is used for as long as all of its geometries come again. Its geometry infos are this
     // frame's (the shaders read the vertices of this frame's dynamic buffers, the same ones).
+    // A kept BLAS a piece of the map (a cell of StableCellSize metres): one for all of it was
+    // rebuilt whole whenever any of its geometries changed or was no longer sent -- a door, a
+    // room left out of reach as the player walks: a few times a second, 150k+ triangles each.
     // RTGL1_METAL_NO_STABLE=1 turns it off.
     struct StableGroup
     {
@@ -346,7 +351,7 @@ private:
     uint32_t                                          prevGeomCount{ 0 };
 
     // Raze RT: stable geometry (see StableGroup)
-    std::array< StableGroup, GroupCount >    stable;
+    std::array< std::unordered_map< int64_t, StableGroup >, GroupCount > stable;
     std::unordered_map< uint64_t, uint32_t > keyAge; // a content key -> frames in a row it came
     uint32_t                                 frameCounter{ 0 };
     size_t                                   stableRebuilds{ 0 };
