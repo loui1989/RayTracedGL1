@@ -130,16 +130,20 @@ private:
         Opaque,
         AlphaTested,
         Refract,
+        // Raze RT: opaque, and seen only from the front (RT_PRIMITIVE_ONE_SIDED: a Build wall
+        // or floor): the only instances with triangle culling, the others disable it
+        OpaqueOneSided,
     };
+    static constexpr uint32_t PassThroughCount = 4;
     struct Group
     {
         Visibility  visibility;
         PassThrough passThrough;
 
         bool     operator==( const Group& ) const = default;
-        uint32_t ToIndex() const { return uint32_t( visibility ) * 3 + uint32_t( passThrough ); }
+        uint32_t ToIndex() const { return uint32_t( visibility ) * PassThroughCount + uint32_t( passThrough ); }
     };
-    static constexpr uint32_t GroupCount = 6 * 3;
+    static constexpr uint32_t GroupCount = 6 * PassThroughCount;
 
     static Group MakeGroup( const RgMeshInfo& mesh, const RgMeshPrimitiveInfo& prim );
 

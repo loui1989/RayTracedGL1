@@ -220,6 +220,10 @@ auto RTGL1::MetalScene::MakeGroup( const RgMeshInfo& mesh, const RgMeshPrimitive
     {
         pt = PassThrough::Refract;
     }
+    else if( prim.flags & ( 1u << 28 ) ) // (Raze RT: RT_PRIMITIVE_ONE_SIDED)
+    {
+        pt = PassThrough::OpaqueOneSided;
+    }
     else
     {
         pt = PassThrough::Opaque;
@@ -1059,7 +1063,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         }
         // SHIPPING_HACK
         PassThrough pt = group.passThrough;
-        if( pt == PassThrough::Opaque && ( meshFlags & ( RG_MESH_FORCE_GLASS | RG_MESH_FORCE_WATER ) ) )
+        if( ( pt == PassThrough::Opaque || pt == PassThrough::OpaqueOneSided ) &&
+            ( meshFlags & ( RG_MESH_FORCE_GLASS | RG_MESH_FORCE_WATER ) ) )
         {
             pt = PassThrough::Refract;
         }
@@ -1116,7 +1121,11 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         // VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR, VK_GEOMETRY_INSTANCE_FORCE_(NO_)OPAQUE_BIT_KHR
         inst.options = MTLAccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise |
                        ( pt == PassThrough::AlphaTested ? MTLAccelerationStructureInstanceOptionNonOpaque
-                                                        : MTLAccelerationStructureInstanceOptionOpaque );
+                                                        : MTLAccelerationStructureInstanceOptionOpaque ) |
+                       // (Raze RT: the rays cull the triangles seen from behind, but only the
+                       // one-sided group's -- see ShGlobalUniform::rayCullBackFaces)
+                       ( pt == PassThrough::OpaqueOneSided ? MTLAccelerationStructureInstanceOptionNone
+                                                           : MTLAccelerationStructureInstanceOptionDisableTriangleCulling );
         inst.mask                            = mask;
         inst.intersectionFunctionTableOffset = 0;
         inst.accelerationStructureIndex      = uint32_t( f.usedBlas.size() );
@@ -1145,7 +1154,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
 
     for( uint32_t gi = 0; gi < GroupCount; gi++ )
     {
-        const auto group = Group{ Visibility( gi / 3 ), PassThrough( gi % 3 ) };
+        const auto group = Group{ Visibility( gi / PassThroughCount ), PassThrough( gi % PassThroughCount ) };
         addInstance( staticBlas[ gi ].blas, group, 0, IdentityTransform, toPointers( staticGeoms[ gi ] ) );
     }
     for( const ReplacementInstance& ri : replacementInstances )
@@ -1168,7 +1177,7 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     }
     for( uint32_t gi = 0; gi < GroupCount; gi++ )
     {
-        const auto group = Group{ Visibility( gi / 3 ), PassThrough( gi % 3 ) };
+        const auto group = Group{ Visibility( gi / PassThroughCount ), PassThrough( gi % PassThroughCount ) };
         if( !stableLists[ gi ].empty() )
         {
             addInstance( stable[ gi ].blas.blas, group, 0, IdentityTransform, stableLists[ gi ] );

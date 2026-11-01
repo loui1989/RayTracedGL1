@@ -2526,6 +2526,9 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             gu.fluidEnabled = impl->fluid && impl->fluid->Active();
             RG_SET_VEC3_A( gu.fluidColor, impl->fluidColor.data );
             gu.texFilterParams[ 1 ] = mipLodBias;
+            // Raze RT: the rays cull triangles seen from behind -- in the one-sided group only
+            // (MetalScene: every other instance disables culling), so on whatever was asked
+            gu.rayCullBackFaces = 1;
 
             // Raze RT, dynamic resolution: the previous frame's size, by which its framebuffers
             // (the _Prev ones, the histories) are laid out -- in two spare fields, read by the
