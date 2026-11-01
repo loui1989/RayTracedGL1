@@ -1685,7 +1685,7 @@ struct RTGL1::MetalDevice::Impl
         double            sincePrint{ 0 }; // ms, between the last two prints
         double   waitFrame{ 0 }, startFrame{ 0 }, betweenFrames{ 0 }, uploads{ 0 }, sceneBuild{ 0 },
                  render{ 0 }, drawFrame{ 0 }, clouds{ 0 }, skyCubemap{ 0 }, skyAlbedo{ 0 };
-        uint64_t skyDraws{ 0 };
+        uint64_t skyDraws{ 0 }, skyReused{ 0 };
         uint64_t primitives{ 0 }, frames{ 0 };
 
         static double Ms( Clock::time_point a, Clock::time_point b )
@@ -2718,7 +2718,20 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                 // Doom 64 RT: the volumetric cloud map, marched once, read by both sky passes
                 impl->pathTracer->ProcessClouds( cmd, b, impl->frameIndex, impl->uniform.cloudParams0[ 0 ] > 0.5f );
                 const auto tClouds = Impl::CpuProfile::Clock::now();
-                impl->rasterizer->RenderSkyCubemap( cmd, *impl->rtShaders, b );
+                // (kept while the sky is as it was: not with the clouds, they move)
+                {
+                    const auto& sp = pnext::get< RgDrawFrameSkyParams >( *pInfo );
+                    uint64_t    salt = 0;
+                    for( float f : { sp.skyViewerPosition.data[ 0 ], sp.skyViewerPosition.data[ 1 ], sp.skyViewerPosition.data[ 2 ] } )
+                    {
+                        uint32_t u;
+                        memcpy( &u, &f, sizeof( u ) );
+                        salt = ( salt ^ u ) * 0x100000001B3ull;
+                    }
+                    const bool clouds = impl->uniform.cloudParams0[ 0 ] > 0.5f;
+                    impl->rasterizer->RenderSkyCubemap( cmd, *impl->rtShaders, b, salt, clouds );
+                    impl->cpu.skyReused += impl->rasterizer->SkyCubemapReused() ? 1 : 0;
+                }
 
                 impl->cpu.skyCubemap += Impl::CpuProfile::Ms( tClouds, Impl::CpuProfile::Clock::now() );
                 impl->cpu.clouds += Impl::CpuProfile::Ms( tSky, tClouds );
@@ -3182,10 +3195,11 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         debug::Warning( "Metal profile (CPU, ms per frame): waiting for a frame slot {:.2f}, StartFrame {:.2f}, "
                         "game + uploads {:.2f} (uploads {:.2f}, {:.0f} primitives), DrawFrame {:.2f} "
                         "(acceleration structures {:.2f}, path tracer encoding {:.2f}, clouds {:.2f}, "
-                        "sky cubemap {:.2f}, sky to albedo {:.2f}; {:.0f} sky draws)",
+                        "sky cubemap {:.2f}, sky to albedo {:.2f}; {:.0f} sky draws, sky cubemap kept {:.0f}% of frames)",
                         c.waitFrame / n, c.startFrame / n, c.betweenFrames / n, c.uploads / n,
                         double( c.primitives ) / n, c.drawFrame / n, c.sceneBuild / n, c.render / n,
-                        c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n );
+                        c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n,
+                        100.0 * double( c.skyReused ) / n );
         if( impl->scene )
         {
             const auto& st = impl->scene->lastStats;
@@ -3199,6 +3213,7 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
         c.skyDraws = 0;
+        c.skyReused = 0;
         c.primitives = 0;
         c.frames     = 0;
     }

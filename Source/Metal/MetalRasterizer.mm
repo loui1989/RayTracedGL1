@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 
@@ -895,11 +896,69 @@ void RTGL1::MetalRasterizer::EncodeLegacyDraw( id< MTLRenderCommandEncoder > enc
 
 bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >   cmd,
                                                MetalComputePipelines&   shaders,
-                                               const MetalBindingTable& bindings )
+                                               const MetalBindingTable& bindings,
+                                               uint64_t                 salt,
+                                               bool                     force )
 {
+    skyCubemapReused = false;
     if( !HasDraws( Type::Sky ) )
     {
         return false;
+    }
+
+    // Raze RT: what the cubemap is drawn from -- the sky's draws: their vertices, textures,
+    // colours, states, and where they are (their place to about half a metre: the dome is
+    // ~300 m around the camera, and a step is no change to see)
+    {
+        static const bool cacheOn = [] {
+            const char* e = std::getenv( "RTGL1_METAL_SKY_CACHE" );
+            return !( e && e[ 0 ] == '0' );
+        }();
+        uint64_t k   = 0x9E3779B97F4A7C15ull ^ salt;
+        auto     mix = [ &k ]( uint64_t v ) {
+            k ^= v + 0x9E3779B97F4A7C15ull + ( k << 6 ) + ( k >> 2 );
+            k *= 0xFF51AFD7ED558CCDull;
+        };
+        auto bits = []( float f ) {
+            uint32_t u;
+            memcpy( &u, &f, sizeof( u ) );
+            return uint64_t( u );
+        };
+        for( const DrawInfo& d : draws[ size_t( Type::Sky ) ] )
+        {
+            mix( d.texture_base );
+            mix( d.colorFactor_base );
+            mix( d.pipelineState | ( uint64_t( d.skyCloudMode ) << 32 ) );
+            mix( d.vertexCount | ( uint64_t( d.indexCount ) << 32 ) );
+            for( int r = 0; r < 3; r++ )
+            {
+                for( int c = 0; c < 3; c++ )
+                {
+                    mix( bits( d.transform.matrix[ r ][ c ] ) );
+                }
+                mix( uint64_t( int64_t( std::floor( d.transform.matrix[ r ][ 3 ] * 2.0f ) ) ) );
+            }
+            for( uint32_t i = 0; i < d.vertexCount && d.firstVertex + i < vertices.size(); i++ )
+            {
+                const RgPrimitiveVertex& v = vertices[ d.firstVertex + i ];
+                mix( bits( v.position[ 0 ] ) | ( bits( v.position[ 1 ] ) << 32 ) );
+                mix( bits( v.position[ 2 ] ) | ( uint64_t( v.color ) << 32 ) );
+                mix( bits( v.texCoord[ 0 ] ) | ( bits( v.texCoord[ 1 ] ) << 32 ) );
+            }
+            for( uint32_t i = 0; i < d.indexCount && d.firstIndex + i < indices.size(); i++ )
+            {
+                mix( indices[ d.firstIndex + i ] );
+            }
+        }
+        k |= 1; // (0: none yet)
+        if( cacheOn && !force && k == skyCubemapKey && skyCubemapAge < 60 )
+        {
+            skyCubemapAge++;
+            skyCubemapReused = true;
+            return true;
+        }
+        skyCubemapKey = k;
+        skyCubemapAge = 0;
     }
     UploadGeometry();
 

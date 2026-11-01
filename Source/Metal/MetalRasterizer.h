@@ -84,7 +84,17 @@ public:
     // (RsRasterizerMultiview.vert, Doom 64 RT's RsSkyCubemap.frag with the volumetric clouds),
     // a pass per face; the faces' view-projections are ShGlobalUniform::viewProjCubemap.
     // Returns false, if there are no sky primitives.
-    bool             RenderSkyCubemap( id< MTLCommandBuffer > cmd, MetalComputePipelines& shaders, const MetalBindingTable& bindings );
+    // Raze RT: the cubemap is kept while the sky's draws are as they were ('salt': the rest of
+    // what it depends on, the sky viewer's place; 'force': drawn regardless -- the clouds move);
+    // its dome follows the camera, it is drawn again as the camera moves some way, and
+    // every second anyway. RTGL1_METAL_SKY_CACHE=0: every frame, as before.
+    bool             RenderSkyCubemap( id< MTLCommandBuffer > cmd,
+                                       MetalComputePipelines& shaders,
+                                       const MetalBindingTable& bindings,
+                                       uint64_t salt  = 0,
+                                       bool     force = true );
+    // whether the last RenderSkyCubemap kept the cubemap of before
+    bool             SkyCubemapReused() const { return skyCubemapReused; }
     id< MTLTexture > SkyCubemap() const { return skyCubemap; }
 
     struct PassParams
@@ -238,6 +248,9 @@ private:
 
     id< MTLTexture > skyCubemap;
     id< MTLTexture > skyDepth;
+    uint64_t         skyCubemapKey{ 0 };
+    uint32_t         skyCubemapAge{ 0 };
+    bool             skyCubemapReused{ false };
     // RasterPass: a render size depth buffer, and for the classic pass of the target's size
     id< MTLTexture > renderDepth;
     id< MTLTexture > classicDepth;
