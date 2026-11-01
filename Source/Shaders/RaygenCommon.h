@@ -574,6 +574,14 @@ vec3 glassTransmittance(vec3 start, vec3 end)
         return tint;
     }
     dir /= dist;
+    // Raze RT: rt_glass_shadow_debug (sunLeakDebugMul 3: every light that gets here red --
+    // is this reached at all; 2: green through a pane found, blue through a pane whose
+    // texel was taken for a hole)
+    if (globalUniform.sunLeakDebugMul > 2.5)
+    {
+        return vec3(1.0, 0.0, 0.0);
+    }
+    const bool dbg = globalUniform.sunLeakDebugMul > 1.5;
     float from = 0.001;
     for (int i = 0; i < 4; i++)
     {
@@ -581,6 +589,10 @@ vec3 glassTransmittance(vec3 start, vec3 end)
         if (p.instIdAndIndex == UINT32_MAX || p.geomAndPrimIndex == UINT32_MAX)
         {
             break;
+        }
+        if (dbg && i == 0)
+        {
+            tint = vec3(0.0, 1.0, 0.0);
         }
         int instanceId, customIndex;
         unpackInstanceIdAndCustomIndex(p.instIdAndIndex, instanceId, customIndex);
@@ -610,7 +622,11 @@ vec3 glassTransmittance(vec3 start, vec3 end)
         }
         const vec4 c = getTextureSample(geometryInstances[ instanceId ].texture_base, texCoord) *
                        unpackUintColor(geometryInstances[ instanceId ].colorFactor_base);
-        if (c.a >= 0.5)
+        if (dbg)
+        {
+            if (c.a < 0.5) tint = vec3(0.0, 0.0, 1.0);
+        }
+        else if (c.a >= 0.5)
         {
             // as a view through it (RaygenPrimary.inl, glass)
             const float m   = max(max(c.r, c.g), c.b);
