@@ -146,6 +146,11 @@ vec4 smoke_evalAt( vec3 worldPos )
 
             if( globalUniform.smokeAlbedoDensity[ i ].a < 0.0 )
             {
+                // (Raze RT: not a clearing, a fire's heat for the heat haze, EfWaves.comp)
+                if( globalUniform.smokeAlbedoDensity[ i ].a < -1e5 )
+                {
+                    continue;
+                }
                 const float c = w * -globalUniform.smokeAlbedoDensity[ i ].a;
                 if( globalUniform.smokeAlbedoDensity[ i ].r >= 2.0 )
                 {
