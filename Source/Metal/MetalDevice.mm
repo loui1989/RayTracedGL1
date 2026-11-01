@@ -1001,8 +1001,10 @@ void FillUniform( RTGL1::ShGlobalUniform* gu, const RgDrawFrameInfo& drawInfo, c
 
             RG_SET_VEC3_A( &gu->smokeAlbedoDensity[ i * 4 ], params.pAlbedoDensity[ i ].data );
             RG_MAX_VEC3( &gu->smokeAlbedoDensity[ i * 4 ], 0.0f );
-            gu->smokeAlbedoDensity[ i * 4 + 3 ] =
-                std::max( 0.0f, params.pAlbedoDensity[ i ].data[ 3 ] );
+            // Raze RT: NOT clamped at zero -- a puff of negative density is a clearing
+            // (the wake: something moving through the smoke thins it there; Raze RT's
+            // shaders, Smoke.h). Clamped, every clearing arrived as an empty puff.
+            gu->smokeAlbedoDensity[ i * 4 + 3 ] = params.pAlbedoDensity[ i ].data[ 3 ];
 
             // Across-view radius. Falls back to the along-view one, which makes
             // the puff a sphere and is what every caller that does not set
