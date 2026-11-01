@@ -1291,14 +1291,24 @@ void main()
         {
             doRefraction = isPixOdd;
             F = getFresnelSchlick(curIndexOfRefraction, newIndexOfRefraction, -rayDir, normal);
-            // Raze RT: a window pane is seen through on every pixel, not reflecting on every
-            // other one: at a slant the reflecting half mirrored the room strongly and the
-            // denoiser left it as dotted lines across the glass (a carved wall's pattern on
-            // a stained glass window, from one side only). Its reflection is given up.
+            // Raze RT: a window pane's reflection, at most this strong (rt_glass_reflect, in
+            // sunLeakDebugMul's fraction: 0.4 = 1): at a slant the reflecting half of its
+            // pixels mirrored the room nearly fully, and the pixels in between left it as
+            // dotted lines across the glass (a carved wall's pattern on a stained glass
+            // window, from one side only). Faint, it is a sheen; 0: none, seen through on
+            // every pixel.
             if( razeGlass )
             {
-                doRefraction = true;
-                doSplit      = false;
+                const float razeReflCap = fract( globalUniform.sunLeakDebugMul ) / 0.4;
+                if( razeReflCap < 0.005 )
+                {
+                    doRefraction = true;
+                    doSplit      = false;
+                }
+                else
+                {
+                    F = min( F, razeReflCap );
+                }
             }
         }
         else
@@ -1377,7 +1387,12 @@ void main()
         {
             rayDir = reflect( normalize( rayDir ), shadeNormal );
 
-            if( !isWater && !polished )
+            if( razeGlass && !isWater && !polished )
+            {
+                // (Raze RT: a window pane: its reflection as strong as its capped Fresnel)
+                throughput *= F;
+            }
+            else if( !isWater && !polished )
             {
                 throughput *= getFresnelSchlick( max( 0, dot( normal, rayDir ) ),
                                                  getSpecularColor( h.albedo, h.metallic ) );
