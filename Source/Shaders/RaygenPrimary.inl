@@ -895,6 +895,31 @@ vec3 razeFlatNormal( const ivec2 pix, const vec3 n )
     return dot( g, n ) > 0.6 ? g : n;
 }
 
+// Raze RT: the flat face of the pane hit, from its triangle. (Its neighbours' positions on
+// screen, as razeFlatNormal read them, are written over by this same pass as it goes --
+// the hit behind the glass, for each pixel done -- so where a neighbour was done first the
+// face came out wrong, and so the bend: dotted lines in blocks across a stained glass
+// window, seen from some sides only.)
+vec3 razeGeomNormal( const ShPayload pl, const vec3 n )
+{
+    int instanceId, instCustomIndex, geomIndex, primIndex;
+    unpackInstanceIdAndCustomIndex( pl.instIdAndIndex, instanceId, instCustomIndex );
+    unpackGeometryAndPrimitiveIndex( pl.geomAndPrimIndex, geomIndex, primIndex );
+    const ShTriangle tr = getTriangle( instanceId, instCustomIndex, geomIndex, primIndex );
+    vec3        g = cross( tr.positions[ 1 ] - tr.positions[ 0 ], tr.positions[ 2 ] - tr.positions[ 0 ] );
+    const float l = length( g );
+    if( l < 1e-12 )
+    {
+        return n;
+    }
+    g /= l;
+    if( dot( g, n ) < 0.0 )
+    {
+        g = -g;
+    }
+    return g;
+}
+
 void main() 
 {
     RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
@@ -1029,7 +1054,7 @@ void main()
         vec3 razeFlat = normal, razeIn = normal;
         if( razeGlass )
         {
-            razeFlat = razeFlatNormal( pix, normal );
+            razeFlat = razeGeomNormal( currentPayload, normal );
             // (at most about 20 degrees: the bump strength setting scales the normal map)
             vec3        bend = ( normal - razeFlat ) * 3.0;
             const float bl   = length( bend );
