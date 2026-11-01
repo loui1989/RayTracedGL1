@@ -583,17 +583,19 @@ vec3 glassTransmittance(vec3 start, vec3 end)
     }
     const bool dbg = globalUniform.sunLeakDebugMul > 1.5;
     float from = 0.001;
-    for (int i = 0; i < 4; i++)
+    // (all the world, not only the refractive instances: on Metal, glass that stays put
+    // is kept with the rest of the static geometry -- a ray for the refractive instances
+    // alone found none of it. Glass by its flags; anything else passed: the shadow ray
+    // already found the way open)
+    int panes = 0;
+    for (int i = 0; i < 8 && panes < 4; i++)
     {
-        const ShPayload p = traceRayQuery(0, INSTANCE_MASK_REFRACT, start, from, dir, dist);
+        const ShPayload p = traceRayQuery(0, globalUniform.rayCullMaskWorld | INSTANCE_MASK_REFRACT, start, from, dir, dist);
         if (p.instIdAndIndex == UINT32_MAX || p.geomAndPrimIndex == UINT32_MAX)
         {
             break;
         }
-        if (dbg && i == 0)
-        {
-            tint = vec3(0.0, 1.0, 0.0);
-        }
+
         int instanceId, customIndex;
         unpackInstanceIdAndCustomIndex(p.instIdAndIndex, instanceId, customIndex);
         int geomIndex, primIndex;
@@ -620,9 +622,22 @@ vec3 glassTransmittance(vec3 start, vec3 end)
             local = g_staticVertices[ vi[ 0 ] ].position.xyz * bc[ 0 ] + g_staticVertices[ vi[ 1 ] ].position.xyz * bc[ 1 ] +
                     g_staticVertices[ vi[ 2 ] ].position.xyz * bc[ 2 ];
         }
-        const vec4 c = getTextureSample(geometryInstances[ instanceId ].texture_base, texCoord) *
-                       unpackUintColor(geometryInstances[ instanceId ].colorFactor_base);
-        if (dbg)
+        const bool isGlassHit = (geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_MEDIA_TYPE_GLASS) != 0;
+        if (isGlassHit)
+        {
+            panes++;
+            if (dbg && panes == 1)
+            {
+                tint = vec3(0.0, 1.0, 0.0);
+            }
+        }
+        const vec4 c = isGlassHit ? getTextureSample(geometryInstances[ instanceId ].texture_base, texCoord) *
+                                    unpackUintColor(geometryInstances[ instanceId ].colorFactor_base)
+                                  : vec4(0.0);
+        if (!isGlassHit)
+        {
+        }
+        else if (dbg)
         {
             if (c.a < 0.5) tint = vec3(0.0, 0.0, 1.0);
         }
