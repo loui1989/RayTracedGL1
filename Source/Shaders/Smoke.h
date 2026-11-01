@@ -50,6 +50,12 @@ vec4 smoke_evalAt( vec3 worldPos )
 {
     vec4 acc = vec4( 0.0 );
     g_smokeMist     = 0.0;
+    // Raze RT: the wake -- a puff of NEGATIVE density is a clearing (something moving
+    // through the smoke): it thins the smoke where it is, as much as it is strong; one
+    // marked as the mist's (red at 2 or more) thins only the ground fog
+    float carveAll  = 0.0;
+    float carveMist = 0.0;
+    vec3  mistRgb   = vec3( 0.0 );
     g_smokeMistGlow = 0.0;
 
     for( uint i = 0; i < globalUniform.smokeCount; i++ )
@@ -138,6 +144,20 @@ vec4 smoke_evalAt( vec3 worldPos )
                 w = mix( w, ceil( w * n ) / n, globalUniform.smokeStylize );
             }
 
+            if( globalUniform.smokeAlbedoDensity[ i ].a < 0.0 )
+            {
+                const float c = w * -globalUniform.smokeAlbedoDensity[ i ].a;
+                if( globalUniform.smokeAlbedoDensity[ i ].r >= 2.0 )
+                {
+                    carveMist += c;
+                }
+                else
+                {
+                    carveAll += c;
+                }
+                continue;
+            }
+
             const float d = w * globalUniform.smokeAlbedoDensity[ i ].a;
 
             vec3 alb = globalUniform.smokeAlbedoDensity[ i ].rgb;
@@ -146,11 +166,21 @@ vec4 smoke_evalAt( vec3 worldPos )
                 g_smokeMist += d;
                 g_smokeMistGlow += d * ( alb.r - 2.0 );
                 alb = vec3( 0.80, 0.81, 0.84 );
+                mistRgb += d * alb;
             }
             acc += vec4( d * alb, d );
         }
     }
 
+    if( carveAll > 0.0 || carveMist > 0.0 )
+    {
+        const float fAll  = clamp( 1.0 - carveAll, 0.0, 1.0 );
+        const float fMist = clamp( 1.0 - carveAll - carveMist, 0.0, 1.0 );
+        const vec4  mistPart = vec4( mistRgb, g_smokeMist );
+        acc = ( acc - mistPart ) * fAll + mistPart * fMist;
+        g_smokeMist *= fMist;
+        g_smokeMistGlow *= fMist;
+    }
     return acc;
 }
 
