@@ -174,8 +174,11 @@ RTGL1::ShLightEncoded EncodeAsSpotLight( const RgLightSpotEXT& info,
         RTGL1::ApplyTransformToDirection( transform, RTGL1::Utils::Normalize( info.direction ) );
     assert( std::abs( RTGL1::Utils::Length( direction.data ) - 1.0f ) < 0.001f );
 
-    float radius = std::max( MIN_SPHERE_RADIUS, info.radius );
-    float area   = float( RG_PI ) * radius * radius;
+    // Raze RT: the shaders read every spot light as 0.05 m across (decodeAsSpotLight in
+    // Light.h: the radius is not encoded), so its brightness per area must be for that
+    // size -- for its own size, a spot of 0.3 m lit (0.05 / 0.3)^2 = 1/36 of its lumens
+    constexpr float decodedRadius = 0.05f;
+    float area   = float( RG_PI ) * decodedRadius * decodedRadius;
 
     constexpr auto clampForCos = []( float a ) {
         return std::clamp( a, 0.0f, RTGL1::Utils::DegToRad( 89 ) );
