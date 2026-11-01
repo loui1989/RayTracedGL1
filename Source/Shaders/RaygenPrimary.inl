@@ -873,6 +873,28 @@ void main()
 
 
 #ifdef RAYGEN_REFL_REFR_SHADER
+// Raze RT: the flat face of the surface seen at 'pix' (a window pane), from the positions
+// of its neighbouring pixels -- the normal without the bumps of its normal map. Where a
+// neighbour is off the pane (its edges), the shading normal 'n'.
+vec3 razeFlatNormal( const ivec2 pix, const vec3 n )
+{
+    const vec3 p  = texelFetch( framebufSurfacePosition_Sampler, pix, 0 ).xyz;
+    const vec3 px = texelFetch( framebufSurfacePosition_Sampler, pix + ivec2( 1, 0 ), 0 ).xyz;
+    const vec3 py = texelFetch( framebufSurfacePosition_Sampler, pix + ivec2( 0, 1 ), 0 ).xyz;
+    vec3        g = cross( px - p, py - p );
+    const float l = length( g );
+    if( l < 1e-12 )
+    {
+        return n;
+    }
+    g /= l;
+    if( dot( g, n ) < 0.0 )
+    {
+        g = -g;
+    }
+    return dot( g, n ) > 0.6 ? g : n;
+}
+
 void main() 
 {
     RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
@@ -997,6 +1019,30 @@ void main()
 
         const vec3 normal =
             getNormal( h.hitPosition, hasNormalMap, h.normal, rayCone, rayDir, isWater, wasPortal );
+
+        // Raze RT: a window pane bends what is seen through it by its uneven surface (the
+        // bumps of its normal map, made larger), not by its flat faces -- a flat pane in and
+        // out again only shifts the view a little. In through the bumpy face, out through
+        // the flat one. (The pane seen directly only: positions of its neighbours.)
+        const bool razeGlass = i == 0 && newRayMedia == MEDIA_TYPE_GLASS &&
+                               ( h.geometryInstanceFlags & GEOM_INST_FLAG_THIN_MEDIA ) != 0;
+        vec3 razeFlat = normal, razeIn = normal;
+        if( razeGlass )
+        {
+            razeFlat = razeFlatNormal( pix, normal );
+            // (at most about 20 degrees: the bump strength setting scales the normal map)
+            vec3        bend = ( normal - razeFlat ) * 3.0;
+            const float bl   = length( bend );
+            if( bl > 0.35 )
+            {
+                bend *= 0.35 / bl;
+            }
+            razeIn = normalize( razeFlat + bend );
+            if( dot( razeIn, -rayDir ) < 0.05 )
+            {
+                razeIn = normal;
+            }
+        }
 
         // Doom64-RT: stylized water. Only the FIRST hit, only a vacuum->water
         // crossing (i.e. looking at the surface from above, camera not
@@ -1240,7 +1286,8 @@ void main()
 
             // even pixels fall through to the reflection branch below
         }
-        else if (toRefract && calcRefractionDirection(curIndexOfRefraction, newIndexOfRefraction, rayDir, normal, refractionDir))
+        else if (toRefract && calcRefractionDirection(curIndexOfRefraction, newIndexOfRefraction, rayDir,
+                                                      razeGlass ? razeIn : normal, refractionDir))
         {
             doRefraction = isPixOdd;
             F = getFresnelSchlick(curIndexOfRefraction, newIndexOfRefraction, -rayDir, normal);
@@ -1283,7 +1330,7 @@ void main()
                 if( calcRefractionDirection( newIndexOfRefraction,
                                              curIndexOfRefraction,
                                              rayDir,
-                                             normal,
+                                             razeGlass ? razeFlat : normal,
                                              refractionDir ) )
                 {
                     rayDir = refractionDir;
