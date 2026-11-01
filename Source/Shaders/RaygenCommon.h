@@ -555,6 +555,86 @@ float traceVisibility(const Surface surf, const vec3 lightPosition, uint lightIn
     const bool isShadowed = traceShadowRay(surf.instCustomIndex, start, end, ignoreFirstPersonViewer);
     return float(!isShadowed);
 }
+
+#if LIGHT_SAMPLE_METHOD == LIGHT_SAMPLE_METHOD_DIRECT
+// Raze RT: light through glass takes its colour (a stained glass window throws its
+// colours on the floor). Glass is not in the shadow mask -- a shadow ray goes through
+// it as if it were not there -- so a ray that reached its light is traced again, through
+// the glass only, and each pane it crosses filters it by its texel there, as a view
+// through the glass is filtered (the hue, and less light through the darker texels:
+// the leading). Up to four panes. On with globalUniform.sunLeakDebugMul > 0.5 (Raze RT's
+// rt_glass_shadows: the header has no field of its own for it).
+vec3 glassTransmittance(vec3 start, vec3 end)
+{
+    vec3  dir  = end - start;
+    float dist = length(dir);
+    vec3  tint = vec3(1.0);
+    if (dist <= 0.01)
+    {
+        return tint;
+    }
+    dir /= dist;
+    float from = 0.001;
+    for (int i = 0; i < 4; i++)
+    {
+        const ShPayload p = traceRayQuery(0, INSTANCE_MASK_REFRACT, start, from, dir, dist);
+        if (p.instIdAndIndex == UINT32_MAX || p.geomAndPrimIndex == UINT32_MAX)
+        {
+            break;
+        }
+        int instanceId, customIndex;
+        unpackInstanceIdAndCustomIndex(p.instIdAndIndex, instanceId, customIndex);
+        int geomIndex, primIndex;
+        unpackGeometryAndPrimitiveIndex(p.geomAndPrimIndex, geomIndex, primIndex);
+
+        const uint baseVertex = geometryInstances[ instanceId ].baseVertexIndex;
+        const uint baseIndex  = geometryInstances[ instanceId ].baseIndexIndex;
+        const vec3 bc         = vec3(1.0 - p.baryCoords.x - p.baryCoords.y, p.baryCoords.x, p.baryCoords.y);
+        vec2 texCoord;
+        vec3 local;
+        if ((geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_IS_DYNAMIC) != 0)
+        {
+            const uvec3 vi = getVertIndicesDynamic(baseVertex, baseIndex, uint(primIndex));
+            texCoord = g_dynamicVertices[ vi[ 0 ] ].texCoord * bc[ 0 ] + g_dynamicVertices[ vi[ 1 ] ].texCoord * bc[ 1 ] +
+                       g_dynamicVertices[ vi[ 2 ] ].texCoord * bc[ 2 ];
+            local = g_dynamicVertices[ vi[ 0 ] ].position.xyz * bc[ 0 ] + g_dynamicVertices[ vi[ 1 ] ].position.xyz * bc[ 1 ] +
+                    g_dynamicVertices[ vi[ 2 ] ].position.xyz * bc[ 2 ];
+        }
+        else
+        {
+            const uvec3 vi = getVertIndicesStatic(baseVertex, baseIndex, uint(primIndex));
+            texCoord = g_staticVertices[ vi[ 0 ] ].texCoord * bc[ 0 ] + g_staticVertices[ vi[ 1 ] ].texCoord * bc[ 1 ] +
+                       g_staticVertices[ vi[ 2 ] ].texCoord * bc[ 2 ];
+            local = g_staticVertices[ vi[ 0 ] ].position.xyz * bc[ 0 ] + g_staticVertices[ vi[ 1 ] ].position.xyz * bc[ 1 ] +
+                    g_staticVertices[ vi[ 2 ] ].position.xyz * bc[ 2 ];
+        }
+        const vec4 c = getTextureSample(geometryInstances[ instanceId ].texture_base, texCoord) *
+                       unpackUintColor(geometryInstances[ instanceId ].colorFactor_base);
+        if (c.a >= 0.5)
+        {
+            // as a view through it (RaygenPrimary.inl, glass)
+            const float m   = max(max(c.r, c.g), c.b);
+            const vec3  hue = c.rgb / max(m, 0.002);
+            tint *= mix(vec3(1.0), hue, 0.9) * smoothstep(0.015, 0.22, m);
+            if (max(max(tint.r, tint.g), tint.b) < 0.005)
+            {
+                return vec3(0.0);
+            }
+        }
+        // on past this pane
+        // (a dynamic geometry's vertices are in its own space; a static one's in the world's)
+        const vec3 hitPos = (geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_IS_DYNAMIC) != 0
+                                ? transformBy(geometryInstances[ instanceId ], vec4(local, 1.0))
+                                : local;
+        from = dot(hitPos - start, dir) + 0.005;
+        if (from >= dist)
+        {
+            break;
+        }
+    }
+    return tint;
+}
+#endif
 #endif // LIGHT_SAMPLE_METHOD != LIGHT_SAMPLE_METHOD_NONE
 
 
@@ -1124,6 +1204,16 @@ void traceDirectIllumination( uint            seed,
 
         out_diffuse  *= visibility;
         out_specular *= visibility;
+
+    #if LIGHT_SAMPLE_METHOD == LIGHT_SAMPLE_METHOD_DIRECT
+        // Raze RT: through glass, its colour
+        if (visibility > 0.0 && globalUniform.sunLeakDebugMul > 0.5)
+        {
+            const vec3 gt = glassTransmittance(surf.position + surf.toViewerDir * RAY_ORIGIN_LEAK_BIAS, light.position);
+            out_diffuse  *= gt;
+            out_specular *= gt;
+        }
+    #endif
 
     #if LIGHT_SAMPLE_METHOD == LIGHT_SAMPLE_METHOD_DIRECT
         out_distance = length(light.position - surf.position);
