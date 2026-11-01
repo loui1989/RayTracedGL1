@@ -37,9 +37,20 @@
 //   .a   -- density,                        i.e. sum( d_i )
 // Both zero when there is no smoke, which is the case every frame on every map
 // until someone fires a gun.
+// Raze RT: ground fog's banks (rt_fog) are puffs too, but mist, not smoke: they do not
+// absorb (a soot cloud darkens what is behind it; a mist only scatters, a pale veil) and
+// they glow with a light of their own, the haze's kind. The engine marks one with its
+// albedo's red at 2 or more: red - 2 is that glow; the colour is a fixed pale grey.
+// smoke_evalAt sums these here for the caller: the density that is mist, and its glow
+// (premultiplied by density).
+float g_smokeMist     = 0.0;
+float g_smokeMistGlow = 0.0;
+
 vec4 smoke_evalAt( vec3 worldPos )
 {
     vec4 acc = vec4( 0.0 );
+    g_smokeMist     = 0.0;
+    g_smokeMistGlow = 0.0;
 
     for( uint i = 0; i < globalUniform.smokeCount; i++ )
     {
@@ -129,7 +140,14 @@ vec4 smoke_evalAt( vec3 worldPos )
 
             const float d = w * globalUniform.smokeAlbedoDensity[ i ].a;
 
-            acc += vec4( d * globalUniform.smokeAlbedoDensity[ i ].rgb, d );
+            vec3 alb = globalUniform.smokeAlbedoDensity[ i ].rgb;
+            if( alb.r >= 2.0 )
+            {
+                g_smokeMist += d;
+                g_smokeMistGlow += d * ( alb.r - 2.0 );
+                alb = vec3( 0.80, 0.81, 0.84 );
+            }
+            acc += vec4( d * alb, d );
         }
     }
 

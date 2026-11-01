@@ -742,8 +742,10 @@ void main()
         if( total > 0.0 )
         {
             lighting -= globalUniform.volumeAmbient.rgb;
+            // (Raze RT: ground fog's mist, its own glow -- see Smoke.h)
             lighting += ( fogDens * globalUniform.volumeAmbient.rgb +
-                          smoke.a * vec3( globalUniform.smokeAmbient ) ) /
+                          ( smoke.a - g_smokeMist ) * vec3( globalUniform.smokeAmbient ) +
+                          vec3( g_smokeMistGlow ) ) /
                         total;
         }
     }
@@ -776,8 +778,9 @@ void main()
     // background brighter than itself. Fog keeps its pure scattering: this is
     // gated on the smoke density, so a cell without smoke stores exactly what
     // it stored before.
+    // (Raze RT: ground fog's mist scatters only: it does not absorb -- see Smoke.h)
     float absorbtion = globalUniform.smokeAbsorb > 0.0
-                           ? smoke.a * globalUniform.smokeAbsorb * 0.001
+                           ? max( smoke.a - g_smokeMist, 0.0 ) * globalUniform.smokeAbsorb * 0.001
                            : 0.0;
 
     // Doom64-RT: the shader-side probe. Deliberately AFTER the real medium, so
