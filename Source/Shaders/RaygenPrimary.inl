@@ -1291,6 +1291,15 @@ void main()
         {
             doRefraction = isPixOdd;
             F = getFresnelSchlick(curIndexOfRefraction, newIndexOfRefraction, -rayDir, normal);
+            // Raze RT: a window pane is seen through on every pixel, not reflecting on every
+            // other one: at a slant the reflecting half mirrored the room strongly and the
+            // denoiser left it as dotted lines across the glass (a carved wall's pattern on
+            // a stained glass window, from one side only). Its reflection is given up.
+            if( razeGlass )
+            {
+                doRefraction = true;
+                doSplit      = false;
+            }
         }
         else
         {
