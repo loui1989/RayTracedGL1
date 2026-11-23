@@ -28,6 +28,9 @@ import pathlib
 TARGET_FOLDER_PATH           = "../../Build/shaders/"
 # TODO: improve extensibility
 GLSLC_EXE                    = "../../Source/VulkanSDK/1.3.280.0/Bin/glslc.exe"
+# (or another glslc: the GLSLC environment variable, e.g. on Linux)
+if os.environ.get("GLSLC"):
+    GLSLC_EXE = os.environ["GLSLC"]
 
 
 CACHE_FOLDER_PATH           = "Build/"
@@ -202,7 +205,7 @@ def main():
 
                 with open(filename, "r") as dpd:
                     for line in dpd:
-                        if "#include" in line:
+                        if "#include" in line and line.count("\"") >= 2:
                             dpdFile = line.split("\"")[1]
                             for dpdFolder in DEPENDENCY_FOLDERS:
                                 dpd = abspath(dpdFolder + dpdFile)
@@ -233,7 +236,7 @@ def main():
 
             with open(filename, "r") as dpd:
                 for line in dpd:
-                    if "#include" in line:
+                    if "#include" in line and line.count("\"") >= 2:
                         dpdFile = line.split("\"")[1]
                         for dpdFolder in DEPENDENCY_FOLDERS:
                             dpd = abspath(dpdFolder + dpdFile)
