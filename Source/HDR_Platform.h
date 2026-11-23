@@ -33,7 +33,7 @@ enum class DisplayHDRState
 }
 
 #ifdef WIN32
-    #include <WinUser.h>
+    #include <winuser.h>
 
 namespace RTGL1::HDR
 {

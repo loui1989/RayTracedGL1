@@ -1558,7 +1558,7 @@ void RTGL1::GltfExporter::AddPrimitiveLights( const RgMeshInfo&          mesh,
     if( auto* attachedLight = pnext::find< RgMeshPrimitiveAttachedLightEXT >( &primitive ) )
     {
         for( const AnyLightEXT& ext :
-             MakeLightsForPrimitive( mesh, primitive, *attachedLight, params.oneGameUnitInMeters ) )
+             ::MakeLightsForPrimitive( mesh, primitive, *attachedLight, params.oneGameUnitInMeters ) )
         {
             sceneLights.push_back( LightCopy{
                 .base       = { .sType = RG_STRUCTURE_TYPE_LIGHT_INFO, .isExportable = true },

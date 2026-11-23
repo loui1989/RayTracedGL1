@@ -244,8 +244,10 @@ void RTGL1::LightManager::Add( uint32_t           frameIndex,
                     }
                     if( ( s_seen % 600 ) == 1 )
                     {
-                        const float area = float( RG_PI ) * std::max( MIN_SPHERE_RADIUS, lext.radius ) *
-                                           std::max( MIN_SPHERE_RADIUS, lext.radius );
+                        // (LightEncoding.cpp's RG_PI and MIN_SPHERE_RADIUS are its own)
+                        constexpr float kPi = 3.14159265f, kMinSphereRadius = 0.005f;
+                        const float area = kPi * std::max( kMinSphereRadius, lext.radius ) *
+                                           std::max( kMinSphereRadius, lext.radius );
                         auto  c    = RTGL1::Utils::UnpackColor4DPacked32< RgFloat3D >( lext.color );
                         float mult = CalculateLightStyle( light.additional, lightstyles );
                         debug::Warning( "LAVA PROBE: seen={} dim={} added={} | pos=({:.2f} {:.2f} {:.2f}) m "
