@@ -108,8 +108,12 @@ RTGL1::ShLightEncoded EncodeAsSphereLight( const RgLightSphericalEXT& info,
     {
         uint32_t* rn = reinterpret_cast< uint32_t* >( &lt.ldata3 );
 
+        // Thief: a lamp hung high (alpha 0xFE in its colour) falls off as the
+        // game's lights do, as 1/distance past a metre (to 4 m): its radius
+        // given negative, for the shaders' decodeAsSphereLight
+        const bool darkFalloff = ( ( info.color >> 24 ) & 255u ) == 0xFEu;
         *rn = packHalf2x16(
-            radius, //
+            darkFalloff ? -radius : radius, //
             norm    // additional multiplier as e5 encoding might not preserve large values
         );
     }

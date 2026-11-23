@@ -92,7 +92,7 @@ void main()
 
     float occluderDepth;
     {
-        vec2 size   = vec2( textureSize( framebufDepthNdc_Sampler, 0 ) ); // (the texture's, not the frame's)
+        vec2 size   = vec2( globalUniform.renderWidth, globalUniform.renderHeight );
         vec4 depth4 = textureGather( framebufDepthNdc_Sampler, vec2( pix ) / size, 0 );
 
         occluderDepth = max( depth4[ 0 ], max( depth4[ 1 ], max( depth4[ 2 ], depth4[ 3 ] ) ) );

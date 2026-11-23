@@ -67,6 +67,11 @@
 // the same as in VulkanDevice_Init.cpp
 namespace RTGL1
 {
+extern std::atomic< bool > g_thiefSunShadowPass;   // MetalPathTracer.mm (0033)
+}
+
+namespace RTGL1
+{
 
 auto g_libConfig = std::optional< LibraryConfig >{};
 
@@ -188,6 +193,58 @@ std::optional< CaptureRequest > GetCaptureRequest()
         .count = std::max< uint64_t >( 1, count ? std::strtoull( count, nullptr, 10 ) : 1 ),
     };
 }
+
+// Thief RT: what the display made of the presented drawables (RTGL1_METAL_PROFILE): how many were
+// shown, how far apart, and how long acquiring them waited
+struct PresentStats
+{
+    std::mutex m;
+    uint64_t   presents{ 0 }, shown{ 0 }, dropped{ 0 }, under10{ 0 }, under20{ 0 }, over20{ 0 };
+    double     lastShown{ 0 }, intervalSum{ 0 }, drawableWait{ 0 }, drawableWaitMax{ 0 };
+
+    static PresentStats& Get()
+    {
+        static PresentStats s;
+        return s;
+    }
+    // nextDrawable, timed
+    id< CAMetalDrawable > Next( CAMetalLayer* layer )
+    {
+        const auto            t = std::chrono::steady_clock::now();
+        id< CAMetalDrawable > d = [layer nextDrawable];
+        const double ms = std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t ).count();
+        std::lock_guard l( m );
+        drawableWait += ms;
+        drawableWaitMax = std::max( drawableWaitMax, ms );
+        return d;
+    }
+    void Track( id< CAMetalDrawable > d )
+    {
+        {
+            std::lock_guard l( m );
+            presents++;
+        }
+        [d addPresentedHandler:^( id< MTLDrawable > dr ) {
+          const double t = dr.presentedTime;
+          auto&        st = PresentStats::Get();
+          std::lock_guard l( st.m );
+          if( t <= 0 )
+          {
+              st.dropped++;
+              return;
+          }
+          const double prev = st.lastShown;
+          st.lastShown      = t;
+          if( prev > 0 && t > prev && t - prev < 0.2 )
+          {
+              const double ms = ( t - prev ) * 1000.0;
+              st.shown++;
+              st.intervalSum += ms;
+              ( ms < 10.0 ? st.under10 : ms < 20.0 ? st.under20 : st.over20 )++;
+          }
+        }];
+    }
+};
 
 void OnFrameCompleted( id< MTLCommandBuffer > c, std::atomic< double >& gpuFrameTime )
 {
@@ -665,6 +722,12 @@ void FillUniform( RTGL1::ShGlobalUniform* gu, const RgDrawFrameInfo& drawInfo, c
         gu->lightIndexIgnoreFPVShadows = lightManager->GetLightIndexForShaders(
             currentFrameState.GetFrameIndex(), params.lightUniqueIdIgnoreFirstPersonViewerShadows );
         gu->cellWorldSize       = std::max( params.cellWorldSize, 0.001f );
+        // Thief RT (0033): +4 in it tells RtRaygenDirect to read the moon's shadow from
+        // ThiefSunShadow -- not when that pass is off (its shader did not build)
+        if( !g_thiefSunShadowPass.load() && ( uint32_t( gu->cellWorldSize + 0.5f ) & 4u ) != 0 )
+        {
+            gu->cellWorldSize -= 4.0f;
+        }
         gu->gradientMultDiffuse = std::clamp( params.directDiffuseSensitivityToChange, 0.0f, 1.0f );
         gu->gradientMultIndirect =
             std::clamp( params.indirectDiffuseSensitivityToChange, 0.0f, 1.0f );
@@ -1728,11 +1791,24 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
     dispatch_semaphore_t         sem          = frameSemaphore;
     auto                         frameTime    = gpuFrameTime;
     id< MTLDevice >              dev          = device;
+    // Thief RT: with the display's sync, the generated frame is shown for one refresh, then the
+    // real one: paced by half the measured GPU frame time instead, which counted the wait this
+    // very pacing makes (each frame held for half of it, for want of a drawable), it locked at
+    // ~25 real frames a second on a 120 Hz display
+    const bool                   synced       = layer.displaySyncEnabled;
+    // most of one refresh (never above a 120 Hz one, should the mode report no rate): on the
+    // display's sync, the next refresh after the generated one
+    const double                 refresh      = 0.9 * std::min( RefreshInterval(), 1.0 / 120.0 );
 
     [cmd addCompletedHandler:^( id< MTLCommandBuffer > c ) {
       OnFrameCompleted( c, *frameTime );
 
       dispatch_async( dq, ^{
+      // Thief RT: the drawables from nextDrawable are autoreleased: a dispatch queue drains its pool
+      // only when its thread idles, which a queue busy presenting never does, so each drawable was
+      // held long after it was shown, and the 3 of them sufficed for ~60 a second (30 frames + 30
+      // generated): released with the block instead
+      @autoreleasepool {
         id< MTLCommandBuffer > pc = NewCommandBuffer( q );
         pc.label                  = @"RTGL1 present";
 
@@ -1777,8 +1853,9 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
         bool generatedPresented = false;
         if( generated )
         {
-            if( id< CAMetalDrawable > d = [metalLayer nextDrawable] )
+            if( id< CAMetalDrawable > d = PresentStats::Get().Next( metalLayer ) )
             {
+                PresentStats::Get().Track( d );
                 l_blit( d, generated, @"Blit generated frame to swapchain" );
                 if( capturePath && captureGenerated )
                 {
@@ -1789,8 +1866,9 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
             }
         }
 
-        if( id< CAMetalDrawable > d = [metalLayer nextDrawable] )
+        if( id< CAMetalDrawable > d = PresentStats::Get().Next( metalLayer ) )
         {
+            PresentStats::Get().Track( d );
             l_blit( d, real, @"Blit to swapchain" );
             if( capturePath && !captureBuffer )
             {
@@ -1800,7 +1878,8 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
             if( generatedPresented )
             {
                 // pace: the generated frame is shown for a half of the frame time
-                [pc presentDrawable:d afterMinimumDuration:std::clamp( frameTime->load() * 0.5, 0.0, 0.05 )];
+                [pc presentDrawable:d
+                    afterMinimumDuration:synced ? refresh : std::clamp( frameTime->load() * 0.5, 0.0, 0.05 )];
             }
             else
             {
@@ -1819,6 +1898,7 @@ void RTGL1::MetalDevice::Impl::PresentAsync( id< MTLCommandBuffer >       cmd,
             [pc waitUntilCompleted];
             SaveCapture( captureBuffer, cw, ch, *capturePath );
         }
+      }
       } );
     }];
     [cmd commit];
@@ -1891,7 +1971,8 @@ id RTGL1::MetalDevice::Impl::PrepareFrameInterpolator( uint32_t       inputWidth
         {
             fg.presentQueue       = [device newCommandQueue];
             fg.presentQueue.label = @"RTGL1 present";
-            fg.presentDispatch    = dispatch_queue_create( "RTGL1 present", DISPATCH_QUEUE_SERIAL );
+            fg.presentDispatch    = dispatch_queue_create(
+                "RTGL1 present", dispatch_queue_attr_make_with_autorelease_frequency( DISPATCH_QUEUE_SERIAL, DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM ) );
         }
 
         fg.interpolator = fi;
@@ -3130,8 +3211,9 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
             pc.label                  = @"RTGL1 present";
 
             // acquire the drawable as late as possible
-            if( id< CAMetalDrawable > drawable = [impl->layer nextDrawable] )
+            if( id< CAMetalDrawable > drawable = PresentStats::Get().Next( impl->layer ) )
             {
+                PresentStats::Get().Track( drawable );
                 MTLRenderPassDescriptor* pass          = [MTLRenderPassDescriptor renderPassDescriptor];
                 pass.colorAttachments[ 0 ].texture     = drawable.texture;
                 pass.colorAttachments[ 0 ].loadAction  = MTLLoadActionDontCare;
@@ -3232,17 +3314,48 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
                         double( c.primitives ) / n, double( c.uploadVerts ) / n / 1000.0, c.drawFrame / n, c.sceneBuild / n, c.render / n,
                         c.clouds / n, c.skyCubemap / n, c.skyAlbedo / n, double( c.skyDraws ) / n,
                         100.0 * double( c.skyReused ) / n );
+        {
+            auto&           ps = PresentStats::Get();
+            std::lock_guard l( ps.m );
+            const double    sec = std::max( 0.001, c.sincePrint / 1000.0 );
+            debug::Warning( "Metal profile: display: {:.0f} Hz reported, sync {}; {:.1f} drawables presented a second, "
+                            "{:.1f} shown a second ({} under 10 ms apart, {} 10-20 ms, {} over 20 ms; {:.2f} ms on average), "
+                            "{} not shown; waiting for drawables {:.2f} ms a second (the longest {:.2f} ms)",
+                            1.0 / impl->RefreshInterval(), impl->layer.displaySyncEnabled ? "on" : "off",
+                            double( ps.presents ) / sec, double( ps.shown ) / sec, ps.under10, ps.under20, ps.over20,
+                            ps.shown ? ps.intervalSum / double( ps.shown ) : 0.0, ps.dropped,
+                            ps.drawableWait / sec, ps.drawableWaitMax );
+            ps.presents = ps.shown = ps.dropped = ps.under10 = ps.under20 = ps.over20 = 0;
+            ps.intervalSum = ps.drawableWait = ps.drawableWaitMax = 0;
+        }
         if( impl->scene )
         {
             const auto& st = impl->scene->lastStats;
             debug::Warning( "Metal profile: scene: {} dynamic geometries ({} triangles, {} vertices), "
                             "{} static geometries, {} TLAS instances, {} geometry infos ({} polished); "
                             "kept: {} geometries ({} triangles) in {} pieces, {} piece rebuilds so far; "
-                            "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles)",
+                            "models instanced: {} ({} kept BLAS-es, {} built so far); rebuilt each frame: {} geometries ({} triangles); "
+                            "moving geometry's BLAS-es so far: {} refitted, {} built ({} moving objects with their own, {} of them "
+                            "kept as they were this frame; {} kept so far, {} built again for tracing)",
                             st.dynamicGeometries, st.dynamicTriangles, st.dynamicVertices,
                             st.staticGeometries, st.tlasInstances, st.geometryInfos, st.polishedGeometries,
                             st.stableGeometries, st.stableTriangles, st.stableCells, st.stableRebuilds,
-                            st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles );
+                            st.instancedModels, st.modelBlases, st.modelBuilds, st.volatileGeometries, st.volatileTriangles,
+                            st.dynamicRefits, st.dynamicBuilds, st.movingObjects, st.objectsKept, st.objectKeeps,
+                            st.objectPolishes );
+            debug::Warning( "Metal profile: TLAS instances: {} pieces of the map, {} objects' own, {} with see-through "
+                            "triangles ({} triangles); tracing test {}",
+                            st.pieceInstances, st.objectInstances, st.alphaInstances, st.alphaTriangles,
+                            st.tracingTest == 0   ? "off"
+                            : st.tracingTest == 1 ? "1 (see-through traced as solid)"
+                            : st.tracingTest == 2 ? "2 (the map in one piece)"
+                            : st.tracingTest == 3 ? "3 (the map in 48 m pieces)"
+                            : st.tracingTest == 4 ? "4 (still objects in the map's pieces)"
+                                                  : "5 (still objects in the map's 48 m pieces)" );
+            debug::Warning( "Metal profile: kept geometry: {} geometries ({}k vertices) not copied this frame, {} of them "
+                            "repeated without their data; {} written into the frame's buffers; the arena {}k of {}k vertices",
+                            st.retainedGeometries, st.retainedVertices / 1000, st.repeatedGeometries, st.retainedCopies,
+                            st.arenaVertices / 1000, st.arenaCapacity / 1000 );
         }
         c.waitFrame = c.startFrame = c.betweenFrames = c.uploads = c.sceneBuild = c.render = c.drawFrame = 0;
         c.clouds = c.skyCubemap = c.skyAlbedo = 0;
@@ -3269,6 +3382,26 @@ void RTGL1::MetalDevice::DrawFrame( const RgDrawFrameInfo* pInfo )
 
     impl->frameStarted = false;
     impl->frameIndex   = ( impl->frameIndex + 1 ) % MAX_FRAMES_IN_FLIGHT;
+}
+
+uint32_t RTGL1::MetalDevice::ThiefRepeatPrimitives( const uint64_t* ids, uint32_t count, uint8_t* repeated )
+{
+    if( !ids || !repeated || count == 0 || impl->lightmapScreenCoverage > 0.0f )
+    {
+        return 0;
+    }
+    const auto t = Impl::CpuProfile::Clock::now();
+    uint32_t   n = 0;
+    for( uint32_t i = 0; i < count; i++ )
+    {
+        repeated[ i ] = impl->sceneManager->RepeatPrimitive( ids[ i ] ) ? 1 : 0;
+        n += repeated[ i ];
+    }
+    const double ms = Impl::CpuProfile::Ms( t, Impl::CpuProfile::Clock::now() );
+    impl->cpu.uploads += ms;
+    impl->cpu.sceneAdd += ms;
+    impl->cpu.primitives += n;
+    return n;
 }
 
 void RTGL1::MetalDevice::UploadMeshPrimitive( const RgMeshInfo*          pMesh,
@@ -3423,7 +3556,11 @@ void RTGL1::MetalDevice::UploadMeshPrimitive( const RgMeshInfo*          pMesh,
     // upload a primitive, potentially loading replacements
     {
         const auto tScene = impl->cpu.enabled ? Impl::CpuProfile::Clock::now() : Impl::CpuProfile::Clock::time_point{};
+        // Thief RT (0028): repeatable later, if nothing but the scene's geometry comes of it
+        impl->scene->SetNextRepeatable( impl->lightmapScreenCoverage <= 0.0f &&
+                                        !pnext::find< RgMeshPrimitiveAttachedLightEXT >( &prim ) );
         impl->sceneManager->UploadPrimitive( impl->frameIndex, mesh, prim );
+        impl->scene->SetNextRepeatable( false );
         if( impl->cpu.enabled )
         {
             impl->cpu.sceneAdd += Impl::CpuProfile::Ms( tScene, Impl::CpuProfile::Clock::now() );

@@ -68,6 +68,8 @@ public:
     void SubmitStaticLights( uint32_t frameIndex, bool isUnderwater, RgColor4DPacked32 underwaterColor ) const;
 
     UploadResult UploadPrimitive( uint32_t frameIndex, const RgMeshInfo& mesh, const RgMeshPrimitiveInfo& primitive );
+    // Thief RT (0028): MetalScene::RepeatDynamic for an object's primitive 0
+    bool RepeatPrimitive( uint64_t uniqueObjectID );
     UploadResult UploadLight( uint32_t           frameIndex,
                               const LightCopy&   light,
                               bool               isStatic,

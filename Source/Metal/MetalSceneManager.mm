@@ -481,6 +481,25 @@ auto RTGL1::MetalSceneManager::UploadPrimitive( uint32_t                   frame
     return UploadPrimitive( frameIndex, mesh, primitive, false );
 }
 
+bool RTGL1::MetalSceneManager::RepeatPrimitive( uint64_t uniqueObjectID )
+{
+    auto mesh           = RgMeshInfo{};
+    mesh.uniqueObjectID = uniqueObjectID;
+    auto prim           = RgMeshPrimitiveInfo{};
+    const auto uniqueID = PrimitiveUniqueID{ mesh, prim };
+    if( dynamicUniqueIDs.contains( uniqueID ) || staticUniqueIDs.contains( uniqueID ) )
+    {
+        return false;
+    }
+    if( !scene.RepeatDynamic( uniqueID, textures ) )
+    {
+        return false;
+    }
+    dynamicUniqueIDs.emplace( uniqueID );
+    worldUploadedInPrevFrame = true;
+    return true;
+}
+
 // Scene::UploadPrimitive
 auto RTGL1::MetalSceneManager::UploadPrimitive( uint32_t                   frameIndex,
                                                 const RgMeshInfo&          mesh,

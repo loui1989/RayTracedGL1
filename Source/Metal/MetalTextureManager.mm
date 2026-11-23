@@ -538,6 +538,7 @@ void RTGL1::MetalTextureManager::MakeMaterial( std::string_view                 
     // TextureManager::InsertMaterial: replace an existing one
     TryDestroyMaterial( std::string( materialName ).c_str() );
     materials.emplace( std::string( materialName ), Material{ .textures = mtextures } );
+    materialsGeneration++;
 }
 
 void RTGL1::MetalTextureManager::Provide( const RgOriginalTextureInfo& info )
@@ -715,6 +716,7 @@ bool RTGL1::MetalTextureManager::TryDestroyMaterial( const char* materialName )
         FreeSlot( index );
     }
     materials.erase( found );
+    materialsGeneration++;
     return true;
 }
 

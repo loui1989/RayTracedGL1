@@ -96,8 +96,10 @@ inline uint32_t GetMaterialBlendFlags( const RgMeshPrimitiveTextureLayersEXT& in
     {
         case 0: return RG_TEXTURE_LAYER_BLEND_TYPE_OPAQUE;
         case 1: return GetMaterialBlendFlags( info.pLayer1 ? &info.pLayer1->blend : nullptr, 1 );
-        case 2: return GetMaterialBlendFlags( info.pLayer2 ? &info.pLayer1->blend : nullptr, 2 );
-        case 3: return GetMaterialBlendFlags( info.pLayer3 ? &info.pLayer1->blend : nullptr, 3 );
+        // (Thief RT: each layer's own blend -- these read layer 1's, and with
+        // no layer 1, from a null pointer: a crash for a layer 3 alone)
+        case 2: return GetMaterialBlendFlags( info.pLayer2 ? &info.pLayer2->blend : nullptr, 2 );
+        case 3: return GetMaterialBlendFlags( info.pLayer3 ? &info.pLayer3->blend : nullptr, 3 );
         default: assert( 0 ); return 0;
     }
 }

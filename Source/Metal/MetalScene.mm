@@ -29,12 +29,25 @@
 #include "Utils.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
 #include <span>
 
 static_assert( sizeof( RgPrimitiveVertex ) == sizeof( RTGL1::ShVertex ),
                "Primitive vertices are copied to the GPU as is" );
+
+namespace RTGL1
+{
+// Thief RT (0032): a test of how the scene is laid out for tracing, from the game's panel
+// (rgThiefTracingTest), to find what makes long rays slow: 0 as it is; 1 see-through (alpha
+// tested) triangles traced as solid; 2 the kept map in one piece (a BLAS for each group, not
+// for each 24 m cell); 3 in 48 m pieces; 4 still objects taken into the map's pieces (not each
+// in a BLAS of its own); 5 both 4 and 3.
+std::atomic< int > g_thiefTracingTest{ 0 };
+}
 
 namespace
 {
@@ -49,6 +62,23 @@ void EnsureBuffer( id< MTLDevice > device, id< MTLBuffer > __strong& buffer, siz
     }
     buffer       = [device newBufferWithLength:bytes + bytes / 2 options:MTLResourceStorageModeShared];
     buffer.label = label;
+}
+
+// Thief RT (0028): as EnsureBuffer, its first 'keep' bytes kept (the arena's)
+void EnsureKeeping( id< MTLDevice > device, id< MTLBuffer > __strong& buffer, size_t bytes, size_t keep, NSString* label )
+{
+    bytes = std::max< size_t >( bytes, 256 );
+    if( buffer && buffer.length >= bytes )
+    {
+        return;
+    }
+    id< MTLBuffer > grown = [device newBufferWithLength:bytes + bytes / 2 options:MTLResourceStorageModeShared];
+    grown.label           = label;
+    if( buffer && keep > 0 )
+    {
+        memcpy( grown.contents, buffer.contents, std::min< size_t >( keep, buffer.length ) );
+    }
+    buffer = grown;
 }
 
 template< typename T >
@@ -194,6 +224,31 @@ uint64_t ContentKey( const RTGL1::ShVertex* v, uint32_t vertexCount, const uint3
     return h ? h : 1;
 }
 
+// the cell a kept geometry is put in for the test (StableCell's three 21-bit fields)
+int64_t TestCell( int64_t cell, int test )
+{
+    if( test == 2 )
+    {
+        return 0;
+    }
+    if( test != 3 && test != 5 )
+    {
+        return cell;
+    }
+    int64_t key = 0;
+    for( int r = 2; r >= 0; r-- )
+    {
+        int64_t q = ( cell >> ( 21 * r ) ) & 0x1FFFFF;
+        if( q & 0x100000 )
+        {
+            q -= 0x200000;
+        }
+        q   = q >= 0 ? q / 2 : -( ( -q + 1 ) / 2 );
+        key = ( key << 21 ) | ( q & 0x1FFFFF );
+    }
+    return key;
+}
+
 // Raze RT: the piece of the map a geometry is in, for the kept BLAS-es (MetalScene::StableGroup):
 // a cell of this many metres, by the middle of its bounds
 constexpr float StableCellSize = 24.0f;
@@ -243,6 +298,21 @@ const RgFloat2D* AccessLayerTexCoords( const RgMeshPrimitiveInfo& info, uint32_t
         }
     }
     return nullptr;
+}
+
+// the texture indices of a geometry instance, from its layers' materials
+void ApplyTextures( RTGL1::ShGeometryInstance& g, const std::array< RTGL1::MaterialTextures, 4 >& layerTextures )
+{
+    using namespace RTGL1;
+    g.texture_base     = layerTextures[ 0 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
+    g.texture_base_ORM = layerTextures[ 0 ].indices[ TEXTURE_OCCLUSION_ROUGHNESS_METALLIC_INDEX ];
+    g.texture_base_N   = layerTextures[ 0 ].indices[ TEXTURE_NORMAL_INDEX ];
+    g.texture_base_E   = layerTextures[ 0 ].indices[ TEXTURE_EMISSIVE_INDEX ];
+    g.texture_base_D   = layerTextures[ 0 ].indices[ TEXTURE_HEIGHT_INDEX ];
+
+    g.texture_layer1 = layerTextures[ 1 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
+    g.texture_layer2 = layerTextures[ 2 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
+    g.texture_layer3 = layerTextures[ 3 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
 }
 
 }
@@ -354,10 +424,10 @@ auto RTGL1::MetalScene::Store( VertexStorage& dst, const RgMeshPrimitiveInfo& pr
     }
     else
     {
-        for( uint32_t i = 0; i < prim.vertexCount; i++ )
-        {
-            dst.indices.push_back( i );
-        }
+        // (Thief RT: filled at once, not pushed one by one -- half a million a frame)
+        const size_t at = dst.indices.size();
+        dst.indices.resize( at + prim.vertexCount );
+        std::iota( dst.indices.begin() + at, dst.indices.end(), 0u );
     }
 
     for( uint32_t layer = 1; layer <= 3; layer++ )
@@ -398,15 +468,24 @@ auto RTGL1::MetalScene::MakeGeomInfo( const RgMeshInfo&          mesh,
 
     g.flags = GetPrimitiveFlags( &mesh, prim, isDynamic );
 
-    g.texture_base     = layerTextures[ 0 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
-    g.texture_base_ORM = layerTextures[ 0 ].indices[ TEXTURE_OCCLUSION_ROUGHNESS_METALLIC_INDEX ];
-    g.texture_base_N   = layerTextures[ 0 ].indices[ TEXTURE_NORMAL_INDEX ];
-    g.texture_base_E   = layerTextures[ 0 ].indices[ TEXTURE_EMISSIVE_INDEX ];
-    g.texture_base_D   = layerTextures[ 0 ].indices[ TEXTURE_HEIGHT_INDEX ];
+    // Thief RT: a few primitives with a layer 3 (the game's light), as found here
+    if( auto l = pnext::find< RgMeshPrimitiveTextureLayersEXT >( &prim ); l && l->pLayer3 )
+    {
+        static int told = 0;
+        if( told < 4 )
+        {
+            ++told;
+            fprintf( stderr,
+                     "RTGL1 (Thief): layer 3 \"%s\" -> texture %u, colour 0x%08x, flags 0x%08x (layer 3 %s)\n",
+                     l->pLayer3->pTextureName ? l->pLayer3->pTextureName : "(none)",
+                     layerTextures[ 3 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ],
+                     unsigned( layerColors[ 3 ] ),
+                     g.flags,
+                     ( g.flags & GEOM_INST_FLAG_EXISTS_LAYER3 ) ? "there" : "MISSING" );
+        }
+    }
 
-    g.texture_layer1 = layerTextures[ 1 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
-    g.texture_layer2 = layerTextures[ 2 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
-    g.texture_layer3 = layerTextures[ 3 ].indices[ TEXTURE_ALBEDO_ALPHA_INDEX ];
+    ApplyTextures( g, layerTextures );
 
     g.colorFactor_base   = layerColors[ 0 ];
     g.colorFactor_layer1 = layerColors[ 1 ];
@@ -451,6 +530,59 @@ void RTGL1::MetalScene::BeginFrame( uint32_t frameIndex )
     }
     replacementInstances.clear();
 
+    // (Thief RT: the kept keys of primitives not given for a while, let go)
+    if( ( ++keptFrame & 255 ) == 0 )
+    {
+        std::erase_if( keptKeys, [ this ]( auto& e ) {
+            if( e.second.frame + 256 < keptFrame )
+            {
+                ReleaseRetained( e.second );
+                return true;
+            }
+            return false;
+        } );
+    }
+
+    // Thief RT (0028): room in the arena for what didn't fit last frame. When most of the
+    // arena is freed ranges, it's emptied instead (its primitives kept again as they come)
+    {
+        // (at most 128 MB of vertices in each frame's buffers)
+        constexpr uint32_t ArenaLimit[ ArenaKindCount ] = { 2u << 20, 6u << 20, 2u << 20, 2u << 20, 2u << 20 };
+        bool               empty                        = false;
+        for( uint32_t k = 0; k < ArenaKindCount; k++ )
+        {
+            if( arenaShortfall[ k ] && arena[ k ].top > ( 1u << 16 ) && uint64_t( arena[ k ].used ) * 2 < arena[ k ].top )
+            {
+                empty = true;
+            }
+        }
+        if( empty )
+        {
+            for( auto& e : keptKeys )
+            {
+                ReleaseRetained( e.second );
+            }
+            for( auto& a : arena )
+            {
+                a = ArenaAllocator{};
+            }
+        }
+        for( uint32_t k = 0; k < ArenaKindCount; k++ )
+        {
+            if( arenaShortfall[ k ] )
+            {
+                const uint64_t want = uint64_t( arena[ k ].top ) + arenaShortfall[ k ];
+                const uint64_t grown =
+                    std::max< uint64_t >( want + want / 4, uint64_t( arenaCapacity[ k ] ) + arenaCapacity[ k ] / 2 );
+                arenaCapacity[ k ] = uint32_t( std::min< uint64_t >( std::max< uint64_t >( grown, 4096 ), ArenaLimit[ k ] ) );
+                arenaShortfall[ k ] = 0;
+            }
+        }
+        EnsureArena( Cur() );
+        retainedCount = retainedVertexCount = retainedIndexCount = repeatedCount = retainedCopyCount = 0;
+        nextRepeatable = false;
+    }
+
     // static geometry is in every frame
     frameGeomCount = 0;
     for( const auto& g : staticGeoms )
@@ -464,39 +596,416 @@ bool RTGL1::MetalScene::AddDynamic( const RgMeshInfo&          mesh,
                                     const PrimitiveUniqueID&   uniqueID,
                                     const MetalTextureManager& textures )
 {
+    const bool repeatable = nextRepeatable;
+    nextRepeatable        = false;
+
     if( frameGeomCount >= MAX_GEOM_INFO_COUNT )
     {
         debug::Error( "Too many geometry infos: the limit is {}", MAX_GEOM_INFO_COUNT );
         return false;
     }
 
-    const auto range = Store( dynamicStorage, prim );
-    if( !range )
+    // (as Store)
+    const bool     indexed    = prim.pIndices && prim.indexCount > 0;
+    const uint32_t indexCount = indexed ? prim.indexCount : prim.vertexCount;
+    if( !prim.pVertices || prim.vertexCount == 0 || indexCount < 3 || indexCount % 3 != 0 )
     {
         return false;
     }
 
-    const Group group = MakeGroup( mesh, prim );
+    const Group group     = MakeGroup( mesh, prim );
+    const bool  unchanged = ( prim.flags & ( 1u << 29 ) ) != 0;
 
-    uint64_t localKey = 0;
+    KeptKeys& kept = keptKeys[ uniqueID ];
+
+    // Thief RT (0028): in the arena while it comes unchanged (RTGL1_METAL_NO_ARENA=1: never)
+    static const bool arenaOn = !std::getenv( "RTGL1_METAL_NO_ARENA" );
+    uint8_t           layers  = 0;
+    for( uint32_t l = 1; l <= 3; l++ )
+    {
+        if( LayerExists( prim, l ) && AccessLayerTexCoords( prim, l ) )
+        {
+            layers |= uint8_t( 1u << ( l - 1 ) );
+        }
+    }
+    if( kept.retained && !( unchanged && kept.retainedVertices == prim.vertexCount &&
+                            kept.retainedIndices == indexCount && kept.layers == layers ) )
+    {
+        ReleaseRetained( kept );
+    }
+    if( arenaOn && unchanged && !kept.retained )
+    {
+        TryRetain( kept, prim.vertexCount, indexCount, layers );
+    }
+
+    VertexRange      range;
+    const ShVertex*  keyVertices;
+    const uint32_t*  keyIndices;
+    if( kept.retained )
+    {
+        FrameData& f = Cur();
+        if( !( kept.written & ( 1u << ring ) ) )
+        {
+            WriteRetained( f, kept, prim );
+            kept.written |= uint8_t( 1u << ring );
+            retainedCopyCount++;
+        }
+        range       = RetainedRange( kept );
+        keyVertices = static_cast< const ShVertex* >( f.vertices.contents ) + kept.at[ ArenaVertices ];
+        keyIndices  = static_cast< const uint32_t* >( f.indices.contents ) + kept.at[ ArenaIndices ];
+        retainedCount++;
+        retainedVertexCount += prim.vertexCount;
+        retainedIndexCount += indexCount;
+    }
+    else
+    {
+        const auto stored = Store( dynamicStorage, prim );
+        if( !stored )
+        {
+            return false;
+        }
+        keyVertices = &dynamicStorage.vertices[ stored->firstVertex ];
+        keyIndices  = &dynamicStorage.indices[ stored->firstIndex ];
+        // after the arena in the frame's buffers
+        range = *stored;
+        range.firstVertex += arenaCapacity[ ArenaVertices ];
+        range.firstIndex += arenaCapacity[ ArenaIndices ];
+        for( uint32_t l = 0; l < 3; l++ )
+        {
+            range.firstVertexLayer[ l ] += arenaCapacity[ ArenaLayer1 + l ];
+        }
+    }
+
+    // Thief RT: the content key and cell of a primitive marked unchanged since it was last
+    // given (the same count of vertices and indices, the same transform) are as they were
+    // then; others are found from the vertices, and kept for next time
+    const bool reuse = unchanged && kept.contentKey != 0 &&
+                       kept.vertexCount == range.vertexCount && kept.indexCount == range.indexCount &&
+                       memcmp( &kept.transform, &mesh.transform, sizeof( RgTransform ) ) == 0;
+    if( !reuse )
+    {
+        kept.contentKey  = ContentKey( keyVertices,
+                                      range.vertexCount,
+                                      keyIndices,
+                                      range.indexCount,
+                                      mesh.transform,
+                                      &kept.localKey );
+        kept.cell        = StableCell( keyVertices, range.vertexCount, mesh.transform );
+        kept.vertexCount = range.vertexCount;
+        kept.indexCount  = range.indexCount;
+        kept.transform   = mesh.transform;
+    }
+    kept.frame = keptFrame;
+
     dynamicGeoms[ group.ToIndex() ].push_back( Geometry{
-        .info            = MakeGeomInfo( mesh, prim, *range, true, textures ),
+        .info            = MakeGeomInfo( mesh, prim, range, true, textures ),
         .uniqueID        = uniqueID,
         .noMotionVectors = !!( prim.flags & RG_MESH_PRIMITIVE_NO_MOTION_VECTORS ),
         .alphaTested     = group.passThrough == PassThrough::AlphaTested,
         .bakedTransform  = mesh.transform,
-        .contentKey      = ContentKey( &dynamicStorage.vertices[ range->firstVertex ],
-                                  range->vertexCount,
-                                  &dynamicStorage.indices[ range->firstIndex ],
-                                  range->indexCount,
-                                  mesh.transform,
-                                  &localKey ),
-        .triangles       = range->indexCount / 3,
-        .cell            = StableCell( &dynamicStorage.vertices[ range->firstVertex ], range->vertexCount, mesh.transform ),
+        .contentKey      = kept.contentKey,
+        .triangles       = range.indexCount / 3,
+        .cell            = kept.cell,
     } );
-    dynamicGeoms[ group.ToIndex() ].back().localKey = localKey;
+    dynamicGeoms[ group.ToIndex() ].back().localKey = kept.localKey;
     frameGeomCount++;
+
+    // as given now, for RepeatDynamic
+    if( kept.retained && repeatable )
+    {
+        kept.repeat              = dynamicGeoms[ group.ToIndex() ].back();
+        kept.groupIndex          = group.ToIndex();
+        kept.materialsGeneration = textures.MaterialsGeneration();
+        const auto* tl           = pnext::find< RgMeshPrimitiveTextureLayersEXT >( &prim );
+        const char* names[ 4 ]   = {
+            prim.pTextureName,
+            tl && tl->pLayer1 ? tl->pLayer1->pTextureName : nullptr,
+            tl && tl->pLayer2 ? tl->pLayer2->pTextureName : nullptr,
+            tl && tl->pLayer3 ? tl->pLayer3->pTextureName : nullptr,
+        };
+        for( int i = 0; i < 4; i++ )
+        {
+            const std::string_view n = Utils::SafeCstr( names[ i ] );
+            if( kept.textureNames[ i ] != n )
+            {
+                kept.textureNames[ i ] = n;
+            }
+        }
+    }
+    else
+    {
+        kept.repeat.reset();
+    }
     return true;
+}
+
+bool RTGL1::MetalScene::RepeatDynamic( const PrimitiveUniqueID& uniqueID, const MetalTextureManager& textures )
+{
+    auto it = keptKeys.find( uniqueID );
+    if( it == keptKeys.end() )
+    {
+        return false;
+    }
+    KeptKeys& kept = it->second;
+    if( !kept.retained || !kept.repeat || frameGeomCount >= MAX_GEOM_INFO_COUNT )
+    {
+        return false;
+    }
+    if( !( kept.written & ( 1u << ring ) ) )
+    {
+        // from another frame's buffers that have it
+        uint32_t from = RingSize;
+        for( uint32_t r = 0; r < RingSize; r++ )
+        {
+            if( r != ring && ( kept.written & ( 1u << r ) ) )
+            {
+                from = r;
+                break;
+            }
+        }
+        if( from == RingSize )
+        {
+            return false;
+        }
+        CopyRetained( frames[ from ], Cur(), kept );
+        kept.written |= uint8_t( 1u << ring );
+        retainedCopyCount++;
+    }
+    // its textures found again, if materials have changed since
+    if( kept.materialsGeneration != textures.MaterialsGeneration() )
+    {
+        std::array< MaterialTextures, 4 > lt;
+        for( int i = 0; i < 4; i++ )
+        {
+            lt[ i ] = textures.GetMaterialTextures( kept.textureNames[ i ].empty() ? nullptr : kept.textureNames[ i ].c_str() );
+        }
+        ApplyTextures( kept.repeat->info, lt );
+        kept.materialsGeneration = textures.MaterialsGeneration();
+    }
+    kept.frame = keptFrame;
+    dynamicGeoms[ kept.groupIndex ].push_back( *kept.repeat );
+    frameGeomCount++;
+    retainedCount++;
+    retainedVertexCount += kept.retainedVertices;
+    retainedIndexCount += kept.retainedIndices;
+    repeatedCount++;
+    return true;
+}
+
+bool RTGL1::MetalScene::ArenaAllocator::Alloc( uint32_t count, uint32_t limit, uint32_t* where )
+{
+    // the first freed range it fits (of the first few)
+    int looked = 0;
+    for( auto it = freeRanges.begin(); it != freeRanges.end() && looked < 256; ++it, ++looked )
+    {
+        if( it->second >= count )
+        {
+            *where                = it->first;
+            const uint32_t restAt = it->first + count;
+            const uint32_t rest   = it->second - count;
+            freeRanges.erase( it );
+            if( rest > 0 )
+            {
+                freeRanges.emplace( restAt, rest );
+            }
+            used += count;
+            return true;
+        }
+    }
+    if( uint64_t( top ) + count > limit )
+    {
+        return false;
+    }
+    *where = top;
+    top += count;
+    used += count;
+    return true;
+}
+
+void RTGL1::MetalScene::ArenaAllocator::Free( uint32_t where, uint32_t count )
+{
+    if( count == 0 )
+    {
+        return;
+    }
+    used -= std::min( used, count );
+    auto it = freeRanges.emplace( where, count ).first;
+    // joined with its neighbours
+    if( auto next = std::next( it ); next != freeRanges.end() && it->first + it->second == next->first )
+    {
+        it->second += next->second;
+        freeRanges.erase( next );
+    }
+    if( it != freeRanges.begin() )
+    {
+        auto prev = std::prev( it );
+        if( prev->first + prev->second == it->first )
+        {
+            prev->second += it->second;
+            freeRanges.erase( it );
+            it = prev;
+        }
+    }
+    // the last one: back to the top
+    if( it->first + it->second == top )
+    {
+        top = it->first;
+        freeRanges.erase( it );
+    }
+}
+
+size_t RTGL1::MetalScene::ArenaElementSize( uint32_t kind )
+{
+    switch( kind )
+    {
+        case ArenaVertices: return sizeof( ShVertex );
+        case ArenaIndices: return sizeof( uint32_t );
+        default: return sizeof( RgFloat2D );
+    }
+}
+
+id< MTLBuffer > __strong& RTGL1::MetalScene::ArenaBuffer( FrameData& f, uint32_t kind )
+{
+    switch( kind )
+    {
+        case ArenaVertices: return f.vertices;
+        case ArenaIndices: return f.indices;
+        default: return f.texCoordLayers[ kind - ArenaLayer1 ];
+    }
+}
+
+void RTGL1::MetalScene::EnsureArena( FrameData& f )
+{
+    static NSString* const labels[ ArenaKindCount ] = {
+        @"Dynamic vertices", @"Dynamic indices", @"Dynamic tex coords", @"Dynamic tex coords", @"Dynamic tex coords",
+    };
+    for( uint32_t k = 0; k < ArenaKindCount; k++ )
+    {
+        const size_t e = ArenaElementSize( k );
+        EnsureKeeping( device, ArenaBuffer( f, k ), size_t( arenaCapacity[ k ] ) * e, size_t( arena[ k ].top ) * e, labels[ k ] );
+    }
+}
+
+bool RTGL1::MetalScene::TryRetain( KeptKeys& k, uint32_t vertexCount, uint32_t indexCount, uint8_t layers )
+{
+    const uint32_t counts[ ArenaKindCount ] = {
+        vertexCount,
+        indexCount,
+        ( layers & 1 ) ? vertexCount : 0u,
+        ( layers & 2 ) ? vertexCount : 0u,
+        ( layers & 4 ) ? vertexCount : 0u,
+    };
+    uint32_t at[ ArenaKindCount ] = {};
+    uint32_t done                 = 0;
+    for( ; done < ArenaKindCount; done++ )
+    {
+        if( counts[ done ] > 0 && !arena[ done ].Alloc( counts[ done ], arenaCapacity[ done ], &at[ done ] ) )
+        {
+            break;
+        }
+    }
+    if( done < ArenaKindCount )
+    {
+        // no room this frame: made for it (and the rest of this primitive) at the next
+        for( uint32_t i = 0; i < done; i++ )
+        {
+            arena[ i ].Free( at[ i ], counts[ i ] );
+        }
+        for( uint32_t i = done; i < ArenaKindCount; i++ )
+        {
+            arenaShortfall[ i ] += counts[ i ];
+        }
+        return false;
+    }
+    k.retained         = true;
+    k.written          = 0;
+    k.layers           = layers;
+    k.retainedVertices = vertexCount;
+    k.retainedIndices  = indexCount;
+    for( uint32_t i = 0; i < ArenaKindCount; i++ )
+    {
+        k.at[ i ] = at[ i ];
+    }
+    return true;
+}
+
+void RTGL1::MetalScene::ReleaseRetained( KeptKeys& k )
+{
+    if( !k.retained )
+    {
+        return;
+    }
+    const uint32_t counts[ ArenaKindCount ] = {
+        k.retainedVertices,
+        k.retainedIndices,
+        ( k.layers & 1 ) ? k.retainedVertices : 0u,
+        ( k.layers & 2 ) ? k.retainedVertices : 0u,
+        ( k.layers & 4 ) ? k.retainedVertices : 0u,
+    };
+    for( uint32_t i = 0; i < ArenaKindCount; i++ )
+    {
+        if( counts[ i ] > 0 )
+        {
+            arena[ i ].Free( k.at[ i ], counts[ i ] );
+        }
+    }
+    k.retained = false;
+    k.written  = 0;
+    k.repeat.reset();
+}
+
+void RTGL1::MetalScene::WriteRetained( FrameData& f, const KeptKeys& k, const RgMeshPrimitiveInfo& prim )
+{
+    auto* v = static_cast< ShVertex* >( f.vertices.contents ) + k.at[ ArenaVertices ];
+    memcpy( v, prim.pVertices, size_t( k.retainedVertices ) * sizeof( ShVertex ) );
+
+    auto* idx = static_cast< uint32_t* >( f.indices.contents ) + k.at[ ArenaIndices ];
+    if( prim.pIndices && prim.indexCount > 0 )
+    {
+        memcpy( idx, prim.pIndices, size_t( k.retainedIndices ) * sizeof( uint32_t ) );
+    }
+    else
+    {
+        std::iota( idx, idx + k.retainedIndices, 0u );
+    }
+
+    for( uint32_t l = 0; l < 3; l++ )
+    {
+        if( k.layers & ( 1u << l ) )
+        {
+            auto* tc = static_cast< RgFloat2D* >( f.texCoordLayers[ l ].contents ) + k.at[ ArenaLayer1 + l ];
+            memcpy( tc, AccessLayerTexCoords( prim, l + 1 ), size_t( k.retainedVertices ) * sizeof( RgFloat2D ) );
+        }
+    }
+}
+
+void RTGL1::MetalScene::CopyRetained( const FrameData& from, FrameData& to, const KeptKeys& k )
+{
+    auto copy = [ & ]( id< MTLBuffer > src, id< MTLBuffer > dst, uint32_t at, uint32_t count, size_t e ) {
+        memcpy( static_cast< uint8_t* >( dst.contents ) + size_t( at ) * e,
+                static_cast< const uint8_t* >( src.contents ) + size_t( at ) * e,
+                size_t( count ) * e );
+    };
+    copy( from.vertices, to.vertices, k.at[ ArenaVertices ], k.retainedVertices, sizeof( ShVertex ) );
+    copy( from.indices, to.indices, k.at[ ArenaIndices ], k.retainedIndices, sizeof( uint32_t ) );
+    for( uint32_t l = 0; l < 3; l++ )
+    {
+        if( k.layers & ( 1u << l ) )
+        {
+            copy( from.texCoordLayers[ l ], to.texCoordLayers[ l ], k.at[ ArenaLayer1 + l ], k.retainedVertices, sizeof( RgFloat2D ) );
+        }
+    }
+}
+
+auto RTGL1::MetalScene::RetainedRange( const KeptKeys& k ) const -> VertexRange
+{
+    return VertexRange{
+        .firstVertex      = k.at[ ArenaVertices ],
+        .firstIndex       = k.at[ ArenaIndices ],
+        .vertexCount      = k.retainedVertices,
+        .indexCount       = k.retainedIndices,
+        .firstVertexLayer = { k.at[ ArenaLayer1 ], k.at[ ArenaLayer2 ], k.at[ ArenaLayer3 ] },
+    };
 }
 
 void RTGL1::MetalScene::BeginStatic( bool withReplacements )
@@ -708,11 +1217,13 @@ void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder > 
                                    id< MTLBuffer >                              indices,
                                    bool                                         bakeTransforms,
                                    bool                                         fastBuild,
-                                   NSString*                                    label )
+                                   NSString*                                    label,
+                                   const BuiltBlas*                             refitFrom )
 {
     if( geoms.empty() )
     {
         dst.blas = nil;
+        dst.refitSig = 0;
         return;
     }
 
@@ -758,6 +1269,70 @@ void RTGL1::MetalScene::BuildBlas( id< MTLAccelerationStructureCommandEncoder > 
     auto* desc                = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
     desc.geometryDescriptors = descs;
     desc.usage = fastBuild ? MTLAccelerationStructureUsagePreferFastBuild : MTLAccelerationStructureUsageNone;
+
+    // Thief RT: the frame's dynamic BLAS (the moving models: guards walking, a door
+    // swinging) was built anew every frame. When it holds the same geometries as the
+    // previous frame's -- the same ids, the same triangle counts, the same kind --
+    // that one is refitted into this one (its tree kept, its boxes moved to the
+    // vertices as they are now): a fraction of a build. Built anew every few frames
+    // still (RTGL1_METAL_REFITS, default 15 refits in a row; 0 never refits), as a
+    // tree refitted ever further from the shape it was built for traces slower.
+    if( refitFrom )
+    {
+        static const uint32_t maxRefits = [] {
+            const char* e = std::getenv( "RTGL1_METAL_REFITS" );
+            return e ? uint32_t( std::max( 0, std::atoi( e ) ) ) : 15u;
+        }();
+        uint64_t sig = 0xcbf29ce484222325ull ^ uint64_t( geoms.size() );
+        auto     mix = [ &sig ]( uint64_t v ) {
+            sig ^= v + 0x9E3779B97F4A7C15ull + ( sig << 6 ) + ( sig >> 2 );
+            sig *= 0x100000001B3ull;
+        };
+        for( const Geometry* g : geoms )
+        {
+            mix( g->uniqueID.objectId );
+            mix( uint64_t( g->uniqueID.primitiveIndex ) | ( uint64_t( g->info.indexCount ) << 32 ) );
+            mix( g->alphaTested ? 1 : 2 );
+        }
+        sig |= 1; // (0: not refittable)
+        if( maxRefits > 0 )
+        {
+            desc.usage |= MTLAccelerationStructureUsageRefit;
+        }
+        if( maxRefits > 0 && refitFrom->blas && refitFrom->blas != dst.blas && refitFrom->refitSig == sig &&
+            refitFrom->refits < maxRefits )
+        {
+            MTLAccelerationStructureSizes sizes = [device accelerationStructureSizesWithDescriptor:desc];
+            if( !dst.blas || dst.blas.size < refitFrom->blas.size )
+            {
+                dst.blas       = [device newAccelerationStructureWithSize:refitFrom->blas.size];
+                dst.blas.label = label;
+            }
+            const NSUInteger need = std::max< NSUInteger >( 256, sizes.refitScratchBufferSize );
+            if( !dst.scratch || dst.scratch.length < need )
+            {
+                dst.scratch       = [device newBufferWithLength:need + need / 2 options:MTLResourceStorageModePrivate];
+                dst.scratch.label = [label stringByAppendingString:@" scratch"];
+            }
+            [enc refitAccelerationStructure:refitFrom->blas
+                                 descriptor:desc
+                                destination:dst.blas
+                              scratchBuffer:dst.scratch
+                        scratchBufferOffset:0];
+            dst.refitSig = sig;
+            dst.refits   = refitFrom->refits + 1;
+            dynamicRefits++;
+            return;
+        }
+        dst.refitSig = maxRefits > 0 ? sig : 0;
+        dst.refits   = 0;
+        dynamicBuilds++;
+    }
+    else
+    {
+        dst.refitSig = 0;
+        dst.refits   = 0;
+    }
 
     id< MTLAccelerationStructure > blas    = dst.blas;
     id< MTLBuffer >                scratch = dst.scratch;
@@ -955,11 +1530,26 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
 {
     FrameData& f = Cur();
 
-    Upload( device, f.vertices, dynamicStorage.vertices, @"Dynamic vertices" );
-    Upload( device, f.indices, dynamicStorage.indices, @"Dynamic indices" );
-    for( int l = 0; l < 3; l++ )
+    // Thief RT (0028): after the arena (kept there as it was)
     {
-        Upload( device, f.texCoordLayers[ l ], dynamicStorage.texCoordLayers[ l ], @"Dynamic tex coords" );
+        auto after = [ & ]( uint32_t kind, const void* src, size_t count, NSString* label ) {
+            const size_t e    = ArenaElementSize( kind );
+            const size_t base = size_t( arenaCapacity[ kind ] ) * e;
+            EnsureKeeping( device, ArenaBuffer( f, kind ), base + count * e, size_t( arena[ kind ].top ) * e, label );
+            if( count > 0 )
+            {
+                memcpy( static_cast< uint8_t* >( ArenaBuffer( f, kind ).contents ) + base, src, count * e );
+            }
+        };
+        after( ArenaVertices, dynamicStorage.vertices.data(), dynamicStorage.vertices.size(), @"Dynamic vertices" );
+        after( ArenaIndices, dynamicStorage.indices.data(), dynamicStorage.indices.size(), @"Dynamic indices" );
+        for( uint32_t l = 0; l < 3; l++ )
+        {
+            after( ArenaLayer1 + l,
+                   dynamicStorage.texCoordLayers[ l ].data(),
+                   dynamicStorage.texCoordLayers[ l ].size(),
+                   @"Dynamic tex coords" );
+        }
     }
 
     // Raze RT: the stable part of the dynamic geometry (see StableGroup), and the rest
@@ -967,7 +1557,13 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     // a geometry joins after coming unchanged this many frames in a row (a second: an
     // animation's frames -- a voxel fire's -- come and go faster, and each one that had
     // joined made a rebuild when it went)...
-    constexpr uint32_t StableMinAge = 60;
+    // (RTGL1_METAL_STABLE_AGE: another number of frames -- a game whose rooms stand still in
+    // world space can take them in sooner, rather than tracing them slowly for a second or more)
+    static const uint32_t StableMinAge = [] {
+        const char* e = std::getenv( "RTGL1_METAL_STABLE_AGE" );
+        const long  v = e ? std::strtol( e, nullptr, 10 ) : 0;
+        return v > 0 ? uint32_t( std::min( v, 100000L ) ) : 60u;
+    }();
     // ...and only when there are this many triangles to keep
     constexpr size_t StableMinTriangles = 2000;
     // a kept BLAS takes in more stable geometry at most this often, when it's 5% more
@@ -1005,6 +1601,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
 
     // a cell's few triangles stay with the rest (a BLAS of its own is not worth it)
     constexpr size_t StableCellMinTriangles = 200;
+    const int        tracingTest            = std::clamp( g_thiefTracingTest.load(), 0, 5 );
+    size_t           pieceInstances = 0, objectInstances = 0, alphaInstances = 0, alphaTriangles = 0;
     (void)StableMinTriangles;
 
     struct CellWork
@@ -1027,11 +1625,13 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
 
         std::vector< uint8_t > used( geoms.size(), 0 );
         std::unordered_map< int64_t, std::vector< uint32_t > > byCell;
+        // (test 4, 5: a still object joins its piece of the map, however small next to it)
+        const bool absorbAll = tracingTest == 4 || tracingTest == 5;
         if( stableOn )
         {
             for( uint32_t i = 0; i < geoms.size(); i++ )
             {
-                byCell[ geoms[ i ].cell ].push_back( i );
+                byCell[ TestCell( geoms[ i ].cell, tracingTest ) ].push_back( i );
             }
         }
         // a kept cell with nothing in it this frame: gone
@@ -1105,9 +1705,10 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
                     candidates += geoms[ i ].triangles;
                 }
             }
-            const bool rebuild = candidates >= StableCellMinTriangles &&
+            const bool rebuild = candidates >= ( absorbAll && sg && !sg->keys.empty() ? size_t( 1 ) : StableCellMinTriangles ) &&
                                  ( !sg || sg->keys.empty() ||
-                                   ( frameCounter - sg->builtFrame >= StableAbsorbFrames && candidates * 20 >= sg->triangles ) );
+                                   ( frameCounter - sg->builtFrame >= StableAbsorbFrames &&
+                                     ( absorbAll || candidates * 20 >= sg->triangles ) ) );
             bool fast = false;
             if( rebuild )
             {
@@ -1161,6 +1762,44 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         }
     }
 
+    size_t lastObjectsKept = 0;   // (this frame's, for the stats)
+
+    // Thief RT: the moving objects of some size out of the shared dynamic BLAS, each into its
+    // own (objectBlas); the small rest stays (RTGL1_METAL_NO_OBJECT_BLAS=1: all stays)
+    std::array< std::vector< std::pair< uint64_t, std::vector< const Geometry* > > >, GroupCount > objectLists;
+    {
+        static const bool  objectsOn          = !std::getenv( "RTGL1_METAL_NO_OBJECT_BLAS" );
+        constexpr uint32_t ObjectMinTriangles = 48;
+        for( uint32_t gi = 0; objectsOn && gi < GroupCount; gi++ )
+        {
+            auto&                                  vol = volatileLists[ gi ];
+            std::unordered_map< uint64_t, uint32_t > tris;
+            for( const Geometry* g : vol )
+            {
+                tris[ g->uniqueID.objectId >> 12 ] += g->triangles;
+            }
+            std::unordered_map< uint64_t, size_t > at;
+            std::vector< const Geometry* >         rest;
+            for( const Geometry* g : vol )
+            {
+                const uint64_t key = g->uniqueID.objectId >> 12;
+                if( tris[ key ] < ObjectMinTriangles )
+                {
+                    rest.push_back( g );
+                    continue;
+                }
+                auto it = at.find( key );
+                if( it == at.end() )
+                {
+                    it = at.emplace( key, objectLists[ gi ].size() ).first;
+                    objectLists[ gi ].push_back( { key, {} } );
+                }
+                objectLists[ gi ][ it->second ].second.push_back( g );
+            }
+            vol.swap( rest );
+        }
+    }
+
     // dynamic BLAS-es
     if( std::ranges::any_of( dynamicGeoms, []( const auto& g ) { return !g.empty(); } ) )
     {
@@ -1168,7 +1807,69 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         enc.label                                        = @"Build dynamic BLAS";
         for( uint32_t gi = 0; gi < GroupCount; gi++ )
         {
-            BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS" );
+            BuildBlas( enc, f.dynamicBlas[ gi ], volatileLists[ gi ], f.vertices, f.indices, true, true, @"Dynamic BLAS",
+                       &Prev().dynamicBlas[ gi ] );
+            static const BuiltBlas noneBefore{};
+            static const bool      keepOn = !std::getenv( "RTGL1_METAL_NO_OBJECT_KEEP" );
+            // (unchanged this many frames after a refit or a fast build: built for tracing)
+            constexpr uint32_t PolishAfter = 30;
+            for( const auto& [ key, list ] : objectLists[ gi ] )
+            {
+                ObjectBlas& ob = objectBlas[ gi ][ key ];
+                uint64_t    sig = 0x84222325cbf29ce4ull ^ uint64_t( list.size() );
+                for( const Geometry* g : list )
+                {
+                    sig ^= g->contentKey + 0x9E3779B97F4A7C15ull + ( sig << 6 ) + ( sig >> 2 );
+                    sig *= 0x100000001B3ull;
+                    sig ^= uint64_t( g->alphaTested ? 1 : 2 ) | ( uint64_t( g->info.indexCount ) << 8 );
+                }
+                const bool live = ob.useSlot < RingSize && ob.lastFrame + 1 == frameCounter &&
+                                  ob.slots[ ob.useSlot ].blas != nil;
+                // a slot no frame in flight reads (one of RingSize is always free: the frames in
+                // flight are the RingSize - 1 before this one, each using one)
+                auto freeSlot = [ & ]() {
+                    for( uint32_t k = 0; k < RingSize; k++ )
+                    {
+                        const uint32_t s = ( ring + k ) % RingSize;
+                        if( s != ob.useSlot && ( ob.usedFrame[ s ] == 0 || ob.usedFrame[ s ] + RingSize <= frameCounter ) )
+                        {
+                            return s;
+                        }
+                    }
+                    return ring;   // (not reached)
+                };
+                if( keepOn && live && sig == ob.contentSig )
+                {
+                    ob.sameFrames++;
+                    if( !ob.polished && ob.sameFrames >= PolishAfter )
+                    {
+                        const uint32_t s = freeSlot();
+                        BuildBlas( enc, ob.slots[ s ], list, f.vertices, f.indices, true, false, @"Object BLAS (kept)", nullptr );
+                        ob.useSlot  = s;
+                        ob.polished = true;
+                        objectPolishes++;
+                    }
+                    else
+                    {
+                        objectKeeps++;
+                        lastObjectsKept++;
+                    }
+                }
+                else
+                {
+                    // refitted from the one before, if it had one (else built, refittable)
+                    const uint32_t   s    = keepOn ? freeSlot() : ring;
+                    const bool       had  = live && ob.useSlot != s;
+                    const BuiltBlas* from = had ? &ob.slots[ ob.useSlot ] : &noneBefore;
+                    BuildBlas( enc, ob.slots[ s ], list, f.vertices, f.indices, true, true, @"Object BLAS", from );
+                    ob.useSlot    = s;
+                    ob.contentSig = sig;
+                    ob.sameFrames = 0;
+                    ob.polished   = false;
+                }
+                ob.usedFrame[ ob.useSlot ] = frameCounter;
+                ob.lastFrame               = frameCounter;
+            }
             for( const Geometry* g : instancedLists[ gi ] )
             {
                 ModelBlas& mb = modelBlas[ gi ][ g->localKey ];
@@ -1195,7 +1896,8 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
     {
         for( auto& b : f.dynamicBlas )
         {
-            b.blas = nil;
+            b.blas     = nil;
+            b.refitSig = 0;
         }
     }
 
@@ -1284,9 +1986,18 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         auto inst                 = MTLAccelerationStructureUserIDInstanceDescriptor{};
         inst.transformationMatrix = ToPackedFloat4x3( transform );
         // VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR, VK_GEOMETRY_INSTANCE_FORCE_(NO_)OPAQUE_BIT_KHR
+        const bool seeThrough = pt == PassThrough::AlphaTested && tracingTest != 1;
+        if( pt == PassThrough::AlphaTested )
+        {
+            alphaInstances++;
+            for( const Geometry* g : geoms )
+            {
+                alphaTriangles += g->triangles;
+            }
+        }
         inst.options = MTLAccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise |
-                       ( pt == PassThrough::AlphaTested ? MTLAccelerationStructureInstanceOptionNonOpaque
-                                                        : MTLAccelerationStructureInstanceOptionOpaque ) |
+                       ( seeThrough ? MTLAccelerationStructureInstanceOptionNonOpaque
+                                    : MTLAccelerationStructureInstanceOptionOpaque ) |
                        // (Raze RT: the rays cull the triangles seen from behind, but only the
                        // one-sided group's -- see ShGlobalUniform::rayCullBackFaces)
                        ( pt == PassThrough::OpaqueOneSided ? MTLAccelerationStructureInstanceOptionNone
@@ -1346,14 +2057,46 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
         for( const CellWork& cw : cellWork[ gi ] )
         {
             addInstance( cw.sg->blas.blas, group, 0, IdentityTransform, cw.list );
+            pieceInstances++;
         }
         addInstance( f.dynamicBlas[ gi ].blas, group, 0, IdentityTransform, volatileLists[ gi ] );
+        for( const auto& [ key, list ] : objectLists[ gi ] )
+        {
+            auto it = objectBlas[ gi ].find( key );
+            if( it != objectBlas[ gi ].end() )
+            {
+                addInstance( it->second.slots[ it->second.useSlot % RingSize ].blas, group, 0, IdentityTransform, list );
+                objectInstances++;
+            }
+        }
         for( const Geometry* g : instancedLists[ gi ] )
         {
             auto it = modelBlas[ gi ].find( g->localKey );
             if( it != modelBlas[ gi ].end() )
             {
                 addInstance( it->second.blas.blas, group, 0, g->bakedTransform, std::span< const Geometry* const >( &g, 1 ) );
+            }
+        }
+    }
+    // the moving objects not seen for a while: gone (their slots kept until the frames
+    // in flight are done with them)
+    for( auto& om : objectBlas )
+    {
+        for( auto it = om.begin(); it != om.end(); )
+        {
+            if( frameCounter - it->second.lastFrame > 120 )
+            {
+                for( BuiltBlas& b : it->second.slots )
+                {
+                    StableGroup tmp;
+                    tmp.blas = b;
+                    RetireStable( tmp );
+                }
+                it = om.erase( it );
+            }
+            else
+            {
+                ++it;
             }
         }
     }
@@ -1486,17 +2229,36 @@ bool RTGL1::MetalScene::Build( id< MTLCommandBuffer > cmd, uint32_t rayCullMaskW
             }
         }
         lastStats.stableRebuilds = stableRebuilds;
+        lastStats.dynamicRefits  = dynamicRefits;
+        lastStats.dynamicBuilds  = dynamicBuilds;
+        lastStats.objectsKept    = lastObjectsKept;
+        lastStats.tracingTest     = tracingTest;
+        lastStats.pieceInstances  = pieceInstances;
+        lastStats.objectInstances = objectInstances;
+        lastStats.alphaInstances  = alphaInstances;
+        lastStats.alphaTriangles  = alphaTriangles;
+        lastStats.objectKeeps    = objectKeeps;
+        lastStats.objectPolishes = objectPolishes;
         for( uint32_t gi = 0; gi < GroupCount; gi++ )
         {
             lastStats.instancedModels += instancedLists[ gi ].size();
             lastStats.modelBlases += modelBlas[ gi ].size();
             lastStats.volatileGeometries += volatileLists[ gi ].size();
+            lastStats.movingObjects += objectLists[ gi ].size();
             for( const Geometry* g : volatileLists[ gi ] )
             {
                 lastStats.volatileTriangles += g->triangles;
             }
         }
         lastStats.modelBuilds = modelBuilds;
+        lastStats.dynamicVertices += retainedVertexCount;
+        lastStats.dynamicTriangles += retainedIndexCount / 3;
+        lastStats.retainedGeometries = retainedCount;
+        lastStats.retainedVertices   = retainedVertexCount;
+        lastStats.repeatedGeometries = repeatedCount;
+        lastStats.retainedCopies     = retainedCopyCount;
+        lastStats.arenaVertices      = arena[ ArenaVertices ].used;
+        lastStats.arenaCapacity      = arenaCapacity[ ArenaVertices ];
     }
     tlasDesc.instanceDescriptorBuffer = f.instances;
     tlasDesc.instanceDescriptorType   = MTLAccelerationStructureInstanceDescriptorTypeUserID;

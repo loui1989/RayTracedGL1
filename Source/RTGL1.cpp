@@ -19,7 +19,8 @@
 // SOFTWARE.
 
 #ifdef RG_USE_METAL
-    #include "Metal/MetalDevice.h"
+    #include <atomic>
+#include "Metal/MetalDevice.h"
 #else
     #include "VulkanDevice.h"
 #endif
@@ -303,8 +304,46 @@ void RGAPI_CALL rgUtilExportAsTGA( const void* pPixels,
 
 
 
+#ifdef RG_USE_METAL
+namespace RTGL1
+{
+extern std::atomic< int > g_thiefTracingTest;
+extern std::atomic< bool > g_thiefSunShadowPass;
+}
 extern "C"
 {
+// Thief RT (patch 0032): a test of how the scene is laid out for tracing (see MetalScene.mm)
+__attribute__( ( visibility( "default" ) ) ) void rgThiefTracingTest( int test )
+{
+    RTGL1::g_thiefTracingTest.store( test );
+}
+// Thief RT (patch 0033): the half-size moon shadow pass on or off (see MetalPathTracer.mm)
+__attribute__( ( visibility( "default" ) ) ) void rgThiefSunShadowPass( int on )
+{
+    RTGL1::g_thiefSunShadowPass.store( on != 0 );
+}
+}
+#endif
+
+extern "C"
+{
+#ifdef RG_USE_METAL
+// Thief RT (patch 0028): primitives given in a frame before as unchanged (1u << 29), given
+// again as they were then, without their data: repeated[ i ] says whether ids[ i ] was (a
+// primitive that wasn't must be given whole with rgUploadMeshPrimitive). Primitive index 0
+// of each id. Returns how many were.
+__attribute__( ( visibility( "default" ) ) ) uint32_t rgThiefRepeatPrimitives( const uint64_t* ids,
+                                                                                uint32_t        count,
+                                                                                uint8_t*        repeated )
+{
+    for( uint32_t i = 0; repeated && i < count; i++ )
+    {
+        repeated[ i ] = 0;
+    }
+    return Call( [ & ]( Device& d ) { return d.ThiefRepeatPrimitives( ids, count, repeated ); } );
+}
+#endif
+
 RGAPI RgResult RGCONV RGAPI_CALL rgCreateInstance( const RgInstanceCreateInfo* pInfo,
                                                    RgInterface*                pInterface )
 {

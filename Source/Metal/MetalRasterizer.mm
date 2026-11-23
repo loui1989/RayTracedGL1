@@ -957,6 +957,25 @@ bool RTGL1::MetalRasterizer::RenderSkyCubemap( id< MTLCommandBuffer >   cmd,
             skyCubemapReused = true;
             return true;
         }
+        // Thief RT: a sky that changes every frame -- the game draws one face of its sky anew
+        // each frame, and its clouds drift -- drawn into the cubemap every few frames, not every
+        // frame (2 ms of the GPU's frame, every frame). The cubemap is the sky the rays find
+        // (reflections, the light it gives): a few frames' lag in a drifting cloud is not seen.
+        // The view's own sky is drawn every frame, as before. RTGL1_METAL_SKY_INTERVAL: frames
+        // (4; 1, every change).
+        {
+            static const uint32_t interval = [] {
+                const char* e = std::getenv( "RTGL1_METAL_SKY_INTERVAL" );
+                const int   v = e ? std::atoi( e ) : 4;
+                return uint32_t( v < 1 ? 1 : v > 30 ? 30 : v );
+            }();
+            if( cacheOn && !force && skyCubemapKey != 0 && skyCubemapAge + 1 < interval )
+            {
+                skyCubemapAge++;
+                skyCubemapReused = true;
+                return true;
+            }
+        }
         skyCubemapKey = k;
         skyCubemapAge = 0;
     }

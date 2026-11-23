@@ -232,6 +232,9 @@ private:
     id< MTLTexture > hudlessImage{ nil };
 
     id< MTLBuffer > tonemapping;
+    // Thief RT: the luminance histogram of each frame, copied for the CPU (rgThiefSeenLight)
+    id< MTLBuffer > thiefHistogram[ 3 ]{};
+    uint64_t        thiefHistogramFrame{ 0 };
     id< MTLBuffer > lpmParams[ MAX_FRAMES_IN_FLIGHT ];
     id< MTLBuffer > indirectReservoirs[ MAX_FRAMES_IN_FLIGHT ];
     uint32_t        reservoirsWidth{ 0 };

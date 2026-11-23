@@ -33,6 +33,7 @@
 #include "Generated/ShaderCommonC.h"
 
 #include <array>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -72,6 +73,14 @@ public:
                      const PrimitiveUniqueID&   uniqueID,
                      const MetalTextureManager& textures );
 
+    // Thief RT (0028): whether the next AddDynamic's primitive may be repeated (RepeatDynamic):
+    // nothing else came of its upload (no light attached to it, no rasterized copy)
+    void SetNextRepeatable( bool r ) { nextRepeatable = r; }
+    // Thief RT (0028): a primitive given before with RT_PRIMITIVE_UNCHANGED (kept in the arena),
+    // again as it was last given, without its data. False if it can't be (not kept, its record
+    // gone): then it must be given whole.
+    bool RepeatDynamic( const PrimitiveUniqueID& uniqueID, const MetalTextureManager& textures );
+
     // Static geometry: between BeginStatic and SubmitStatic.
     // If 'withReplacements', the replacements are also reset, and must be cached again.
     void BeginStatic( bool withReplacements );
@@ -109,6 +118,20 @@ public:
         size_t stableGeometries, stableTriangles, stableRebuilds, stableCells;
         // models instanced with their kept BLAS (modelBlas), the rest rebuilt each frame
         size_t instancedModels, modelBlases, modelBuilds, volatileGeometries, volatileTriangles;
+        // Thief RT: the frames' dynamic BLAS-es refitted and built since the last stats
+        size_t dynamicRefits, dynamicBuilds;
+        size_t movingObjects;   // with a BLAS of their own (objectBlas)
+        size_t objectsKept;     // of them, as they were (their BLAS used again as it was), this frame
+        size_t objectKeeps, objectPolishes;   // since the start
+        // Thief RT (0028): of the dynamic geometry, kept in the arena (not copied this frame),
+        // repeated without its data, and copied into the frame's buffers this frame
+        size_t retainedGeometries, retainedVertices, repeatedGeometries, retainedCopies;
+        size_t arenaVertices, arenaCapacity;   // in use, and room for (vertices)
+        // Thief RT (0032): the tracing test in force (rgThiefTracingTest), and the TLAS instances
+        // by kind: kept pieces of the map, moving objects' own, and those with see-through
+        // (alpha tested) triangles, with how many triangles
+        int    tracingTest;
+        size_t pieceInstances, objectInstances, alphaInstances, alphaTriangles;
     };
     Stats lastStats{};
 
@@ -198,6 +221,10 @@ private:
         id< MTLAccelerationStructure > blas{ nil };
         id< MTLBuffer >                scratch{ nil };
         id< MTLBuffer >                transforms{ nil };
+        // Thief RT: what it holds (its geometries' ids, triangle counts, kind), when
+        // built refittable (0: not), and how many refits since it was last built
+        uint64_t refitSig{ 0 };
+        uint32_t refits{ 0 };
     };
 
     // geometries of a group, in the BLAS order
@@ -278,7 +305,8 @@ private:
                     id< MTLBuffer >                              indices,
                     bool                                         bakeTransforms,
                     bool                                         fastBuild,
-                    NSString*                                    label );
+                    NSString*                                    label,
+                    const BuiltBlas*                             refitFrom = nullptr );
 
     // Raze RT: stable geometry. A game that sends all of its world as dynamic geometry every
     // frame (Raze: a Build map's walls and floors) had all of it rebuilt into a BLAS each frame,
@@ -320,6 +348,76 @@ private:
     std::vector< ReplacementInstance > replacementInstances;
     size_t                             frameGeomCount{ 0 };
 
+    // Thief RT: a primitive the application marks unchanged since it last gave it
+    // (RT_PRIMITIVE_UNCHANGED, 1u << 29): its content key and cell are as they were then,
+    // not found again from its every vertex each frame
+    //
+    // Thief RT (0028): and while it comes unchanged, its vertices, indices and texture
+    // coordinates are kept in the arena -- the first part of each frame's dynamic buffers,
+    // the same place in all of them: written into a frame's buffers once, not copied every
+    // frame (the frame's other dynamic data follows the arena). Given as it was last given
+    // (RepeatDynamic), it's its Geometry again, and nothing of it is copied at all.
+    enum ArenaKind : uint32_t
+    {
+        ArenaVertices,
+        ArenaIndices,
+        ArenaLayer1,
+        ArenaLayer2,
+        ArenaLayer3,
+        ArenaKindCount,
+    };
+    struct KeptKeys
+    {
+        uint64_t    contentKey{ 0 };
+        uint64_t    localKey{ 0 };
+        int64_t     cell{ 0 };
+        uint32_t    vertexCount{ 0 };
+        uint32_t    indexCount{ 0 };
+        uint32_t    frame{ 0 };
+        RgTransform transform{};
+
+        // in the arena: where (elements), how much, which layers, and in which frames'
+        // buffers it's been written (a bit for each of the ring)
+        bool     retained{ false };
+        uint8_t  written{ 0 };
+        uint8_t  layers{ 0 };
+        uint32_t at[ ArenaKindCount ]{};
+        uint32_t retainedVertices{ 0 };
+        uint32_t retainedIndices{ 0 };
+        // as last given, for RepeatDynamic: its geometry and group, and the names its
+        // textures were found by (found again when the materials have changed since)
+        std::optional< Geometry > repeat;
+        uint32_t                  groupIndex{ 0 };
+        uint64_t                  materialsGeneration{ 0 };
+        std::string               textureNames[ 4 ];
+    };
+    struct ArenaAllocator
+    {
+        uint32_t                       top{ 0 };
+        uint32_t                       used{ 0 };
+        std::map< uint32_t, uint32_t > freeRanges; // where -> how many
+        bool                           Alloc( uint32_t count, uint32_t limit, uint32_t* at );
+        void                           Free( uint32_t at, uint32_t count );
+    };
+    bool         TryRetain( KeptKeys& k, uint32_t vertexCount, uint32_t indexCount, uint8_t layers );
+    void         ReleaseRetained( KeptKeys& k );
+    void         WriteRetained( FrameData& f, const KeptKeys& k, const RgMeshPrimitiveInfo& prim );
+    void         CopyRetained( const FrameData& from, FrameData& to, const KeptKeys& k );
+    VertexRange  RetainedRange( const KeptKeys& k ) const;
+    id< MTLBuffer > __strong& ArenaBuffer( FrameData& f, uint32_t kind );
+    static size_t ArenaElementSize( uint32_t kind );
+    void         EnsureArena( FrameData& f );
+    std::array< ArenaAllocator, ArenaKindCount > arena;
+    // this frame's room in the arena (elements); the frame's other dynamic data is after it
+    std::array< uint32_t, ArenaKindCount >       arenaCapacity{};
+    // what didn't fit this frame: room made for it at the next frame's start
+    std::array< uint64_t, ArenaKindCount >       arenaShortfall{};
+    bool                                         nextRepeatable{ false };
+    size_t                                       retainedCount{ 0 }, retainedVertexCount{ 0 }, retainedIndexCount{ 0 };
+    size_t                                       repeatedCount{ 0 }, retainedCopyCount{ 0 };
+    std::unordered_map< PrimitiveUniqueID, KeptKeys > keptKeys;
+    uint32_t                                          keptFrame{ 0 };
+
     // static: replacements, then the static scene, in the same buffers;
     // static scene's vertex ranges are relative to the end of replacements' data (staticBase)
     VertexStorage                       replacementStorage;
@@ -359,6 +457,9 @@ private:
     std::unordered_map< uint64_t, uint32_t > keyAge; // a content key -> frames in a row it came
     uint32_t                                 frameCounter{ 0 };
     size_t                                   stableRebuilds{ 0 };
+    // Thief RT: dynamic BLAS refits and builds (see BuildBlas's refitFrom)
+    size_t                                   dynamicRefits{ 0 };
+    size_t                                   dynamicBuilds{ 0 };
     // Raze RT: a model that moves but keeps its shape (a spinning voxel pickup, a swinging
     // door's voxel) changed its content key every frame: rebuilt with the dynamic BLAS each
     // frame. By its shape alone (Geometry::localKey): a BLAS in its own space, kept while it
@@ -369,6 +470,32 @@ private:
         uint32_t  lastFrame{ 0 };
     };
     std::array< std::unordered_map< uint64_t, ModelBlas >, GroupCount > modelBlas;
+    // Thief RT: each moving object of some size (a guard, a swinging door) its own BLAS,
+    // one for each frame of the ring, each refitted from the one of the frame before
+    // (BuildBlas's refitFrom): the frame's one shared dynamic BLAS was built anew whenever
+    // anything in it changed -- a guard coming into view, a particle -- and with it every
+    // other moving thing. Its key: the game's object (Thief RT gives an object's parts the
+    // ids 0x500000000 + object << 12 + part, so objectId >> 12).
+    //
+    // An object that comes the same as the frame before (a statue, a crate, a tree kept out of
+    // view for its shadow -- most of them, most frames) keeps the BLAS it had: nothing is
+    // refitted or built for it. So the BLAS a frame uses is the slot last written (useSlot),
+    // not the frame's ring's; a changed one is written into a slot no frame in flight uses
+    // (usedFrame), refitted from the one before. Unchanged a while after a refit or a fast
+    // build, it is built once more for tracing. (RTGL1_METAL_NO_OBJECT_KEEP=1: refitted each
+    // frame, as before.)
+    struct ObjectBlas
+    {
+        std::array< BuiltBlas, RingSize > slots;
+        std::array< uint32_t, RingSize >  usedFrame{};   // 0: never
+        uint32_t                          useSlot{ ~0u };
+        uint32_t                          lastFrame{ 0 };
+        uint64_t                          contentSig{ 0 };
+        uint32_t                          sameFrames{ 0 };
+        bool                              polished{ false };
+    };
+    size_t objectKeeps{ 0 }, objectPolishes{ 0 };
+    std::array< std::unordered_map< uint64_t, ObjectBlas >, GroupCount > objectBlas;
     std::unordered_map< uint64_t, uint32_t >                             localAge;
     size_t                                                               modelBuilds{ 0 };
 };

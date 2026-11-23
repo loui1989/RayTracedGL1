@@ -84,6 +84,9 @@ public:
     void FreeAllImportedMaterials( bool freeReplacements );
 
     auto GetMaterialTextures( const char* materialName ) const -> MaterialTextures;
+    // Thief RT (0028): changes whenever a name may find other textures than before (a material
+    // made, replaced or destroyed): what was found by name before that is to be found again
+    uint64_t MaterialsGeneration() const { return materialsGeneration; }
     auto GetTexturesForLayers( const RgMeshPrimitiveInfo& primitive ) const -> std::array< MaterialTextures, 4 >;
     auto GetColorForLayers( const RgMeshPrimitiveInfo& primitive ) const -> std::array< RgColor4DPacked32, 4 >;
 
@@ -196,6 +199,7 @@ private:
     std::vector< Slot >                                    slots;
     std::vector< uint32_t >                                freeSlots;
     rgl::string_map< Material >                            materials;
+    uint64_t                                               materialsGeneration{ 1 };
     rgl::string_map< ImportedType >                        importedMaterials;
     rgl::unordered_map< uint32_t, id< MTLSamplerState > > samplers;
 

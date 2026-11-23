@@ -35,8 +35,34 @@
 #include "RgException.h"
 #include "Utils.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
+
+// Thief RT: what the view shows, for the game (its eyes getting used to the
+// dark): the share of the frame's pixels darker than the exposure's darkest
+// (the histogram's first bin), and the adapted average luminance. Two frames late.
+namespace ThiefSeenLight
+{
+std::atomic< float >    below{ 0.0f };
+std::atomic< float >    average{ 0.0f };
+std::atomic< uint32_t > frames{ 0 };
+}
+// Thief RT: this library's world surfaces take the game's lightmap as layer 3,
+// for the ambient fill (HitInfo.inl). The game gives it only if this is here.
+extern "C" __attribute__( ( visibility( "default" ) ) ) uint32_t rgThiefGameLight( void )
+{
+    return 1;
+}
+
+extern "C" __attribute__( ( visibility( "default" ) ) ) uint32_t rgThiefSeenLight( float* belowShare, float* avgLuminance )
+{
+    if( belowShare )
+        *belowShare = ThiefSeenLight::below.load();
+    if( avgLuminance )
+        *avgLuminance = ThiefSeenLight::average.load();
+    return ThiefSeenLight::frames.load();
+}
 
 namespace
 {
@@ -193,6 +219,11 @@ RTGL1::MetalPathTracer::MetalPathTracer( id< MTLDevice >        _device,
 
     tonemapping = [device newBufferWithLength:sizeof( ShTonemapping ) options:MTLResourceStorageModePrivate];
     tonemapping.label = @"Tonemapping";
+    for( auto& h : thiefHistogram )
+    {
+        h = [device newBufferWithLength:sizeof( ShTonemapping ) options:MTLResourceStorageModeShared];
+        memset( h.contents, 0, sizeof( ShTonemapping ) );
+    }
 
     // Debug: RTGL1_METAL_PROFILE=1, an encoder per pass, for the GPU timeline
     profiling = MetalProfiler::Enabled();
@@ -205,6 +236,12 @@ RTGL1::MetalPathTracer::MetalPathTracer( id< MTLDevice >        _device,
 }
 
 // Debug: RTGL1_METAL_PROFILE=1 makes a compute encoder per pass, for MetalProfiler's GPU timeline
+namespace RTGL1
+{
+// Thief RT (0033): run ThiefSunShadow before the direct light (see TracePrimary)
+std::atomic< bool > g_thiefSunShadowPass{ false };
+}
+
 void RTGL1::MetalPathTracer::BeginPass( id< MTLCommandBuffer > cmd, __strong id< MTLComputeCommandEncoder >& enc, NSString* name )
 {
     if( !profiling )
@@ -266,11 +303,46 @@ id RTGL1::MetalPathTracer::PrepareTemporalScaler( uint32_t inputWidth,
         d.inputContentMaxScale          = dynScaleMax;
     }
 
+    // Thief RT: one that can't be made (a frame just as the output size changes) is not an
+    // exception -- thrown in the middle of a frame, it left the frame never ended and the game
+    // hung. The frame is scaled up plainly instead (see Render); the same sizes are tried again
+    // only now and then, not every frame.
+    static uint32_t failedSizes[ 4 ]{};
+    static float    failedDyn[ 2 ]{};
+    static uint32_t failedSkips = 0;
+    const bool      sameFailure = failedSizes[ 0 ] == inputWidth && failedSizes[ 1 ] == inputHeight &&
+                             failedSizes[ 2 ] == outputWidth && failedSizes[ 3 ] == outputHeight &&
+                             failedDyn[ 0 ] == dynScaleMin && failedDyn[ 1 ] == dynScaleMax;
+    if( sameFailure && ( ++failedSkips % 120 ) != 0 )
+    {
+        return nil;
+    }
+
     temporalScaler = [d newTemporalScalerWithDevice:device];
     if( !temporalScaler )
     {
-        throw RgException( RG_RESULT_GRAPHICS_API_ERROR, "Can't create MetalFX temporal scaler" );
+        if( !sameFailure )
+        {
+            debug::Warning( "Can't create MetalFX temporal scaler for {}x{} -> {}x{} (dynamic {:.3f} .. {:.3f}): "
+                            "scaled up plainly",
+                            inputWidth,
+                            inputHeight,
+                            outputWidth,
+                            outputHeight,
+                            dynScaleMin,
+                            dynScaleMax );
+        }
+        failedSizes[ 0 ] = inputWidth;
+        failedSizes[ 1 ] = inputHeight;
+        failedSizes[ 2 ] = outputWidth;
+        failedSizes[ 3 ] = outputHeight;
+        failedDyn[ 0 ]   = dynScaleMin;
+        failedDyn[ 1 ]   = dynScaleMax;
+        failedSkips      = 0;
+        scalerInputWidth = scalerInputHeight = scalerOutputWidth = scalerOutputHeight = 0;
+        return nil;
     }
+    failedSizes[ 0 ] = failedSizes[ 1 ] = failedSizes[ 2 ] = failedSizes[ 3 ] = 0;
     scalerInputWidth   = inputWidth;
     scalerInputHeight  = inputHeight;
     scalerOutputWidth  = outputWidth;
@@ -601,6 +673,24 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
     shaders.Dispatch( enc, "RtInitialReservoirs", {}, b, p.width, p.height );
     EndPass( enc );
 
+    // Thief RT (0033): the moon's (the sun's) shadow, a pixel of each 2x2 block a frame, for
+    // RtRaygenDirect to read (ThiefSunShadow.metal, in the game's shaders); asked for by the
+    // game (rgThiefSunShadowPass). A shader that does not build turns it off.
+    if( g_thiefSunShadowPass.load() )
+    {
+        BeginPass( cmd, enc, @"Moon shadows (half size)" );
+        try
+        {
+            shaders.Dispatch( enc, "ThiefSunShadow", {}, b, ( p.width + 1 ) / 2, ( p.height + 1 ) / 2 );
+        }
+        catch( const std::exception& e )
+        {
+            debug::Warning( "Metal backend: the moon shadow pass is off: {}", e.what() );
+            g_thiefSunShadowPass.store( false );
+        }
+        EndPass( enc );
+    }
+
     BeginPass( cmd, enc, @"Direct illumination" );
     shaders.Dispatch( enc, "RtRaygenDirect", {}, b, p.width, p.height );
     EndPass( enc );
@@ -708,6 +798,20 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
 
     // Tonemapping::CalculateExposure
     {
+        // Thief RT: the frame two before this one (done: two frames in flight), read now
+        {
+            const ShTonemapping* h =
+                static_cast< const ShTonemapping* >( thiefHistogram[ ( thiefHistogramFrame + 1 ) % 3 ].contents );
+            double total = 0;
+            for( uint32_t i = 0; i < 256; i++ )
+                total += h->histogram[ i ];
+            if( total > 0 )
+            {
+                ThiefSeenLight::below.store( float( h->histogram[ 0 ] / total ) );
+                ThiefSeenLight::average.store( h->avgLuminance );
+                ThiefSeenLight::frames.fetch_add( 1 );
+            }
+        }
         BeginPass( cmd, enc, @"Exposure" );
         shaders.DispatchThreadgroups( enc,
                                       "CmLuminanceHistogram",
@@ -715,6 +819,30 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
                                       b,
                                       GroupCount( p.width, COMPUTE_LUM_HISTOGRAM_GROUP_SIZE_X ),
                                       GroupCount( p.height, COMPUTE_LUM_HISTOGRAM_GROUP_SIZE_Y ) );
+        EndPass( enc );
+        // the histogram, before the average clears it (and last frame's average)
+        if( !profiling )
+        {
+            [enc endEncoding];
+            enc = nil;
+        }
+        {
+            id< MTLBlitCommandEncoder > blit = MetalProfiler::Blit( cmd );
+            blit.label                       = @"Histogram for the CPU";
+            [blit copyFromBuffer:tonemapping
+                    sourceOffset:0
+                        toBuffer:thiefHistogram[ thiefHistogramFrame % 3 ]
+               destinationOffset:0
+                            size:sizeof( ShTonemapping )];
+            [blit endEncoding];
+            thiefHistogramFrame++;
+        }
+        if( !profiling )
+        {
+            enc       = MetalProfiler::Compute( cmd );
+            enc.label = @"RTGL1 exposure";
+        }
+        BeginPass( cmd, enc, @"Exposure average" );
         shaders.DispatchThreadgroups( enc, "CmLuminanceAvg", {}, b, 1, 1 );
         EndPass( enc );
     }
@@ -799,7 +927,19 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         EndPass( enc );
     };
 
-    if( p.upscaler == Upscaler::MetalFX )
+    // Thief RT: the temporal scaler first -- if it can't be made, the frame takes the plain way
+    id< MTLFXTemporalScaler > preparedScaler = nil;
+    bool                      useMetalFX     = p.upscaler == Upscaler::MetalFX;
+    if( useMetalFX && !metalFXDenoiser )
+    {
+        // (dynamic resolution: the input textures are the framebuffers, the frame their top left part)
+        preparedScaler = p.dynScaleMax > 0 ? PrepareTemporalScaler( p.allocWidth, p.allocHeight, p.upscaledWidth,
+                                                                    p.upscaledHeight, p.dynScaleMin, p.dynScaleMax )
+                                           : PrepareTemporalScaler( p.width, p.height, p.upscaledWidth, p.upscaledHeight );
+        useMetalFX = preparedScaler != nil;
+    }
+
+    if( useMetalFX )
     {
         if( !profiling )
         {
@@ -853,11 +993,7 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         }
         else
         {
-            // (dynamic resolution: the input textures are the framebuffers, the frame their top left part)
-            id< MTLFXTemporalScaler > scaler =
-                p.dynScaleMax > 0 ? PrepareTemporalScaler( p.allocWidth, p.allocHeight, p.upscaledWidth, p.upscaledHeight,
-                                                           p.dynScaleMin, p.dynScaleMax )
-                                  : PrepareTemporalScaler( p.width, p.height, p.upscaledWidth, p.upscaledHeight );
+            id< MTLFXTemporalScaler > scaler = preparedScaler;
             scaler.colorTexture       = final;
             scaler.depthTexture       = framebuffers.Get( FB_IMAGE_INDEX_DEPTH_NDC, frameIndex );
             scaler.motionTexture      = framebuffers.Get( FB_IMAGE_INDEX_MOTION_DLSS, frameIndex );
@@ -905,7 +1041,8 @@ id< MTLTexture > RTGL1::MetalPathTracer::Render( id< MTLCommandBuffer >         
         [enc setComputePipelineState:blitScaled];
         [enc setTexture:final atIndex:0];
         [enc setTexture:ping atIndex:1];
-        [enc setSamplerState:p.upscaler == Upscaler::Linear ? linearSampler : nearestSampler atIndex:0];
+        // (linear also for a MetalFX frame scaled up plainly)
+        [enc setSamplerState:p.upscaler == Upscaler::Nearest ? nearestSampler : linearSampler atIndex:0];
         const float srcSize[] = { float( p.width ) / float( final.width ), float( p.height ) / float( final.height ) };
         [enc setBytes:srcSize length:sizeof( srcSize ) atIndex:0];
         [enc dispatchThreads:MTLSizeMake( ping.width, ping.height, 1 ) threadsPerThreadgroup:MTLSizeMake( 8, 8, 1 )];

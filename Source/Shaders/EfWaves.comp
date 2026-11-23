@@ -20,20 +20,6 @@
 
 #version 460
 
-// Raze RT: HEAT HAZE, in place of the screen waves (Raze has no use for those: the
-// engine sends this effect only for the heat). The air over a fire shimmers -- this
-// bends the picture behind each fire, in a column rising from it, rippling upward.
-//
-// The fires come with the smoke puffs (the global uniform), at the END of the list,
-// each marked by a density of -1e6 (Smoke.h skips them): .xyz its middle (metres),
-// albedo .r its radius, .g the height of the hot air over it, .b its strength.
-//
-// Only what is BEHIND the fire is bent: the picture's depth against the fire's -- a
-// thing in front of a fire (the player's own gun, a pillar) stays sharp, as it would.
-//
-// push.custom: amplitude = how strongly (rt_heat_haze), speed = how fast it ripples
-// (rt_heat_haze_speed).
-
 struct EffectWaves_PushConst
 {
     float amplitude;
@@ -44,159 +30,28 @@ struct EffectWaves_PushConst
 #define EFFECT_PUSH_CONST_T EffectWaves_PushConst
 #include "EfSimple.inl"
 
-#define HEAT_MAX 16
-
-// each fire, once per group of pixels (its place on screen, by the first threads)
-shared vec4 s_base[ HEAT_MAX ];  // xy: its middle on screen (pixels), z: its radius there (pixels), w: its distance (m)
-shared vec4 s_axis[ HEAT_MAX ];  // xy: up its column on screen (unit), z: the column's length (pixels), w: its strength
-shared vec4 s_world[ HEAT_MAX ]; // xyz: unused, w: its radius (m)
-shared uint s_valid[ HEAT_MAX ];
-
-vec2 heat_toPix( vec3 p, out float w )
+float getMult(const ivec2 pix, float speed, float mult)
 {
-    const vec4 c = globalUniform.projection * globalUniform.view * vec4( p, 1.0 );
-    w            = c.w;
-    return ( c.xy / max( c.w, 0.0001 ) * 0.5 + 0.5 ) * vec2( effect_getFramebufSize() );
-}
-
-// the distance (m) from the camera to what this pixel shows
-float heat_pixelDistance( ivec2 pix )
-{
-    const vec2  uv = ( vec2( pix ) + 0.5 ) / vec2( effect_getFramebufSize() );
-    const ivec2 rs = ivec2( int( globalUniform.renderWidth ), int( globalUniform.renderHeight ) );
-    const ivec2 rp = clamp( ivec2( uv * vec2( rs ) ), ivec2( 0 ), rs - 1 );
-    const float z  = texelFetch( framebufDepthNdc_Sampler, rp, 0 ).x;
-    const vec4  wp = globalUniform.invView * globalUniform.invProjection * vec4( uv * 2.0 - 1.0, z, 1.0 );
-    return length( wp.xyz / wp.w - globalUniform.cameraPosition.xyz );
-}
-
-// the source picture between pixels (pixel coordinates, centres at .5)
-vec3 heat_loadBilinear( vec2 p )
-{
-    p -= 0.5;
-    const ivec2 i = ivec2( floor( p ) );
-    const vec2  f = p - vec2( i );
-    const vec3  a = effect_loadFromSource( i );
-    const vec3  b = effect_loadFromSource( i + ivec2( 1, 0 ) );
-    const vec3  c = effect_loadFromSource( i + ivec2( 0, 1 ) );
-    const vec3  d = effect_loadFromSource( i + ivec2( 1, 1 ) );
-    return mix( mix( a, b, f.x ), mix( c, d, f.x ), f.y );
+    return sin(
+        globalUniform.time * mult * speed * 4  + 
+        pix.x / float(effect_getFramebufSize().x) * mult * 10);
 }
 
 void main()
 {
-    const ivec2 pix = ivec2( gl_GlobalInvocationID.x, gl_GlobalInvocationID.y );
-    const float H   = float( effect_getFramebufSize().y );
-
-    // the fires on screen: the first threads of the group work one out each
-    const uint li = gl_LocalInvocationIndex;
-    if( li < HEAT_MAX )
-    {
-        s_valid[ li ] = 0u;
-        const uint n  = globalUniform.smokeCount;
-        if( li < n )
-        {
-            const uint i  = n - 1u - li; // (from the end of the list)
-            const vec4 ad = globalUniform.smokeAlbedoDensity[ i ];
-            if( ad.a < -1e5 )
-            {
-                const vec3 pos = globalUniform.smokePuffs[ i ].xyz;
-                float      w0, w1;
-                const vec2 B = heat_toPix( pos, w0 );
-                vec2       T = heat_toPix( pos + vec3( 0.0, 0.0, max( ad.g, 0.1 ) ), w1 );
-                if( w0 > 0.15 )
-                {
-                    if( w1 <= 0.15 )
-                    {
-                        T = B + vec2( 0.0, -1.0 );
-                    }
-                    const float rpx = ad.r * abs( globalUniform.projection[ 1 ][ 1 ] ) / w0 * 0.5 * H;
-                    if( rpx > 1.5 )
-                    {
-                        const vec2  ax = T - B;
-                        const float al = length( ax );
-                        s_base[ li ]   = vec4( B, rpx, length( pos - globalUniform.cameraPosition.xyz ) );
-                        s_axis[ li ]   = vec4( al > 0.001 ? ax / al : vec2( 0.0, -1.0 ), al, ad.b );
-                        s_world[ li ]  = vec4( pos, ad.r );
-                        s_valid[ li ]  = 1u;
-                    }
-                }
-            }
-        }
-    }
-    barrier();
-
-    if( !effect_isPixValid( pix ) )
+    const ivec2 pix = ivec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y);
+    
+    if (!effect_isPixValid(pix))
     {
         return;
     }
 
-    const vec2  P    = vec2( pix ) + 0.5;
-    const float t    = globalUniform.time * push.custom.speed;
-    const float amp0 = push.custom.amplitude * 0.0032 * H;
-    vec2        off  = vec2( 0.0 );
-    float       pd   = -1.0;
+    float tx = getMult(pix, push.custom.speed, push.custom.multX);
+    tx *= push.custom.amplitude * push.custom.multX * effect_getFramebufSize().x;
 
-    for( uint k = 0; k < HEAT_MAX; k++ )
-    {
-        if( s_valid[ k ] == 0u )
-        {
-            continue;
-        }
-        const vec4  base = s_base[ k ];
-        const vec4  axis = s_axis[ k ];
-        const vec2  ax   = axis.xy;
-        const vec2  side = vec2( -ax.y, ax.x );
-        const vec2  rel  = P - base.xy;
-        const float u    = dot( rel, ax );
-        const float v    = dot( rel, side );
-        const float s    = clamp( u / max( axis.z, 0.001 ), 0.0, 1.0 );
-        // the column widens as it rises
-        const float wid  = base.z * ( 1.0 + 0.6 * s );
-        const float d    = length( rel - ax * clamp( u, 0.0, axis.z ) ) / wid;
-        if( d >= 1.0 )
-        {
-            continue;
-        }
+    float ty = getMult(pix, push.custom.speed, 1.0);
+    ty *= push.custom.amplitude * effect_getFramebufSize().y;
 
-        // only what is behind the fire
-        if( pd < 0.0 )
-        {
-            pd = heat_pixelDistance( pix );
-        }
-        const float rw  = s_world[ k ].w;
-        const float occ = smoothstep( base.w - rw * 1.2, base.w - rw * 0.3, pd );
-        if( occ <= 0.0 )
-        {
-            continue;
-        }
-
-        // strongest a little over the flame, gone at the column's top and edges
-        const float across = 1.0 - smoothstep( 0.35, 1.0, d );
-        const float along  = ( 1.0 - s ) * ( 0.7 + 0.3 * smoothstep( 0.0, 0.3, s ) );
-        // a small (far) fire shimmers as much as its size on screen lets it
-        const float amp = amp0 * axis.w * min( 1.0, base.z / ( 0.06 * H ) );
-
-        // the ripple, in the fire's own size (so it is the same at any distance) and
-        // rising up the column
-        const float qu = u / base.z, qv = v / base.z;
-        const float dv = sin( qu * 5.0 - t * 7.0 + sin( qv * 3.1 + t * 2.3 ) * 1.3 ) * 0.7 +
-                         sin( qu * 11.0 + qv * 4.0 - t * 12.0 ) * 0.3;
-        const float du = cos( qu * 6.3 + qv * 2.1 - t * 8.5 ) * 0.5;
-
-        off += ( side * dv + ax * du ) * ( amp * across * along * occ );
-    }
-
-    off *= getProgress();
-    const float lim = amp0 * 3.0;
-    if( dot( off, off ) > lim * lim )
-    {
-        off *= lim / length( off );
-    }
-    if( dot( off, off ) < 0.0025 )
-    {
-        effect_storeUnmodifiedToTarget( pix );
-        return;
-    }
-    effect_storeToTarget( heat_loadBilinear( P + off ), pix );
+    vec3 c = effect_loadFromSource(ivec2(pix.x + getProgress() * tx, pix.y + getProgress() * ty));
+    effect_storeToTarget(c, pix);
 }

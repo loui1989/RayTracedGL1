@@ -48,6 +48,8 @@ public:
     MetalDevice& operator=( MetalDevice&& other ) noexcept = delete;
 
     void UploadMeshPrimitive( const RgMeshInfo* pMesh, const RgMeshPrimitiveInfo* pPrimitive );
+    // Thief RT (0028): rgThiefRepeatPrimitives
+    uint32_t ThiefRepeatPrimitives( const uint64_t* ids, uint32_t count, uint8_t* repeated );
     void UploadLensFlare( const RgLensFlareInfo* pInfo );
     void SpawnFluid( const RgSpawnFluidInfo* pInfo );
 

@@ -720,14 +720,46 @@ ShHitInfo getHitInfoBounce(
     h.albedo = processAlbedo(tr.geometryInstanceFlags, texCoords, tr.layerColorTextures, tr.layerColors, lod);
 #endif
 
+#if !SUPPRESS_TEXLAYERS
+    // Thief RT: the game's own light. Layer 3 of a world surface is the game's
+    // lightmap -- its baked light, the light the light gem goes by -- and layer
+    // 3's colour says how to use it: rgb, the colour of the ambient fill where
+    // the game has it dark; alpha, two 4-bit amounts: high, how far the surface
+    // follows the game's light, low, how grey the fill goes in the dark.
+    // Followed, a surface the game has dark is itself darker on screen -- the
+    // path tracer's lamps reach farther than the game's did, and its exposure
+    // evens things out, so a spot the light gem calls black looked as lit as
+    // the floor beside it. (Not in the bounce light: the light in the room
+    // stays as traced.)
+    bool  thiefGameLight = false;
+    float thiefLit = 1.0, thiefFollow = 0.0, thiefGrey = 0.0;
+    vec3  thiefTint = vec3( 1.0 ), thiefAlbedo = h.albedo;
+    if( ( tr.geometryInstanceFlags & GEOM_INST_FLAG_EXISTS_LAYER3 ) != 0 &&
+        tr.layerColorTextures[ 3 ] != MATERIAL_NO_TEXTURE )
+    {
+        const vec3  lumaW = vec3( 0.2126, 0.7152, 0.0722 );
+        const vec4  param = unpackUintColor( tr.layerColors[ 3 ] );
+        const uint  bits  = uint( param.a * 255.0 + 0.5 );
+        thiefGameLight = true;
+        thiefFollow    = float( bits >> 4 ) / 15.0;
+        thiefGrey      = float( bits & 15u ) / 15.0;
+        thiefTint      = param.rgb / max( dot( param.rgb, lumaW ), 0.05 );
+        const vec3 lm  = getTextureSampleLod( tr.layerColorTextures[ 3 ], texCoords[ 3 ], 0.0 ).rgb;
+        thiefLit       = smoothstep( 0.04, 0.30, dot( lm, lumaW ) );
+    #if defined( HITINFO_INL_PRIM ) || defined( HITINFO_INL_RFL )
+        const float dark = 1.0 - thiefLit;
+        h.albedo = mix( h.albedo, vec3( dot( h.albedo, lumaW ) ), 0.5 * thiefGrey * dark );
+        h.albedo *= mix( vec3( 1.0 ), thiefTint, 0.5 * dark );
+        h.albedo *= mix( 1.0, 1.0 - 0.65 * thiefFollow, dark );
+        h.albedo = clamp( h.albedo, vec3( 0.0 ), vec3( 1.0 ) );
+    #endif
+    }
+#endif
+
 
 
     // METALLIC-ROUGHNESS
 
-    // Raze RT: the _orm's R, occlusion (1 = open). Darkens the surface's own glow --
-    // the faint ambient a Build game's rooms are given -- in its cracks and joints:
-    // light with no direction shows no bumps, but cavities still read as cavities
-    float occlusion = 1.0;
     if( tr.occlusionRougnessMetallicTexture != MATERIAL_NO_TEXTURE )
     {
         const vec3 orm =
@@ -739,7 +771,6 @@ ShHitInfo getHitInfoBounce(
             getTextureSampleLod( tr.occlusionRougnessMetallicTexture, texCoords[ 0 ], lod ).xyz;
     #endif
 
-        occlusion   = orm[ 0 ];
         h.roughness = stripRoughness ? 1.0 : orm[ 1 ];
         h.metallic  = stripMetallic ? 0.0 : orm[ 2 ];
         // a polished texture's _orm roughness is its mirror mask: smooth texels mirror, rough
@@ -884,7 +915,23 @@ ShHitInfo getHitInfoBounce(
     }
     else
     {
-        emission = h.albedo * tr.emissiveMult * occlusion;
+        emission = h.albedo * tr.emissiveMult;
+
+#if !SUPPRESS_TEXLAYERS
+        // Thief RT: the level's ambient fill as the game's own light has it
+        // (thiefLit, below the albedo): less where the game has it dark, more
+        // where it is lit, cool and greyer in the dark -- from the surface's
+        // own colour, not the darkened one.
+        if( thiefGameLight )
+        {
+            const vec3  lumaW  = vec3( 0.2126, 0.7152, 0.0722 );
+            const float amount = mix( 1.0, 0.3 + 1.2 * thiefLit, thiefFollow );
+            const vec3  tint   = mix( thiefTint, vec3( 1.0 ), thiefLit );
+            const vec3  albedo =
+                mix( thiefAlbedo, vec3( dot( thiefAlbedo, lumaW ) ), thiefGrey * ( 1.0 - thiefLit ) );
+            emission = albedo * tr.emissiveMult * amount * tint;
+        }
+#endif
     }
 
     // Doom64-RT: lava as an AREA light source.

@@ -23,8 +23,10 @@
 #include "DebugPrint.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,15 +34,33 @@ namespace
 {
 
 constexpr uint32_t MaxEncoders = 384;
-// sampled frames are seconds apart, but the GPU might still resolve the previous one
-constexpr uint32_t RingSize = 3;
+// Thief RT: every frame is sampled (to catch the slow ones, below), so a buffer comes
+// round again a few frames on: enough of them that a frame's is read before it's reused
+constexpr uint32_t RingSize = 8;
 
 struct Frame
 {
     id< MTLCounterSampleBuffer > samples{ nil };
     // to read their labels when resolving: the labels are set after the encoders are made
     std::vector< id >            encoders;
+    // printed whatever it took (the frame every 2 seconds); else only if it's a spike
+    bool                         always{ false };
 };
+
+// Thief RT: a frame that takes the GPU far longer than the frames before it (a hitch of a
+// second or so) is printed whole -- "Metal GPU spike" -- with what it took and the
+// average: the timeline every 2 seconds rarely caught one.
+struct Spikes
+{
+    std::mutex                            m;
+    double                                avgMs{ 0.0 };
+    uint64_t                              frames{ 0 };
+    uint32_t                              told{ 0 };
+    std::chrono::steady_clock::time_point start{ std::chrono::steady_clock::now() };
+    std::chrono::steady_clock::time_point lastTold{};
+    uint32_t                              toldThisSecond{ 0 };
+};
+Spikes g_spikes;
 
 struct State
 {
@@ -86,6 +106,7 @@ std::string LabelOf( id enc )
 void Print( const Frame& f )
 {
     const NSUInteger count = f.encoders.size();
+    const bool       always = f.always;
     if( count == 0 )
     {
         return;
@@ -146,8 +167,52 @@ void Print( const Frame& f )
         busy += curEnd - curStart;
     }
 
-    RTGL1::debug::Warning( "Metal GPU timeline: {:.2f} ms from the first encoder's start to the last one's end, "
+    // a spike: far longer than the average so far (once there is one to go by)
+    const double span = ms( last - first );
+    bool         spike = false;
+    double       avg   = 0.0;
+    double       at    = 0.0;
+    {
+        std::lock_guard l( g_spikes.m );
+        avg = g_spikes.avgMs;
+        const auto now = std::chrono::steady_clock::now();
+        at             = std::chrono::duration< double >( now - g_spikes.start ).count();
+        if( g_spikes.frames >= 120 && span > std::max( avg * 1.8, avg + 12.0 ) && g_spikes.told < 120 )
+        {
+            // (a few of a hitch's frames, not all of them)
+            if( now - g_spikes.lastTold > std::chrono::seconds( 1 ) )
+            {
+                g_spikes.lastTold       = now;
+                g_spikes.toldThisSecond = 0;
+            }
+            if( g_spikes.toldThisSecond < 3 )
+            {
+                g_spikes.toldThisSecond++;
+                g_spikes.told++;
+                spike = true;
+            }
+        }
+        // (a spike counts for little in the average: it's to tell the next one by)
+        const double w     = g_spikes.frames < 60 ? 0.2 : 0.03;
+        const double taken = std::min( span, std::max( avg, 1.0 ) * 3.0 );
+        g_spikes.avgMs     = g_spikes.frames == 0 ? span : g_spikes.avgMs + ( taken - g_spikes.avgMs ) * w;
+        g_spikes.frames++;
+    }
+    if( !always && !spike )
+    {
+        return;
+    }
+    // (a spike under its own name: the timeline every 2 seconds is averaged into the game's log)
+    const char* kind = always ? "Metal GPU timeline" : "Metal GPU spike";
+    if( !always )
+    {
+        RTGL1::debug::Warning( "{}: a frame took {:.2f} ms, the frames before it {:.2f} on average ({:.1f} s since start)",
+                               kind, span, avg, at );
+    }
+
+    RTGL1::debug::Warning( "{}: {:.2f} ms from the first encoder's start to the last one's end, "
                            "{:.2f} ms with any encoder running, {} encoders",
+                           kind,
                            ms( last - first ),
                            ms( busy ),
                            entries.size() );
@@ -157,12 +222,13 @@ void Print( const Frame& f )
     {
         if( e.start > prevEnd && e.start - prevEnd >= 200'000 )
         {
-            RTGL1::debug::Warning( "Metal GPU timeline: +{:>7.2f}  {:>6.2f} ms  (no encoder: MetalFX, or waiting)",
+            RTGL1::debug::Warning( "{}: +{:>7.2f}  {:>6.2f} ms  (no encoder: MetalFX, or waiting)",
+                                   kind,
                                    ms( prevEnd - first ),
                                    ms( e.start - prevEnd ) );
         }
         RTGL1::debug::Warning(
-            "Metal GPU timeline: +{:>7.2f}  {:>6.2f} ms  {}", ms( e.start - first ), ms( e.end - e.start ), e.name );
+            "{}: +{:>7.2f}  {:>6.2f} ms  {}", kind, ms( e.start - first ), ms( e.end - e.start ), e.name );
         prevEnd = std::max( prevEnd, e.end );
     }
 }
@@ -219,12 +285,18 @@ bool RTGL1::MetalProfiler::Enabled()
 void RTGL1::MetalProfiler::BeginFrame( bool sample )
 {
     g_state.frame = nullptr;
-    if( g_state.enabled && sample )
+    // (every frame: a spike is told when it comes; RTGL1_METAL_PROFILE_SPIKES=0, only the sampled ones)
+    static const bool every = [] {
+        const char* e = std::getenv( "RTGL1_METAL_PROFILE_SPIKES" );
+        return !( e && e[ 0 ] == '0' );
+    }();
+    if( g_state.enabled && ( sample || every ) )
     {
         g_state.ring  = ( g_state.ring + 1 ) % RingSize;
         g_state.frame = std::make_shared< Frame >();
         g_state.frame->samples = g_state.rings[ g_state.ring ];
         g_state.frame->encoders.reserve( 128 );
+        g_state.frame->always = sample;
     }
 }
 
@@ -281,11 +353,14 @@ id< MTLRenderCommandEncoder > RTGL1::MetalProfiler::Render( id< MTLCommandBuffer
         pass.sampleBufferAttachments[ 0 ].sampleBuffer = nil;
         return [cmd renderCommandEncoderWithDescriptor:pass];
     }
+    // Thief RT: the fragment stage's start to its end -- a pass's vertex stage starts as soon
+    // as it can, and its fragments then wait for what the pass reads (the swapchain blit waited
+    // for the frame's post-processing: 2 ms of waiting, shown as its time)
     auto* s                       = pass.sampleBufferAttachments[ 0 ];
     s.sampleBuffer                = g_state.frame->samples;
-    s.startOfVertexSampleIndex    = a;
+    s.startOfVertexSampleIndex    = MTLCounterDontSample;
     s.endOfVertexSampleIndex      = MTLCounterDontSample;
-    s.startOfFragmentSampleIndex  = MTLCounterDontSample;
+    s.startOfFragmentSampleIndex  = a;
     s.endOfFragmentSampleIndex    = b;
 
     id< MTLRenderCommandEncoder > enc = [cmd renderCommandEncoderWithDescriptor:pass];

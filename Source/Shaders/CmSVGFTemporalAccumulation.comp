@@ -123,8 +123,6 @@ void main()
     const vec4 unfilteredRayInfo= texelFetch(framebufViewDirection_Sampler, pix, 0);
 
     const ivec3 chRenderArea    = getCheckerboardedRenderArea(              pix);
-    // (where the reprojected pixels may be: the previous frame's size, dynamic resolution)
-    const ivec3 chRenderAreaPrev = getCheckerboardedRenderArea_Prev(        pix);
     const float motionZ         = texelFetch(framebufMotion_Sampler,        pix, 0).z;
     const float depth           = texelFetch(framebufDepthWorld_Sampler,    pix, 0).r;
     const vec3 normal           = texelFetchNormal(                         pix);
@@ -168,7 +166,7 @@ void main()
                 vec3 normalPrev = texelFetchNormal_Prev(xy);
 
                 bool isConsistent = 
-                    testPixInRenderArea(xy, chRenderAreaPrev) &&
+                    testPixInRenderArea(xy, chRenderArea) &&
                     testReprojectedDepth(depth, depthPrev, motionZ) &&
                     testReprojectedNormal(normal, normalPrev);
 
@@ -276,7 +274,7 @@ void main()
                     vec3 normalPrev = texelFetchNormal_Prev(xy_Spec);
 
                     bool isConsistent = 
-                        testPixInRenderArea(xy_Spec, chRenderAreaPrev) &&
+                        testPixInRenderArea(xy_Spec, chRenderArea) &&
                         testReprojectedDepth(depth, depthPrev, motionZ) &&
                         testReprojectedNormal(normal, normalPrev);
 
@@ -432,7 +430,7 @@ void main()
                         continue;
                     }
                     const ivec2 qPrev = ivec2(floor(getPrevScreenPos(framebufMotion_Sampler, q)));
-                    if (!testPixInRenderArea(qPrev, chRenderAreaPrev) || isFirstPersonPrev(qPrev))
+                    if (!testPixInRenderArea(qPrev, chRenderArea) || isFirstPersonPrev(qPrev))
                     {
                         continue;
                     }

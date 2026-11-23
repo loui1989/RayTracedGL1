@@ -154,20 +154,10 @@ void updateCombinedReservoirIndirect_newSurf(inout ReservoirIndirect combined, c
 
 #ifdef DESC_SET_GLOBAL_UNIFORM
 #ifdef DESC_SET_RESTIR_INDIRECT
-// (rows of the framebuffers' width -- not the frame's: the same place for a pixel
-// whatever size a frame is rendered at, dynamic resolution)
-#define RG_ALLOC_RENDER_WIDTH uint( imageSize( framebufIndirectReservoirsInitial ).x )
-
 bool rgi_TryGetPixOffset(const ivec2 pix, out uint offset)
 {
-    offset = uint(pix.y) * RG_ALLOC_RENDER_WIDTH + uint(pix.x);
-    return pix.x >= 0 && pix.y >= 0 && pix.x < int(globalUniform.renderWidth) && pix.y < int(globalUniform.renderHeight);
-}
-
-bool rgi_TryGetPixOffset_Prev(const ivec2 pix, out uint offset)
-{
-    offset = uint(pix.y) * RG_ALLOC_RENDER_WIDTH + uint(pix.x);
-    return pix.x >= 0 && pix.y >= 0 && pix.x < int(RG_PREV_RENDER_WIDTH) && pix.y < int(RG_PREV_RENDER_HEIGHT);
+    offset = pix.y * uint(globalUniform.renderWidth) + pix.x;
+    return offset >= 0 && offset < uint(globalUniform.renderWidth) * uint(globalUniform.renderHeight);
 }
 
 void restirIndirect_StoreInitialSample(const ivec2 pix, const SampleIndirect s, float oneOverSourcePdf)
@@ -270,7 +260,7 @@ ReservoirIndirect restirIndirect_LoadReservoir_Prev(const ivec2 pix)
     ReservoirIndirect r;
 
     uint offset;
-    if (!rgi_TryGetPixOffset_Prev(pix, offset))
+    if (!rgi_TryGetPixOffset(pix, offset))
     {
         r = emptyReservoirIndirect();
         return r;

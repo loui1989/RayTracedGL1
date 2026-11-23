@@ -105,11 +105,9 @@ void main()
     }
 
     const vec2  motionCurToPrev = texelFetch( framebufMotion_Sampler, pix, 0 ).rg;
-    const ivec2 curSize         = ivec2( globalUniform.renderWidth, globalUniform.renderHeight );
-    // (the previous frame's pixels: its size, dynamic resolution)
-    const ivec2 size            = ivec2( RG_PREV_RENDER_WIDTH, RG_PREV_RENDER_HEIGHT );
+    const ivec2 size            = ivec2( globalUniform.renderWidth, globalUniform.renderHeight );
     const ivec2 prevRegular =
-        ivec2( floor( ( ( vec2( regularPix ) + 0.5 ) / vec2( curSize ) + motionCurToPrev ) * vec2( size ) ) );
+        ivec2( floor( ( ( vec2( regularPix ) + 0.5 ) / vec2( size ) + motionCurToPrev ) * vec2( size ) ) );
 
     // the mask's history
     if( reactive < 1.0 && all( greaterThanEqual( prevRegular, ivec2( 0 ) ) ) && all( lessThan( prevRegular, size ) ) )
@@ -131,7 +129,7 @@ void main()
                     continue;
                 }
 
-                const vec4 vp = texelFetch( framebufVisibilityBuffer_Prev_Sampler, getCheckerboardPix_Prev( p ), 0 );
+                const vec4 vp = texelFetch( framebufVisibilityBuffer_Prev_Sampler, getCheckerboardPix( p ), 0 );
                 if( floatBitsToUint( vp[ 0 ] ) == UINT32_MAX || floatBitsToUint( vp[ 1 ] ) == UINT32_MAX )
                 {
                     continue;

@@ -555,117 +555,6 @@ float traceVisibility(const Surface surf, const vec3 lightPosition, uint lightIn
     const bool isShadowed = traceShadowRay(surf.instCustomIndex, start, end, ignoreFirstPersonViewer);
     return float(!isShadowed);
 }
-
-#if LIGHT_SAMPLE_METHOD == LIGHT_SAMPLE_METHOD_DIRECT
-// Raze RT: light through glass takes its colour (a stained glass window throws its
-// colours on the floor). Glass is not in the shadow mask -- a shadow ray goes through
-// it as if it were not there -- so a ray that reached its light is traced again, through
-// the glass only, and each pane it crosses filters it by its texel there, as a view
-// through the glass is filtered (the hue, and less light through the darker texels:
-// the leading). Up to four panes. On with globalUniform.sunLeakDebugMul > 0.5 (Raze RT's
-// rt_glass_shadows: the header has no field of its own for it).
-vec3 glassTransmittance(vec3 start, vec3 end)
-{
-    vec3  dir  = end - start;
-    float dist = length(dir);
-    vec3  tint = vec3(1.0);
-    if (dist <= 0.01)
-    {
-        return tint;
-    }
-    dir /= dist;
-    // Raze RT: rt_glass_shadow_debug (sunLeakDebugMul 3: every light that gets here red --
-    // is this reached at all; 2: green through a pane found, blue through a pane whose
-    // texel was taken for a hole)
-    if (globalUniform.sunLeakDebugMul > 2.5)
-    {
-        return vec3(1.0, 0.0, 0.0);
-    }
-    const bool dbg = globalUniform.sunLeakDebugMul > 1.5;
-    float from = 0.001;
-    // (all the world, not only the refractive instances: on Metal, glass that stays put
-    // is kept with the rest of the static geometry -- a ray for the refractive instances
-    // alone found none of it. Glass by its flags; anything else passed: the shadow ray
-    // already found the way open)
-    int panes = 0;
-    for (int i = 0; i < 8 && panes < 4; i++)
-    {
-        const ShPayload p = traceRayQuery(0, globalUniform.rayCullMaskWorld | INSTANCE_MASK_REFRACT, start, from, dir, dist);
-        if (p.instIdAndIndex == UINT32_MAX || p.geomAndPrimIndex == UINT32_MAX)
-        {
-            break;
-        }
-
-        int instanceId, customIndex;
-        unpackInstanceIdAndCustomIndex(p.instIdAndIndex, instanceId, customIndex);
-        int geomIndex, primIndex;
-        unpackGeometryAndPrimitiveIndex(p.geomAndPrimIndex, geomIndex, primIndex);
-
-        const uint baseVertex = geometryInstances[ instanceId ].baseVertexIndex;
-        const uint baseIndex  = geometryInstances[ instanceId ].baseIndexIndex;
-        const vec3 bc         = vec3(1.0 - p.baryCoords.x - p.baryCoords.y, p.baryCoords.x, p.baryCoords.y);
-        vec2 texCoord;
-        vec3 local;
-        if ((geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_IS_DYNAMIC) != 0)
-        {
-            const uvec3 vi = getVertIndicesDynamic(baseVertex, baseIndex, uint(primIndex));
-            texCoord = g_dynamicVertices[ vi[ 0 ] ].texCoord * bc[ 0 ] + g_dynamicVertices[ vi[ 1 ] ].texCoord * bc[ 1 ] +
-                       g_dynamicVertices[ vi[ 2 ] ].texCoord * bc[ 2 ];
-            local = g_dynamicVertices[ vi[ 0 ] ].position.xyz * bc[ 0 ] + g_dynamicVertices[ vi[ 1 ] ].position.xyz * bc[ 1 ] +
-                    g_dynamicVertices[ vi[ 2 ] ].position.xyz * bc[ 2 ];
-        }
-        else
-        {
-            const uvec3 vi = getVertIndicesStatic(baseVertex, baseIndex, uint(primIndex));
-            texCoord = g_staticVertices[ vi[ 0 ] ].texCoord * bc[ 0 ] + g_staticVertices[ vi[ 1 ] ].texCoord * bc[ 1 ] +
-                       g_staticVertices[ vi[ 2 ] ].texCoord * bc[ 2 ];
-            local = g_staticVertices[ vi[ 0 ] ].position.xyz * bc[ 0 ] + g_staticVertices[ vi[ 1 ] ].position.xyz * bc[ 1 ] +
-                    g_staticVertices[ vi[ 2 ] ].position.xyz * bc[ 2 ];
-        }
-        const bool isGlassHit = (geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_MEDIA_TYPE_GLASS) != 0;
-        if (isGlassHit)
-        {
-            panes++;
-            if (dbg && panes == 1)
-            {
-                tint = vec3(0.0, 1.0, 0.0);
-            }
-        }
-        const vec4 c = isGlassHit ? getTextureSample(geometryInstances[ instanceId ].texture_base, texCoord) *
-                                    unpackUintColor(geometryInstances[ instanceId ].colorFactor_base)
-                                  : vec4(0.0);
-        if (!isGlassHit)
-        {
-        }
-        else if (dbg)
-        {
-            if (c.a < 0.5) tint = vec3(0.0, 0.0, 1.0);
-        }
-        else if (c.a >= 0.5)
-        {
-            // as a view through it (RaygenPrimary.inl, glass)
-            const float m   = max(max(c.r, c.g), c.b);
-            const vec3  hue = c.rgb / max(m, 0.002);
-            tint *= mix(vec3(1.0), hue, 0.9) * smoothstep(0.015, 0.22, m);
-            if (max(max(tint.r, tint.g), tint.b) < 0.005)
-            {
-                return vec3(0.0);
-            }
-        }
-        // on past this pane
-        // (a dynamic geometry's vertices are in its own space; a static one's in the world's)
-        const vec3 hitPos = (geometryInstances[ instanceId ].flags & GEOM_INST_FLAG_IS_DYNAMIC) != 0
-                                ? transformBy(geometryInstances[ instanceId ], vec4(local, 1.0))
-                                : local;
-        from = dot(hitPos - start, dir) + 0.005;
-        if (from >= dist)
-        {
-            break;
-        }
-    }
-    return tint;
-}
-#endif
 #endif // LIGHT_SAMPLE_METHOD != LIGHT_SAMPLE_METHOD_NONE
 
 
@@ -873,7 +762,6 @@ Reservoir selectLight_Direct(const ivec2 pix, uint seed, uint saltBase,
     const float SPATIAL_RADIUS  = globalUniform.restirSpatialRadius;
 
     const ivec3 chRenderArea = getCheckerboardedRenderArea(pix); // assuming that pix is checkerboarded
-    const ivec3 chRenderAreaPrev = getCheckerboardedRenderArea_Prev(pix); // (the temporal tap's: the previous frame's size)
     const float motionZ = texelFetch(framebufMotion_Sampler, pix, 0).z;
     const float depthCur = texelFetch(framebufDepthWorld_Sampler, pix, 0).r;
     const vec2 posPrev = getPrevScreenPos(framebufMotion_Sampler, pix);
@@ -916,7 +804,7 @@ Reservoir selectLight_Direct(const ivec2 pix, uint seed, uint saltBase,
             const float depthPrev = texelFetch(framebufDepthWorld_Prev_Sampler, pp, 0).r;
             const vec3 normalPrev = texelFetchNormal_Prev(pp);
 
-            if (!testSurfaceForReuse(chRenderAreaPrev, pp, 
+            if (!testSurfaceForReuse(chRenderArea, pp, 
                                      depthCur, depthPrev - motionZ,
                                      surf.normal, normalPrev))
             {
@@ -1235,22 +1123,6 @@ void traceDirectIllumination( uint            seed,
 
         out_diffuse  *= visibility;
         out_specular *= visibility;
-
-    #if LIGHT_SAMPLE_METHOD == LIGHT_SAMPLE_METHOD_DIRECT
-        // Raze RT: through glass, its colour
-        // (only a spot light's or the sun's: Raze RT puts a window's light outside it as a spot
-        // -- the balls in rooms, a fire's flames, never shine through glass, and testing
-        // every one of them against the world doubled the direct light's cost by a fire)
-        if (visibility > 0.0 && globalUniform.sunLeakDebugMul > 0.5 &&
-            (reservoir.selected == LIGHT_ARRAY_DIRECTIONAL_LIGHT_OFFSET ||
-             lightSources[reservoir.selected].lightType == LIGHT_TYPE_SPOT ||
-             lightSources[reservoir.selected].lightType == LIGHT_TYPE_DIRECTIONAL))
-        {
-            const vec3 gt = glassTransmittance(surf.position + surf.toViewerDir * RAY_ORIGIN_LEAK_BIAS, light.position);
-            out_diffuse  *= gt;
-            out_specular *= gt;
-        }
-    #endif
 
     #if LIGHT_SAMPLE_METHOD == LIGHT_SAMPLE_METHOD_DIRECT
         out_distance = length(light.position - surf.position);

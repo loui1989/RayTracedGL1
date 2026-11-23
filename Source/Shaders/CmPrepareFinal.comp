@@ -476,18 +476,6 @@ void main()
     // project -- only RsRasterizerLensFlare.frag writes it, and the engine never
     // calls rgUploadLensFlare -- so this owns it. Written for EVERY pixel,
     // including the zero: nothing clears this buffer between frames.
-    // Raze RT: a sprite's picture changes as it animates (a candle's flames, a monster's
-    // frames) while the quad stays put, and its see-through edges are thin. The temporal
-    // upscaler took the change for motion of what it remembered: animated candelabras
-    // bobbed up and down under MetalFX. On sprites it leans on the current frame.
-    {
-        const ivec2 cbPix = getCheckerboardPix( pix );
-        if( imageLoad( framebufIsSky, cbPix ).r == 0 &&
-            ( imageLoad( framebufPrimaryToReflRefr, cbPix ).x & GEOM_INST_FLAG_SPRITE ) != 0 )
-        {
-            upscaleBias = max( upscaleBias, 0.6 );
-        }
-    }
     imageStore( framebufReactivity, pix, vec4( upscaleBias ) );
 
     // Seeing the mask is not optional. It is handed to a black box, so without
