@@ -171,10 +171,15 @@ void Utils::ASBuildMemoryBarrier( VkCommandBuffer cmd )
                             VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
 
-    // wait for all building
+    // wait for all building: before the top level's build (it reads the bottom
+    // levels) and before the path tracer's passes, which trace with ray queries
+    // from compute shaders -- with only the ray tracing stage here, they could
+    // run against an acceleration structure still being built
     vkCmdPipelineBarrier( cmd,
                           VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                          VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                              VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                           0,
                           1,
                           &barrier,
