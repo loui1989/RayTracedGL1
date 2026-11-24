@@ -881,6 +881,53 @@ void main()
 
 
 #ifdef RAYGEN_REFL_REFR_SHADER
+// Raze RT: the flat face of the surface seen at 'pix' (a window pane), from the positions
+// of its neighbouring pixels -- the normal without the bumps of its normal map. Where a
+// neighbour is off the pane (its edges), the shading normal 'n'.
+vec3 razeFlatNormal( const ivec2 pix, const vec3 n )
+{
+    const vec3 p  = texelFetch( framebufSurfacePosition_Sampler, pix, 0 ).xyz;
+    const vec3 px = texelFetch( framebufSurfacePosition_Sampler, pix + ivec2( 1, 0 ), 0 ).xyz;
+    const vec3 py = texelFetch( framebufSurfacePosition_Sampler, pix + ivec2( 0, 1 ), 0 ).xyz;
+    vec3        g = cross( px - p, py - p );
+    const float l = length( g );
+    if( l < 1e-12 )
+    {
+        return n;
+    }
+    g /= l;
+    if( dot( g, n ) < 0.0 )
+    {
+        g = -g;
+    }
+    return dot( g, n ) > 0.6 ? g : n;
+}
+
+// Raze RT: the flat face of the pane hit, from its triangle. (Its neighbours' positions on
+// screen, as razeFlatNormal read them, are written over by this same pass as it goes --
+// the hit behind the glass, for each pixel done -- so where a neighbour was done first the
+// face came out wrong, and so the bend: dotted lines in blocks across a stained glass
+// window, seen from some sides only.)
+vec3 razeGeomNormal( const ShPayload pl, const vec3 n )
+{
+    int instanceId, instCustomIndex, geomIndex, primIndex;
+    unpackInstanceIdAndCustomIndex( pl.instIdAndIndex, instanceId, instCustomIndex );
+    unpackGeometryAndPrimitiveIndex( pl.geomAndPrimIndex, geomIndex, primIndex );
+    const ShTriangle tr = getTriangle( instanceId, instCustomIndex, geomIndex, primIndex );
+    vec3        g = cross( tr.positions[ 1 ] - tr.positions[ 0 ], tr.positions[ 2 ] - tr.positions[ 0 ] );
+    const float l = length( g );
+    if( l < 1e-12 )
+    {
+        return n;
+    }
+    g /= l;
+    if( dot( g, n ) < 0.0 )
+    {
+        g = -g;
+    }
+    return g;
+}
+
 void main() 
 {
     RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
@@ -942,6 +989,9 @@ void main()
     float fullPathLength = firstHitDepthLinear;
     bool wasSplit = false;
     bool wasPortal = false;
+    // Raze RT: a camera's monitor: what it shows is a picture on the screen -- its depth,
+    // motion and haze are the screen's, not the far camera's room's
+    bool onScreen = false;
     vec3 virtualPos = h.hitPosition;
     vec3 rayDir = cameraRayDir;
     uint currentRayMedia = globalUniform.cameraMediaType;
@@ -1005,6 +1055,30 @@ void main()
 
         const vec3 normal =
             getNormal( h.hitPosition, hasNormalMap, h.normal, rayCone, rayDir, isWater, wasPortal );
+
+        // Raze RT: a window pane bends what is seen through it by its uneven surface (the
+        // bumps of its normal map, made larger), not by its flat faces -- a flat pane in and
+        // out again only shifts the view a little. In through the bumpy face, out through
+        // the flat one. (The pane seen directly only: positions of its neighbours.)
+        const bool razeGlass = i == 0 && newRayMedia == MEDIA_TYPE_GLASS &&
+                               ( h.geometryInstanceFlags & GEOM_INST_FLAG_THIN_MEDIA ) != 0;
+        vec3 razeFlat = normal, razeIn = normal;
+        if( razeGlass )
+        {
+            razeFlat = razeGeomNormal( currentPayload, normal );
+            // (at most about 20 degrees: the bump strength setting scales the normal map)
+            vec3        bend = ( normal - razeFlat ) * 3.0;
+            const float bl   = length( bend );
+            if( bl > 0.35 )
+            {
+                bend *= 0.35 / bl;
+            }
+            razeIn = normalize( razeFlat + bend );
+            if( dot( razeIn, -rayDir ) < 0.05 )
+            {
+                razeIn = normal;
+            }
+        }
 
         // Doom64-RT: stylized water. Only the FIRST hit, only a vacuum->water
         // crossing (i.e. looking at the surface from above, camera not
@@ -1248,10 +1322,30 @@ void main()
 
             // even pixels fall through to the reflection branch below
         }
-        else if (toRefract && calcRefractionDirection(curIndexOfRefraction, newIndexOfRefraction, rayDir, normal, refractionDir))
+        else if (toRefract && calcRefractionDirection(curIndexOfRefraction, newIndexOfRefraction, rayDir,
+                                                      razeGlass ? razeIn : normal, refractionDir))
         {
             doRefraction = isPixOdd;
             F = getFresnelSchlick(curIndexOfRefraction, newIndexOfRefraction, -rayDir, normal);
+            // Raze RT: a window pane's reflection, at most this strong (rt_glass_reflect, in
+            // sunLeakDebugMul's fraction: 0.4 = 1): at a slant the reflecting half of its
+            // pixels mirrored the room nearly fully, and the pixels in between left it as
+            // dotted lines across the glass (a carved wall's pattern on a stained glass
+            // window, from one side only). Faint, it is a sheen; 0: none, seen through on
+            // every pixel.
+            if( razeGlass )
+            {
+                const float razeReflCap = fract( globalUniform.sunLeakDebugMul ) / 0.4;
+                if( razeReflCap < 0.005 )
+                {
+                    doRefraction = true;
+                    doSplit      = false;
+                }
+                else
+                {
+                    F = min( F, razeReflCap );
+                }
+            }
         }
         else
         {
@@ -1266,6 +1360,18 @@ void main()
             rayDir = refractionDir;
             throughput *= (1 - F);
 
+            // Raze RT: glass takes the colour of its texture, texel by texel -- its hue
+            // filters the light that goes through it (stained glass), and its darker
+            // texels (the leading of a leaded window, a pane's frosting) let less
+            // through, so the picture stays. A pale, even pane stays clear. (Linear
+            // albedo: a mid-tone texel is about 0.2.)
+            if( newRayMedia == MEDIA_TYPE_GLASS )
+            {
+                const float m    = max( max( h.albedo.r, h.albedo.g ), h.albedo.b );
+                const vec3  hue  = h.albedo / max( m, 0.002 );
+                throughput *= mix( vec3( 1.0 ), hue, 0.9 ) * smoothstep( 0.015, 0.22, m );
+            }
+
             if( ( h.geometryInstanceFlags & GEOM_INST_FLAG_THIN_MEDIA ) != 0 )
             {
                 // simulate media, knowing its width along normal
@@ -1279,7 +1385,7 @@ void main()
                 if( calcRefractionDirection( newIndexOfRefraction,
                                              curIndexOfRefraction,
                                              rayDir,
-                                             normal,
+                                             razeGlass ? razeFlat : normal,
                                              refractionDir ) )
                 {
                     rayDir = refractionDir;
@@ -1289,6 +1395,44 @@ void main()
 
             // change media
             currentRayMedia = newRayMedia;
+        }
+        else if (isPortal && g_portals[h.portalIndex].outPosition.w > 0.0)
+        {
+            // Raze RT: a camera's monitor. The picture of a camera at outPosition looking along
+            // outDirection, as a TV shows it: the screen's point gives the camera's ray, whatever
+            // way the screen is looked at (not a window into the camera's room). outPosition.w:
+            // the camera's tan(half its field of view) over the screen's half width, per metre.
+            const ShPortalInstance portal = g_portals[h.portalIndex];
+
+            vec3 fwdIn = normalize( -normal );
+            if( dot( fwdIn, rayDir ) < 0.0 )
+            {
+                fwdIn = -fwdIn;
+            }
+            const vec3 rIn = normalize( cross( fwdIn, globalUniform.worldUpVector.xyz ) );
+            const vec3 uIn = cross( rIn, fwdIn );
+
+            const vec3 off = h.hitPosition - portal.inPosition.xyz;
+            const vec2 lo  = vec2( dot( off, rIn ), dot( off, uIn ) ) * portal.outPosition.w;
+
+            const vec3 fOut = normalize( portal.outDirection.xyz );
+            const vec3 rOut = normalize( cross( fOut, portal.outUp.xyz ) );
+            const vec3 uOut = cross( rOut, fOut );
+
+            rayDir    = normalize( fOut + lo.x * rOut + lo.y * uOut );
+            rayOrigin = portal.outPosition.xyz;
+
+            // the camera's own ray cone: from a point, as wide per pixel as the picture is
+            // magnified (the viewer's spread over the screen, times the camera's angle per metre
+            // of it) -- the viewer's cone, carried on, picked the textures' smallest mips: flat grey
+            rayCone.width       = 0.0;
+            rayCone.spreadAngle = globalUniform.cameraRayConeSpreadAngle * max( fullPathLength, 0.1 ) * portal.outPosition.w;
+
+            wasPortal = true;
+            onScreen  = true;
+            // (the screen itself glows nothing: what it shows is the light of the camera's room
+            // -- its own glow, added over the picture, was a grey veil)
+            screenEmission = vec3( 0.0 );
         }
         else if (isPortal)
         {
@@ -1317,7 +1461,12 @@ void main()
         {
             rayDir = reflect( normalize( rayDir ), shadeNormal );
 
-            if( !isWater && !polished )
+            if( razeGlass && !isWater && !polished )
+            {
+                // (Raze RT: a window pane: its reflection as strong as its capped Fresnel)
+                throughput *= F;
+            }
+            else if( !isWater && !polished )
             {
                 throughput *= getFresnelSchlick( max( 0, dot( normal, rayDir ) ),
                                                  getSpecularColor( h.albedo, h.metallic ) );
@@ -1352,6 +1501,8 @@ void main()
 
         float rayLen;
         vec3 scrEmis;
+        const vec2  screenMotion      = motionCurToPrev;
+        const float screenMotionDepth = motionDepthLinearCurToPrev;
 
         h = getHitInfoWithRayCone_ReflectionRefraction(
             currentPayload, rayCone, 
@@ -1367,7 +1518,16 @@ void main()
         hitInfoWasOverwritten = true;
         throughput *= getMediaTransmittance(currentRayMedia, rayLen);
         propagateRayCone(rayCone, rayLen);
-        fullPathLength += rayLen;
+        if( onScreen )
+        {
+            // (the picture moves with the screen)
+            motionCurToPrev            = screenMotion;
+            motionDepthLinearCurToPrev = screenMotionDepth;
+        }
+        else
+        {
+            fullPathLength += rayLen;
+        }
         screenEmission += scrEmis * throughput;
     }
 

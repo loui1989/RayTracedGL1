@@ -600,10 +600,22 @@ void main()
         // average to exactly the one-sample answer. The first sample's direction
         // is kept for the phase function; averaging directions would bend the
         // scattering lobe toward nothing in particular.
-        const uint sppN = inSmoke ? max( globalUniform.smokeSpp, 1u ) : 1u;
+        // Raze RT: ground fog's mist (Smoke.h) is soft and still -- a quarter of the
+        // smoke's samples (at least one); gun smoke keeps them all
+        const bool mistCell = g_smokeMist > 0.5 * smoke.a;
+        const uint sppN     = inSmoke ? max( mistCell ? globalUniform.smokeSpp / 4u : globalUniform.smokeSpp, 1u ) : 1u;
+
+        // Raze RT: a cell wholly behind the visible surface adds nothing to the frame
+        // (its lighting is gated to 0 below) and, with the raster path not reading the
+        // illumination volume, nothing else reads it: its history is carried, not
+        // re-estimated -- every light in the haze cost a light sample and a shadow ray
+        // in all 900 000 cells, 80-90% of them behind walls indoors. (The carried value
+        // keeps it converged for when it comes into view.)
+        const bool hiddenCell = depthGate <= 0.0 && globalUniform.illumVolumeEnable == 0 &&
+                                globalUniform.volumeShaftDebug == 0;
 
         vec3 estimate = vec3( 0.0 );
-        for( uint si = 0; si < sppN; si++ )
+        for( uint si = 0; si < ( hiddenCell ? 0u : sppN ); si++ )
         {
             uint sd = getRandomSeed( ivec2( cell.x + cell.z + int( si ) * 7,
                                             cell.y + 19 * cell.z + int( si ) * 13 ),
@@ -645,7 +657,7 @@ void main()
             }
         }
 
-        radiance += estimate / float( sppN );
+        radiance += hiddenCell ? radiance_Prev : estimate / float( sppN );
         // TRAP 2, the temporal blend. 0.05 is right for fog, which changes
         // only as fast as the player walks. A muzzle flash lasts 2-3 frames:
         // at 0.05 the volume needs ~0.7 s to respond and as long again to let
@@ -654,7 +666,8 @@ void main()
         // With a valid reprojected history the blend can be much lower, which is
         // the entire point of the change: more frames of averaging for the same
         // responsiveness. Without one, take the new estimate whole.
-        const float blend = !histValid ? 1.0
+        const float blend = hiddenCell ? 1.0
+                            : !histValid ? 1.0
                             : inSmoke  ? globalUniform.smokeIllumBlend
                                        : 0.05;
 
@@ -766,8 +779,10 @@ void main()
         if( total > 0.0 )
         {
             lighting -= globalUniform.volumeAmbient.rgb;
+            // (Raze RT: ground fog's mist, its own glow -- see Smoke.h)
             lighting += ( fogDens * globalUniform.volumeAmbient.rgb +
-                          smoke.a * vec3( globalUniform.smokeAmbient ) ) /
+                          ( smoke.a - g_smokeMist ) * vec3( globalUniform.smokeAmbient ) +
+                          vec3( g_smokeMistGlow ) ) /
                         total;
         }
     }
@@ -800,8 +815,9 @@ void main()
     // background brighter than itself. Fog keeps its pure scattering: this is
     // gated on the smoke density, so a cell without smoke stores exactly what
     // it stored before.
+    // (Raze RT: ground fog's mist scatters only: it does not absorb -- see Smoke.h)
     float absorbtion = globalUniform.smokeAbsorb > 0.0
-                           ? smoke.a * globalUniform.smokeAbsorb * 0.001
+                           ? max( smoke.a - g_smokeMist, 0.0 ) * globalUniform.smokeAbsorb * 0.001
                            : 0.0;
 
     // Doom64-RT: the shader-side probe. Deliberately AFTER the real medium, so

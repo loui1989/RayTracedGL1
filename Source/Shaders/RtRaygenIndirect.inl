@@ -313,12 +313,29 @@ bool testSurfaceForReuseIndirect(
 
 
 
+// Raze RT: globalUniform.indirectSamples 0 -- the bounce light's rays for half of the pixels
+// each frame, a checkerboard that alternates by frame (a thread a pixel of it: the pass is
+// dispatched half as wide). The other half reuse their neighbours' and their own previous
+// frame's samples (the final pass's spatial and temporal reuse), as ReSTIR does anyway.
+bool indirectSkipped( const ivec2 p )
+{
+    return globalUniform.indirectSamples == 0u && ( ( uint( p.x + p.y ) + globalUniform.frameId ) & 1u ) != 0u;
+}
+
 #ifdef RT_RAYGEN_INDIRECT_INIT
 void main()
 {
     RAYGEN_RETURN_IF_OUTSIDE( globalUniform.renderWidth, globalUniform.renderHeight, 1 );
 
-    const ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
+    if( globalUniform.indirectSamples == 0u )
+    {
+        pix.x = pix.x * 2 + int( ( uint( pix.y ) + globalUniform.frameId ) & 1u );
+        if( pix.x >= int( globalUniform.renderWidth ) )
+        {
+            return;
+        }
+    }
     const uint seed = getRandomSeed(pix, globalUniform.frameId);
     uint salt = RANDOM_SALT_RESAMPLE_INDIRECT_BASE;
 
@@ -420,16 +437,19 @@ void main()
     }
 
 
-    ReservoirIndirect combined = loadInitialSampleAsReservoir( pix );
+    // (a pixel without a new sample this frame: what it reuses only)
+    ReservoirIndirect combined = indirectSkipped( pix ) ? emptyReservoirIndirect() : loadInitialSampleAsReservoir( pix );
 
 
     // assuming that pix is checkerboarded
     const ivec3 chRenderArea = getCheckerboardedRenderArea( pix );
+    const ivec3 chRenderAreaPrev = getCheckerboardedRenderArea_Prev( pix ); // (the temporal taps')
     const float motionZ           = texelFetch( framebufMotion_Sampler, pix, 0 ).z;
     const float depthCur          = texelFetch( framebufDepthWorld_Sampler, pix, 0 ).r;
     const vec2  posPrev           = getPrevScreenPos( framebufMotion_Sampler, pix );
 
-    int spatialSamplesCount = int( SPATIAL_SAMPLES_INDIR * getDiffuseWeight( surf.roughness ) );
+    // (at half rate, half of the neighbours have no new sample: more of them are tried)
+    int spatialSamplesCount = int( ( globalUniform.indirectSamples == 0u ? 4 : SPATIAL_SAMPLES_INDIR ) * getDiffuseWeight( surf.roughness ) );
 
 
     for( int pixIndex = 0; pixIndex < TEMPORAL_SAMPLES_INDIR; pixIndex++ )
@@ -455,7 +475,7 @@ void main()
             const vec3  normalPrev = texelFetchNormal_Prev( pp );
 
             if( !testSurfaceForReuseIndirect(
-                    chRenderArea, pp, depthCur, depthPrev - motionZ, surf.normal, normalPrev ) )
+                    chRenderAreaPrev, pp, depthCur, depthPrev - motionZ, surf.normal, normalPrev ) )
             {
                 continue;
             }
@@ -510,7 +530,7 @@ void main()
             }
 
             {
-                if( isSkyPix( pp ) )
+                if( isSkyPix( pp ) || indirectSkipped( pp ) )
                 {
                     continue;
                 }

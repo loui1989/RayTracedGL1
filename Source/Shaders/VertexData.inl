@@ -532,7 +532,8 @@ ShTriangle getTriangle
     }
 
     tr.geometryInstanceFlags = inst.flags;
-    tr.portalIndex = 0;
+    // Raze RT: a portal's index (a camera's monitor), in the spare word of its geometry
+    tr.portalIndex = ( inst.flags & GEOM_INST_FLAG_PORTAL ) != 0 ? inst._padGi1 : PORTAL_INDEX_NONE;
 
     return tr;
 

@@ -760,6 +760,10 @@ ShHitInfo getHitInfoBounce(
 
     // METALLIC-ROUGHNESS
 
+    // Raze RT: the _orm's R, occlusion (1 = open). Darkens the surface's own glow --
+    // the faint ambient a Build game's rooms are given -- in its cracks and joints:
+    // light with no direction shows no bumps, but cavities still read as cavities
+    float occlusion = 1.0;
     if( tr.occlusionRougnessMetallicTexture != MATERIAL_NO_TEXTURE )
     {
         const vec3 orm =
@@ -771,6 +775,7 @@ ShHitInfo getHitInfoBounce(
             getTextureSampleLod( tr.occlusionRougnessMetallicTexture, texCoords[ 0 ], lod ).xyz;
     #endif
 
+        occlusion   = orm[ 0 ];
         h.roughness = stripRoughness ? 1.0 : orm[ 1 ];
         h.metallic  = stripMetallic ? 0.0 : orm[ 2 ];
         // a polished texture's _orm roughness is its mirror mask: smooth texels mirror, rough
@@ -915,7 +920,7 @@ ShHitInfo getHitInfoBounce(
     }
     else
     {
-        emission = h.albedo * tr.emissiveMult;
+        emission = h.albedo * tr.emissiveMult * occlusion;
 
 #if !SUPPRESS_TEXLAYERS
         // Thief RT: the level's ambient fill as the game's own light has it
@@ -929,7 +934,7 @@ ShHitInfo getHitInfoBounce(
             const vec3  tint   = mix( thiefTint, vec3( 1.0 ), thiefLit );
             const vec3  albedo =
                 mix( thiefAlbedo, vec3( dot( thiefAlbedo, lumaW ) ), thiefGrey * ( 1.0 - thiefLit ) );
-            emission = albedo * tr.emissiveMult * amount * tint;
+            emission = albedo * tr.emissiveMult * occlusion * amount * tint;
         }
 #endif
     }

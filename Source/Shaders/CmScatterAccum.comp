@@ -252,7 +252,7 @@ void main()
     // uncovers this pixel knows the value is the world's fog and accepts it.
     if( isFirstPerson )
     {
-        const ivec2 self = getRegularPixFromCheckerboardPix( pix );
+        const ivec2 self = getRegularPixScaledToPrev( getRegularPixFromCheckerboardPix( pix ) );
         accum      = texelFetch( framebufScattering_Prev_Sampler, self, 0 );
         historyLen = abs( texelFetch( framebufScatteringHistory_Prev_Sampler, self, 0 ).r );
         weightSum  = historyLen > 0.0 ? 1.0 : 0.0;
@@ -273,7 +273,7 @@ void main()
             // accepted on the frame the sprite uncovers it, which is the whole
             // point of carrying it. Its magnitude is a real history length.
             const float rawHistory = texelFetch( framebufScatteringHistory_Prev_Sampler,
-                                                 getRegularPixFromCheckerboardPix( xy ),
+                                                 getRegularPixFromCheckerboardPix_Prev( xy ),
                                                  0 )
                                          .r;
             const bool prevWasFirstPerson = rawHistory < 0.0;
@@ -295,12 +295,12 @@ void main()
                      testReprojectedNormal( normal, texelFetchNormal_Prev( xy ) );
             }
 
-            if( ok && testPixInRenderArea( xy, getCheckerboardedRenderArea( pix ) ) )
+            if( ok && testPixInRenderArea( xy, getCheckerboardedRenderArea_Prev( pix ) ) )
             {
                 const float weight = bilinearWeights[ yy ][ xx ];
 
                 accum += weight * texelFetch( framebufScattering_Prev_Sampler,
-                                              getRegularPixFromCheckerboardPix( xy ),
+                                              getRegularPixFromCheckerboardPix_Prev( xy ),
                                               0 );
                 historyLen += weight * abs( rawHistory );
                 weightSum += weight;
@@ -346,13 +346,13 @@ void main()
                          testReprojectedNormal( normal, texelFetchNormal_Prev( xy ) );
                 }
 
-                if( ok && testPixInRenderArea( xy, getCheckerboardedRenderArea( pix ) ) )
+                if( ok && testPixInRenderArea( xy, getCheckerboardedRenderArea_Prev( pix ) ) )
                 {
                     accum += texelFetch( framebufScattering_Prev_Sampler,
-                                         getRegularPixFromCheckerboardPix( xy ),
+                                         getRegularPixFromCheckerboardPix_Prev( xy ),
                                          0 );
                     historyLen += abs( texelFetch( framebufScatteringHistory_Prev_Sampler,
-                                                   getRegularPixFromCheckerboardPix( xy ),
+                                                   getRegularPixFromCheckerboardPix_Prev( xy ),
                                                    0 )
                                            .r );
                     weightSum += 1.0;
