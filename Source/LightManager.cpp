@@ -112,6 +112,23 @@ void RTGL1::LightManager::PrepareForFrame( VkCommandBuffer cmd, uint32_t frameIn
 
         vkCmdCopyBuffer(
             cmd, lightsBuffer->GetDeviceLocal(), lightsBuffer_Prev.GetBuffer(), 1, &info );
+
+        // (the frame's lights are copied over it later in the frame: not before
+        // this copy has read it -- and the shaders read the copy)
+        const VkMemoryBarrier2 afterCopy = {
+            .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+            .srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .dstStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT,
+        };
+        const VkDependencyInfo dep = {
+            .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers    = &afterCopy,
+        };
+        svkCmdPipelineBarrier2KHR( cmd, &dep );
     }
 
     memset( prevToCurIndex->GetMapped( frameIndex ),

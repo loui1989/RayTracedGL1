@@ -217,8 +217,22 @@ inline void Framebuffers::BarrierMultiple(
         };
     }
 
+    // Everything written before, not only the images named: the passes are
+    // compute shaders now (ray queries), and each reads more of the frame's
+    // images than its list names (the motion vectors, the sky mask, ...) --
+    // without this a pass could read one before the pass writing it was done
+    // (a GPU that overlaps dispatches: the frame's lighting smeared).
+    const VkMemoryBarrier2KHR everything = {
+        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2_KHR,
+        .srcStageMask  = srcStage,
+        .srcAccessMask = srcAccess,
+        .dstStageMask  = dstStage,
+        .dstAccessMask = dstAccess,
+    };
     VkDependencyInfoKHR dependencyInfo = {
         .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR,
+        .memoryBarrierCount      = 1,
+        .pMemoryBarriers         = &everything,
         .imageMemoryBarrierCount = tmpBarriers.size(),
         .pImageMemoryBarriers    = tmpBarriers.data(),
     };
