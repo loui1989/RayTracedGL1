@@ -444,12 +444,18 @@ void RTGL1::Swapchain::AcquireImage( bool          vsync,
                                                 VK_NULL_HANDLE,
                                                 &currentSwapchainIndex );
 
-            if( r == VK_SUCCESS )
+            // (suboptimal: an image was acquired and the semaphore will be
+            // signalled -- used as it is; the swapchain is made again at the
+            // next frame's TryRecreate if its size is wrong. Acquiring again
+            // signalled the semaphore twice and left the first image never
+            // presented: VUID-vkQueueSubmit-pSignalSemaphores-00067 and a
+            // non-acquired image used, under Windows)
+            if( r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR )
             {
                 break;
             }
 
-            if( r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR )
+            if( r == VK_ERROR_OUT_OF_DATE_KHR )
             {
                 TryRecreate( CalculateOptimalExtent( physDevice, surface ), //
                              m_vsync,
