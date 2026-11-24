@@ -160,7 +160,7 @@ void RTGL1::RestirBuffers::CreateDescriptors()
                     "Restir Indirect Desc set layout" );
 
     VkDescriptorPoolSize poolSize = {
-        .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .descriptorCount = std::size( bindings ) * MAX_FRAMES_IN_FLIGHT,
     };
 
