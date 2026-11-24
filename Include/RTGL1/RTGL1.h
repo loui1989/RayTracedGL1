@@ -65,7 +65,13 @@ typedef void CAMetalLayer;
     #include <xcb/xcb.h>
 #endif // RG_USE_SURFACE_XCB
 #ifdef RG_USE_SURFACE_XLIB
-    #include <X11/Xlib.h>
+    #ifdef RG_XLIB_FORWARD_TYPES
+        // (the library's own sources: X11's headers' macros clash with its names)
+        typedef struct _XDisplay Display;
+        typedef unsigned long    Window;
+    #else
+        #include <X11/Xlib.h>
+    #endif
 #endif // RG_USE_SURFACE_XLIB
 
 #ifdef __cplusplus

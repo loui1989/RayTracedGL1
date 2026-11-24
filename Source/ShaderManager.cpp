@@ -230,7 +230,8 @@ VkPipelineShaderStageCreateInfo ShaderManager::GetStageInfo( std::string_view na
 VkShaderModule ShaderManager::LoadModuleFromFile( const std::filesystem::path& path )
 {
     std::ifstream          shaderFile( path, std::ios::binary );
-    std::vector< uint8_t > shaderSource( std::istreambuf_iterator( shaderFile ), {} );
+    std::vector< uint8_t > shaderSource( ( std::istreambuf_iterator< char >( shaderFile ) ),
+                                        std::istreambuf_iterator< char >() );
 
     if( shaderSource.empty() )
     {

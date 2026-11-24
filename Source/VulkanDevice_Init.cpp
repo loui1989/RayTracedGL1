@@ -36,6 +36,20 @@
 #include <d3d12.h>
 #endif
 
+#ifdef RG_USE_SURFACE_XLIB
+// (X11 here only, after the library's own headers: its macros -- None, Bool,
+// Status, Always -- clash with names in them)
+#include <X11/Xlib.h>
+#include <vulkan/vulkan_xlib.h>
+#undef None
+#undef Bool
+#undef Status
+#undef Always
+#undef Success
+#undef True
+#undef False
+#endif
+
 namespace
 {
 
@@ -1025,6 +1039,20 @@ void RTGL1::VulkanDevice::CreateDevice()
         .variableMultisampleRate                 = 0,
         .inheritedQueries                        = 1,
     };
+    {
+        // (the core features only as far as the device has them: lavapipe has
+        // no depthBounds or inheritedQueries, which nothing here needs)
+        VkPhysicalDeviceFeatures has{};
+        vkGetPhysicalDeviceFeatures( physDevice->Get(), &has );
+        static_assert( sizeof( VkPhysicalDeviceFeatures ) % sizeof( VkBool32 ) == 0 );
+        auto*       want = reinterpret_cast< VkBool32* >( &features );
+        const auto* got  = reinterpret_cast< const VkBool32* >( &has );
+        for( size_t k = 0; k < sizeof( VkPhysicalDeviceFeatures ) / sizeof( VkBool32 ); k++ )
+        {
+            want[ k ] = want[ k ] && got[ k ];
+        }
+    }
+
 
     VkPhysicalDeviceRobustness2FeaturesEXT robustness = {
         .sType               = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
@@ -1199,7 +1227,13 @@ void RTGL1::VulkanDevice::CreateDevice()
     };
 
     VkResult r = vkCreateDevice( physDevice->Get(), &deviceCreateInfo, nullptr, &device );
-    VK_CHECKERROR( r );
+    if( r != VK_SUCCESS || device == VK_NULL_HANDLE )
+    {
+        // (a release build carried on with no device: the next call crashed)
+        throw RgException( RG_RESULT_GRAPHICS_API_ERROR,
+                           "vkCreateDevice failed (VkResult " + std::to_string( int( r ) ) +
+                               "): a device feature or extension it asks for is missing" );
+    }
 
     // Doom64-RT: retained for NRD/NRI (NrdDenoiser) -- same as the instance list.
     vkEnabledDeviceExtensions.assign( deviceExtensions.begin(), deviceExtensions.end() );

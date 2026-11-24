@@ -177,6 +177,11 @@ if (NOT RG_WITH_DX12)
         "Source/DX12_Vulkan.cpp")
     list(APPEND Sources "Source/NoDX12.cpp")
 endif()
+if (UNIX AND NOT APPLE)
+    # AMD FSR2's runtime is Windows DLLs: on Linux its slot is empty
+    list(REMOVE_ITEM Sources "Source/FSR2.cpp")
+    list(APPEND Sources "Source/FSR2_Unavailable.cpp")
+endif()
 if (APPLE AND NOT RG_WITH_METAL)
     # MetalFX: the temporal scaler in the FSR2 slot, the denoiser in the Ray Reconstruction one,
     # frame interpolation as frame generation
@@ -229,7 +234,10 @@ endif()
 if (RG_WITH_SURFACE_XLIB)
     message(STATUS "RG_WITH_SURFACE_XLIB enabled")
     add_definitions(-DRG_USE_SURFACE_XLIB)
-    add_definitions(-DVK_USE_PLATFORM_XLIB_KHR)
+    # (X11's headers only where the surface is made: their macros -- None,
+    # Bool, Status, Always -- are names the library uses)
+    # (VulkanDevice_Init.cpp includes them itself, after everything else)
+    add_definitions(-DRG_XLIB_FORWARD_TYPES)
 endif()
 
 

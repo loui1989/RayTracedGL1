@@ -50,7 +50,7 @@ auto Utils::FindBinFolder() -> std::filesystem::path
 #elif defined( __linux__ )
     wchar_t rtglDllPath[ PATH_MAX ]{};
     Dl_info dl_info{};
-    if( dladdr( ( void* )GetFolderPath, &dl_info ) )
+    if( dladdr( reinterpret_cast< void* >( &Utils::FindBinFolder ), &dl_info ) )
     {
         if( dl_info.dli_fname )
         {
